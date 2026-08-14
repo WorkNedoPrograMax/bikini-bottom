@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>UX Design Validation: Bikini Bottom</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --surface: #ffffff;
+    --border: #e7e5e4;
+    --text: #1c1917;
+    --muted: #78716c;
+
+    --verdict-strong: #16a34a;
+    --verdict-adequate: #65a30d;
+    --verdict-thin: #d97706;
+    --verdict-broken: #dc2626;
+
+    --sev-low: #64748b;
+    --sev-medium: #ca8a04;
+    --sev-high: #ea580c;
+    --sev-critical: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  .status-note {
+    background: #fefce8;
+    border: 1px solid #facc15;
+    border-radius: 8px;
+    padding: 12px 18px;
+    margin-bottom: 20px;
+    font-size: 14.5px;
+    font-weight: 500;
+  }
+
+  header.report-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+  .title h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .title .subtitle { color: var(--muted); font-size: 13px; margin-top: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  .synthesis {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: 8px;
+    padding: 18px 22px;
+    margin-bottom: 24px;
+    font-size: 15.5px;
+  }
+  .synthesis p { margin: 0 0 10px; }
+  .synthesis p:last-child { margin-bottom: 0; }
+
+  .dimension-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+  .dim-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .dim-card .dim-name { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .dim-card .dim-verdict { font-size: 14px; font-weight: 600; }
+
+  section.dimension, section.reviewer-section { margin-bottom: 14px; }
+  section.dimension details, section.reviewer-section details {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  section summary {
+    padding: 14px 20px;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  section summary::-webkit-details-marker { display: none; }
+  section summary::before {
+    content: "▸";
+    display: inline-block;
+    color: var(--muted);
+    transition: transform 0.15s ease;
+  }
+  section details[open] summary::before { transform: rotate(90deg); }
+  section summary h2 {
+    display: inline;
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    flex: 1;
+  }
+  .verdict-pill {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: white;
+  }
+  .verdict-strong { background: var(--verdict-strong); }
+  .verdict-adequate { background: var(--verdict-adequate); }
+  .verdict-thin { background: var(--verdict-thin); }
+  .verdict-broken { background: var(--verdict-broken); }
+
+  .dim-body { padding: 4px 20px 18px; }
+  .dim-judgment { color: var(--text); font-size: 14.5px; }
+  .dim-judgment p { margin: 0 0 10px; }
+
+  .findings-list { padding: 0 20px 4px; }
+  article.finding {
+    padding: 14px 0;
+    border-top: 1px solid var(--border);
+  }
+  article.finding:first-child { border-top: none; }
+  article.finding header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .badge {
+    font-size: 10.5px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    line-height: 1.4;
+  }
+  .badge-sev-low { background: rgba(100, 116, 139, 0.12); color: var(--sev-low); }
+  .badge-sev-medium { background: rgba(202, 138, 4, 0.14); color: var(--sev-medium); }
+  .badge-sev-high { background: rgba(234, 88, 12, 0.14); color: var(--sev-high); }
+  .badge-sev-critical { background: rgba(220, 38, 38, 0.14); color: var(--sev-critical); }
+  .finding-title { margin: 0; font-size: 15px; font-weight: 500; flex: 1; min-width: 200px; }
+  .finding-location { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; color: var(--muted); }
+  .finding-note, .finding-fix { margin-top: 6px; font-size: 14px; }
+  .finding-fix strong { color: var(--muted); font-weight: 500; }
+
+  .reviewer-source {
+    font-size: 12px;
+    color: var(--muted);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  .mechanical {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-top: 24px;
+    font-size: 14px;
+  }
+  .mechanical h3 { margin: 0 0 10px; font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .mechanical ul { margin: 0; padding-left: 20px; }
+  .mechanical li { margin-bottom: 4px; color: var(--text); }
+
+  footer.report-footer {
+    margin-top: 40px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  footer .meta { display: flex; gap: 24px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+  <div class="container">
+
+    <div class="status-note">
+      Panel findings are being applied — the spines and mocks are being fixed in the same session; this report records what the panel found.
+    </div>
+
+    <header class="report-header">
+      <div class="title">
+        <h1>Bikini Bottom — UX Design Validation Report</h1>
+        <div class="subtitle">{output_folder}/planning-artifacts/ux-designs/ux-bikini-bottom-2026-07-12/ — DESIGN.md + EXPERIENCE.md</div>
+      </div>
+    </header>
+
+    <div class="synthesis">
+      <p>A builder can work from this pair of documents with high confidence: every design token they mention actually exists, every color carries a real value, the capture of the reference mockup is faithful to a degree rarely seen (positions, timings, corner radii, even the 0.55-second voice stagger all check out), and the names for things match the PRD word-for-word. Two gaps have real downstream cost: the Character picker — the one screen element the PRD explicitly asked UX to design — has rules for how it behaves but no committed picture of how it looks, and all four working scene mocks are orphans that neither document links, including the one that does show the picker. Fix those two, resolve the wooden-vs-accent button contradiction, and this pair is a clean contract for architecture and story development.</p>
+      <p>The three-person panel sharpened that picture in one important way: the scene mocks are not just unlinked — two of them quietly contradict trust rules Maksym already decided. The send-back mock adds a "Looks good" approval button that turns automatic serving back into the sign-off gate that was explicitly rejected, and kills the undo the product promises on every order. The first-run mock gets its gating exactly backwards — it holds the front door hostage until notifications are allowed, while letting the one genuinely required step (picking the project folder) be skipped. Beyond the mocks, the panel found that the hardest moment in the product — two Characters' work colliding at landing — was never designed at all, and that the product's core "red dot clears when you've seen the result" rule is currently defined three different, conflicting ways across the spine and its own mock. All of these are one-decision fixes, not redesigns, and they are being applied now.</p>
+    </div>
+
+    <div class="dimension-summary">
+      <div class="dim-card">
+        <div class="dim-name">Flow coverage</div>
+        <div class="dim-verdict" style="color: var(--verdict-strong)">strong</div>
+      </div>
+      <div class="dim-card">
+        <div class="dim-name">Token completeness</div>
+        <div class="dim-verdict" style="color: var(--verdict-strong)">strong</div>
+      </div>
+      <div class="dim-card">
+        <div class="dim-name">Component coverage</div>
+        <div class="dim-verdict" style="color: var(--verdict-adequate)">adequate</div>
+      </div>
+      <div class="dim-card">
+        <div class="dim-name">State coverage</div>
+        <div class="dim-verdict" style="color: var(--verdict-adequate)">adequate</div>
+      </div>
+      <div class="dim-card">
+        <div class="dim-name">Visual reference coverage</div>
+        <div class="dim-verdict" style="color: var(--verdict-broken)">broken</div>
+      </div>
+      <div class="dim-card">
+        <div class="dim-name">Bloat &amp; overspecification</div>
+        <div class="dim-verdict" style="color: var(--verdict-strong)">strong</div>
+      </div>
+      <div class="dim-card">
+        <div class="dim-name">Inheritance discipline</div>
+        <div class="dim-verdict" style="color: var(--verdict-strong)">strong</div>
+      </div>
+      <div class="dim-card">
+        <div class="dim-name">Shape fit</div>
+        <div class="dim-verdict" style="color: var(--verdict-strong)">strong</div>
+      </div>
+    </div>
+
+    <section class="dimension">
+      <details>
+        <summary>
+          <h2>Flow coverage</h2>
+          <span class="verdict-pill verdict-strong">strong</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>All four PRD user journeys are present with titles verbatim from PRD §2.2, Maksym as protagonist, numbered steps, and explicit Climax beats. UJ-1 has a failure path; UJ-3 and UJ-2 carry their "ignored/unresolved" branches inline; UJ-4 is the failure flow. Three new flows (First Run, Send-it-back, Cancel) follow the same discipline. The quit/relaunch resume path is covered in State Patterns rather than as a flow — acceptable placement.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">FR-13's conversation-lifecycle rule is missing</h3>
+              <span class="finding-location">EXPERIENCE.md IA / State Patterns; prd.md FR-13</span>
+            </header>
+            <div class="finding-note">The PRD says a follow-up continues the same conversation but a new Job from Home Base starts a fresh conversation, with the old outcome kept as board history. EXPERIENCE.md mentions follow-ups only in passing — the fresh-conversation reset and what Maksym sees when it happens appear nowhere. Story-dev will have to go back to the PRD and invent the surface behavior.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Add a Component Patterns row (or a short Key Flow) for follow-up vs. new-Job: what the Work Window shows when a new Job wipes the chat, and where the old conversation goes.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">FR-16's landing collision has no experience treatment</h3>
+              <span class="finding-location">EXPERIENCE.md Key Flows (absent); prd.md FR-16</span>
+            </header>
+            <div class="finding-note">The PRD requires a collision at landing to present as a plain-language choice in the chat, with the Character pausing and going Calling. EXPERIENCE.md covers only the Send-it-back entanglement case; the collision-at-landing bubble — its copy shape, its Calling trigger, its board status while paused — is unspecified.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One row or one flow-step: "Landing collision → Character goes Calling, order WAITING, one either/or bubble; either pick lands consistently."</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <section class="dimension">
+      <details>
+        <summary>
+          <h2>Token completeness</h2>
+          <span class="verdict-pill verdict-strong">strong</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>Every YAML token in DESIGN.md frontmatter and every <code>{path.to.token}</code> reference in both spines resolves; ~40 values spot-checked against <code>mockup/bikini-town.html</code> CSS. All 38 color tokens carry hex values; no dangling paths in either file. Mockup capture is verbatim: colors, radii, actor positions, animation timings, the 0.55s Voice Line stagger all match. The unassigned <code>harbor-blue</code> is documented in prose — good discipline.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">No contrast target is stated for any load-bearing combination</h3>
+              <span class="finding-location">DESIGN.md Colors; EXPERIENCE.md Accessibility Floor</span>
+            </header>
+            <div class="finding-note">E.g. the paper-sub subtitle (#7a5c26) at 12px on the paper gradient, the four status inks on paper, caption-glow on deep-sea. The floor is internally consistent — it never claims a contrast bar — but a consumer restyling any surface has no floor to verify against.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One sentence in the Accessibility Floor or DESIGN.md Colors: minimum contrast for board text/status words and chat ink against their papers.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">spacing.1 and spacing.2 are defined but never referenced</h3>
+              <span class="finding-location">DESIGN.md frontmatter, spacing block</span>
+            </header>
+            <div class="finding-note">4px and 8px steps carry no reference from prose or any component token, and unlike harbor-blue no "kept deliberately" note.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Reference them (e.g. label gap 4px, bubble padding) or note them as reserved scale steps.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">A few needed mockup values aren't tokenized or stated</h3>
+              <span class="finding-location">DESIGN.md Components/Typography vs mockup CSS</span>
+            </header>
+            <div class="finding-note">Top-button font-size (14px), street speech-bubble text size (clamp(10px,1.3vw,13px)), menu subtitle size (12px) — DESIGN.md names these elements but not those sizes.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Add the three sizes to the typography block or component tokens.</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <section class="dimension">
+      <details>
+        <summary>
+          <h2>Component coverage</h2>
+          <span class="verdict-pill verdict-adequate">adequate</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>Solid on both visual and behavioral sides for: Actor, Unseen Dot, speech bubble, wooden top button, Orders Board, Work Window, chat bubbles, input bar, in-chat action buttons, folded technical detail, notification content. Gaps cluster around components EXPERIENCE.md invented that DESIGN.md never dressed.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">The Character picker has no visual spec in DESIGN.md</h3>
+              <span class="finding-location">DESIGN.md Components (absent); prd.md FR-15 note; .working/mock-handout.html</span>
+            </header>
+            <div class="finding-note">The PRD explicitly assigns this design to UX. EXPERIENCE.md gives full behavioral rules and mock-handout.html designs it visually (96px chips, #fffaf0 card, 2px #3a2c14 border, radius 14px, grayscale busy, picked outline) — but DESIGN.md Components has no row, so the one component with no mockup precedent is exactly the one with no committed visual contract.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Add a "Crew chip / Character picker" row to DESIGN.md Components, promoting the mock-handout chip treatment to spec.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">"Cancel this order" has behavioral rules but no visual definition</h3>
+              <span class="finding-location">EXPERIENCE.md Component Patterns "Cancel an order"; DESIGN.md (absent)</span>
+            </header>
+            <div class="finding-note">DESIGN.md never says what a "quiet affordance near the input bar" looks like (text link? small wood button? which font?), and its placement is itself tagged [ASSUMPTION].</div>
+            <div class="finding-fix"><strong>Fix:</strong> One line in DESIGN.md Components committing its form.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">The volume slider has no visual spec</h3>
+              <span class="finding-location">EXPERIENCE.md "Mute / volume"</span>
+            </header>
+            <div class="finding-note">The only slider in the product, in a world with no slider vocabulary.</div>
+            <div class="finding-fix"><strong>Fix:</strong> A token-level note (wood track? parchment?) or simplify to mute-toggle-only in v1.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">Disabled state for in-chat action buttons is behavioral only</h3>
+              <span class="finding-location">EXPERIENCE.md "Allow / Deny"; DESIGN.md action-button tokens</span>
+            </header>
+            <div class="finding-note">No visual treatment in DESIGN.md; the mocks improvise <code>opacity:.45; grayscale(.6)</code>.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Add a disabled appearance to the action-button component tokens.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">First Run chrome (stepper, progress dots, green done-state) is unspecced</h3>
+              <span class="finding-location">DESIGN.md (absent); .working/mock-firstrun.html</span>
+            </header>
+            <div class="finding-note">The mock introduces step navigation, progress dots, and a green "done" wood-button state (#6f9a4e); the flow implies sequential steps but commits no navigation model.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Either spec the stepper or state that First Run is one continuous Krabs conversation with no stepper (which the flow prose suggests).</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <section class="dimension">
+      <details>
+        <summary>
+          <h2>State coverage</h2>
+          <span class="verdict-pill verdict-adequate">adequate</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>Strong coverage of the hard ones: empty board copy, quit/crash/sleep and relaunch resume, reduced-motion with the never-motion-only guarantee, dot persistence across restart, mute persistence, focus ring, M-key suppression while typing. Remaining gaps are quieter states the mocks and flows step around.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">Notification permission denied is unhandled</h3>
+              <span class="finding-location">EXPERIENCE.md First Run flow step 4; prd.md FR-7</span>
+            </header>
+            <div class="finding-note">First Run triggers the macOS dialog, but nothing says what happens if Maksym declines — and FR-7's notification click-through is a primary reentry path. The sound/notification matrix assumes notifications always fire.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One line: denied → Voice Lines and street signals carry the load; where (if anywhere) Krabs mentions it can be re-enabled.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">Home Base with zero Idle Characters is unspecified</h3>
+              <span class="finding-location">EXPERIENCE.md "Character picker"; UJ-1 failure</span>
+            </header>
+            <div class="finding-note">Every chip grayed — what does Krabs say, and is the input bar hidden?</div>
+            <div class="finding-fix"><strong>Fix:</strong> One Voice-and-Tone line, e.g. "Whole crew's busy — check the board."</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">The Work Window's fresh state for a never-used Character is unspecified</h3>
+              <span class="finding-location">EXPERIENCE.md IA / State Patterns</span>
+            </header>
+            <div class="finding-note">No Job ever handed — empty parchment, or a greeting bubble? No state row covers it.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One State Patterns row.</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <section class="dimension">
+      <details open>
+        <summary>
+          <h2>Visual reference coverage</h2>
+          <span class="verdict-pill verdict-broken">broken</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>Each visual artifact should be linked inline at the relevant spine section, with a statement of what it illustrates and a single spines-win-on-conflict rule. Of the five visual artifacts (<code>mockup/bikini-town.html</code> + the four <code>.working/</code> mocks), only <code>bikini-town.html</code> is referenced anywhere.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">All four .working/ mocks are orphans</h3>
+              <span class="finding-location">.working/mock-{handout,firstrun,burned,sendback}.html; both spines</span>
+            </header>
+            <div class="finding-note">Each illustrates exactly one spine section (Character picker / UJ-1, First Run flow, UJ-4 + BURNED board line, Send-it-back flow), and neither spine links any of them. A consumer reading the contract will never find the only visual definition of the picker, the BURNED status in situ, or the serve/send-back bubble pattern.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Promote them to <code>mockups/</code> and add one "→ Composition reference: … Spine wins on conflict." line at each of the four sections.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">Precedence is stated ambiguously, and never as a rule</h3>
+              <span class="finding-location">DESIGN.md Brand &amp; Style; EXPERIENCE.md "Orders Board toggle"</span>
+            </header>
+            <div class="finding-note">DESIGN.md calls the mockup "binding" while EXPERIENCE.md deliberately overrides mockup behavior in at least one place (board line click-through). Both are reasonable — capture visuals, override behavior — but no sentence says which document wins when they diverge.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One statement, once: "The mockup binds the look; these spines bind the behavior; on conflict the spines win."</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">mock-sendback.html diverges from the committed contract in product behavior, unflagged</h3>
+              <span class="finding-location">.working/mock-sendback.html vs EXPERIENCE.md State Patterns FR-4; DESIGN.md "In-chat action buttons"</span>
+            </header>
+            <div class="finding-note">It adds a "👍 Looks good" approve button and clears the dot on button press, while the spine commits to passive resolution (result seen when scrolled into view — no approve affordance exists in either spine); the burned/sendback mocks also render all choice buttons as plain wood while DESIGN.md specs Allow/Try-again as accent-filled. Harmless while the mocks stay in .working/, but promoted as-is they contradict FR-4 semantics and the button spec.</div>
+            <div class="finding-fix"><strong>Fix:</strong> When promoting, either annotate the divergences or bring the mocks in line.</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <section class="dimension">
+      <details>
+        <summary>
+          <h2>Bloat &amp; overspecification</h2>
+          <span class="verdict-pill verdict-strong">strong</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>Both spines are ~16KB and dense with load-bearing decisions; assumption-tagging is disciplined and every [ASSUMPTION] commits an actual value (retention cap 10, 0.55s stagger, BURNED #3a3a3a) rather than deferring. Actor percentage positions and animation timings flirt with implementation detail but are justified by the capture-the-binding-mockup charter. No findings.</p>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="dimension">
+      <details>
+        <summary>
+          <h2>Inheritance discipline</h2>
+          <span class="verdict-pill verdict-strong">strong</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>Sources resolve; UJ titles are verbatim from PRD §2.2; FR numbers are used consistently and the IA "Realizes" column maps correctly; all fifteen Glossary terms are used verbatim and capitalized in both spines. The four review-finding IDs cited in EXPERIENCE.md all resolve to real findings in the PRD-side review.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">EXPERIENCE.md calls every in-chat choice a "wooden button"; DESIGN.md specs Allow/Try-again as accent-filled</h3>
+              <span class="finding-location">EXPERIENCE.md UJ-3, UJ-4, Component Patterns vs DESIGN.md "In-chat action buttons"</span>
+            </header>
+            <div class="finding-note">A consumer reading EXPERIENCE.md alone builds all-wood buttons — exactly what the working mocks did.</div>
+            <div class="finding-fix"><strong>Fix:</strong> In EXPERIENCE.md, replace "wooden buttons" with "action buttons (per DESIGN.md)" in the four places.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">Review IDs are cited without a path</h3>
+              <span class="finding-location">EXPERIENCE.md ("review C-1", "review M-1", …)</span>
+            </header>
+            <div class="finding-note">They resolve only if the reader knows to look in the PRD folder's review-ux-sally.md.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Name the file once at first citation.</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <section class="dimension">
+      <details>
+        <summary>
+          <h2>Shape fit</h2>
+          <span class="verdict-pill verdict-strong">strong</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>DESIGN.md carries all eight canonical sections in order. EXPERIENCE.md carries all required defaults; Responsive &amp; Platform is correctly omitted for a fixed-size single-window desktop app, and Inspiration &amp; Anti-patterns is omitted with its job done elsewhere. Invented additions earn their place: the IA "Realizes" column, the sound &amp; notification matrix, and the quit/relaunch block. No findings.</p>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="reviewer-section">
+      <details>
+        <summary>
+          <h2>UX review — Sally (UX Designer)</h2>
+          <span class="reviewer-source">review-ux-sally.md · 2 critical / 3 high / 6 medium / 4 low</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>"The spines are the film I asked for — but two of the four new mocks quietly rewrite the trust rules the spines got right. Reconcile before anything is built." Sally's PRD review asked for an opening scene, an honest dot, a failure beat, and quiet controls — the spines delivered all four and more, addressing every one of her earlier findings by name. But the four new mocks in .working/ were shot from the same script, and in two scenes the actors improvised new rules at exactly the two moments where trust is the whole point: the send-back undo and the first-run permission ask. A literal-minded implementer now has two truths in both places.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-critical">critical</span>
+              <h3 class="finding-title">C-1. "Looks good" kills "Send it back" — the undo promise breaks on screen</h3>
+              <span class="finding-location">mock-sendback.html vs EXPERIENCE §State Patterns FR-4, §UJ-2, §Send-it-back flow; PRD FR-16</span>
+            </header>
+            <div class="finding-note">Click "Looks good" and the mock disables both buttons — the order becomes irreversible in the very scene whose caption promises "the project returns to exactly how it was." A second contradiction hides in the same click: the spine says a finished result resolves when it is <em>seen</em>; the mock demands an explicit acknowledgment click before the dot clears, and the "Looks good" affordance exists in no spine section at all. The pair's most important trust rule now has two versions: spine says reading resolves, mock says clicking resolves and clicking also destroys the undo.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Pick one (Sally's call: keep the spine's reading rule; if "Looks good" survives, it must never disable Send it back) — the artifacts must say the same thing.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-critical">critical</span>
+              <h3 class="finding-title">C-2. First Run holds the town hostage for a notification permission</h3>
+              <span class="finding-location">mock-firstrun.html vs EXPERIENCE §First Run flow steps 2–4</span>
+            </header>
+            <div class="finding-note">"Open the town!" is disabled until "Allow notifications" is clicked — no "not now," no path for macOS itself saying no. A cozy welcome that won't open the door until you agree to be contacted is a dark pattern wearing a Krabs costume — and if the OS denies, the walkthrough can never finish. Meanwhile "Next →" happily skips step 2 without a folder picked: the one actually mandatory input (the Project) is optional while the genuinely optional one (notifications) is mandatory. The gating is exactly inverted.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Folder gates completion; notifications get a "maybe later" that still opens the town; a denied-permission end-state exists in both artifacts.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-1. Nobody wrote the scene where Maksym walks out mid-welcome</h3>
+              <span class="finding-location">EXPERIENCE §First Run flow, §Interaction Primitives; mock-firstrun.html</span>
+            </header>
+            <div class="finding-note">He picks his folder, then quits before the notification beat — on relaunch does First Run resume, restart, or never return, leaving a town with a half-configured Project? Can Esc dismiss the First Run window into a dimmed, Project-less street? First Run is one scene, but interruption makes it four; only the happy path is scripted.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Script the interruption cases: resume point, folder persistence, Esc behavior, and what the dimmed street does before a Project exists.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-2. Retired orders have no status word — and the mock invented one</h3>
+              <span class="finding-location">EXPERIENCE §State Patterns FR-10, §Cancel flow, §UJ-4; mock-sendback.html; DESIGN §Colors</span>
+            </header>
+            <div class="finding-note">The board's painted vocabulary is WAITING / COOKING / SERVED / BURNED, full stop — yet scrapped lines "stay visible," cancelled lines "retire," and mock-sendback answers with a status the design system doesn't own: "taken back." At least three end-states with zero specced ink; the unassigned harbor-blue token smells like this exact hole waiting for paint.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Decide the words and the color (one shared "retired" word is fine) and put them in both spines, or the board will grow ad-hoc statuses in code.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-3. The First Run mock dropped the assets beat and added wizard furniture</h3>
+              <span class="finding-location">mock-firstrun.html vs EXPERIENCE §First Run flow step 5</span>
+            </header>
+            <div class="finding-note">The spine's "Got pictures and voices for the crew?" beat — the asset-discoverability fix — is missing from the mock's three steps; if the mock is the beat sheet, the fix silently un-ships and Maksym never learns where his pictures live. In its place: Back/Next buttons and "● ○ ○" progress dots — settings-wizard furniture in the one scene the PRD swore is "a scene, not a settings form."</div>
+            <div class="finding-fix"><strong>Fix:</strong> Restore the beat; decide the nav's fate explicitly (the spine's Krabs-conversation version needs no Next button at all).</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-1. A fresh order is WAITING in one paragraph and COOKING in the next</h3>
+              <span class="finding-location">EXPERIENCE §State Patterns FR-10 vs §UJ-1 step 5; mock-handout.html</span>
+            </header>
+            <div class="finding-note">The lifecycle line reads "WAITING (handed out or paused for Maksym's OK) → COOKING," but UJ-1's climax says the freshly handed-out order is already COOKING, and mock-handout agrees.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Either a handed-out order visibly passes through WAITING (say for how long and what flips it) or it's born COOKING (then WAITING means only "paused for OK" and the lifecycle line should say so).</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-2. DESIGN paints affirmative buttons in character accents; all four mocks paint everything wood</h3>
+              <span class="finding-location">DESIGN §Components in-chat action buttons; all four mocks</span>
+            </header>
+            <div class="finding-note">Two truths again. Wood-everywhere is honestly calm and Sally could be argued into it, but then DESIGN must change; as written, the mocks violate the spec they're meant to demonstrate.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One decision, applied to both.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-3. One state, three vocabularies</h3>
+              <span class="finding-location">mock-handout.html chips vs EXPERIENCE §Component Patterns vs street labels</span>
+            </header>
+            <div class="finding-note">A Working SpongeBob is "working…" on the street and "cooking…" in the picker, ten feet apart; the mock's chips also say "calling you" where the spine says "calling."</div>
+            <div class="finding-fix"><strong>Fix:</strong> Extend the glossary discipline to state words: pick one set, use it everywhere.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-4. UJ-1's failure beat can't happen in the mock's staging</h3>
+              <span class="finding-location">EXPERIENCE §UJ-1 failure vs mock-handout.html</span>
+            </header>
+            <div class="finding-note">The spine scripts "sending with no Character picked → Krabs asks 'Which of me crew is this for?'" but the mock hides the input bar entirely until a character is picked — the failure is unreachable. Arguably better UX, but then the spine's failure beat is dead copy.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Say which staging is real.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-5. Relaunch resume is a fourth kind of Calling the sound matrix never scored</h3>
+              <span class="finding-location">EXPERIENCE §App quit/relaunch vs §Sound &amp; notification matrix</span>
+            </header>
+            <div class="finding-note">The matrix defines Voice Lines and notifications for exactly three Calling causes. Does app launch with three paused lanes open on a staggered three-voice chorus plus three notifications before Maksym has clicked anything? A cozy morning should probably open quiet.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Add the fourth row to the matrix.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-6. The world after "no" to notifications doesn't exist</h3>
+              <span class="finding-location">EXPERIENCE §First Run step 4, §Sound &amp; notification matrix; mock-firstrun.html</span>
+            </header>
+            <div class="finding-note">Nothing specs the app in a notifications-denied life: FR-7's "arrives even in background" silently fails and SM-2's "nothing missable" now rests entirely on the dot — fine, but say it.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Spec the degraded state and decide whether Krabs ever gently re-offers ("If ye change yer mind, holler" is one line, in-world).</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-1. Busy-chip reasons are hover-only tooltips — banned by the spine's own primitives</h3>
+              <span class="finding-location">mock-handout.html title attributes vs EXPERIENCE §Interaction Primitives</span>
+            </header>
+            <div class="finding-note">"SpongeBob is busy cooking" lives in a hover-only tooltip, which the spine explicitly bans.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Cut the tooltips or make the chip say why on click (a Krabs bubble), not on hover.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-2. The volume slider skirts the same ban</h3>
+              <span class="finding-location">EXPERIENCE §Component Patterns mute/volume</span>
+            </header>
+            <div class="finding-note">Long-hover and secondary-click are both on the spine's own banned list one section later.</div>
+            <div class="finding-fix"><strong>Fix:</strong> A plain click cycling mute, with the slider inside a small popover on the same click, keeps it legal and simpler.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-3. The header dot in mock-sendback is lovely and homeless</h3>
+              <span class="finding-location">mock-sendback.html header vs DESIGN §Unseen Dot; EXPERIENCE §State Patterns</span>
+            </header>
+            <div class="finding-note">The mock puts a pulsing Unseen Dot on the Work Window's header portrait; DESIGN pins the dot to the street actor only, and no spine sentence brings it indoors. Unspecced coral is exactly how the "coral = dot only" law erodes.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Spec it (with the same resolve rule and reduced-motion behavior) or cut it.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-4. Small copy drift between spine and mocks</h3>
+              <span class="finding-location">EXPERIENCE §UJ-1, §Component Patterns vs mock-handout.html, mock-burned.html</span>
+            </header>
+            <div class="finding-note">"Tell Patrick the job…" vs "Tell Patrick what to do…"; "Scrap it" vs "Scrap this order." Trivial individually, but this project's whole voice depends on verbatim discipline.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Align them when the bigger findings are settled.</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <section class="reviewer-section">
+      <details>
+        <summary>
+          <h2>Architecture review — Winston (System Architect)</h2>
+          <span class="reviewer-source">review-architect-winston.md · 2 critical / 4 high / 5 medium / 6 low</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>"This spine is better than most: the component table gives behavioral rules, not vibes; the sound matrix is a real matrix; the ASSUMPTION tags are honest." What remains is a different class of problem: the spine makes event-level promises ("dot clears when the result is seen," "work stops within seconds," "silently prepares the folder") whose resolving events are either undefined, defined two contradictory ways, or defined in a way the underlying machinery (Agent SDK, git, macOS) does not offer. Those are exactly the gaps a story developer fills by inventing — and inventions at the resolve-to-clear seam are inventions in the product's core trust guarantee. The two criticals are the same lesson at two scales: name the resolving event.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-critical">critical</span>
+              <h3 class="finding-title">C-1. Resolve-to-clear has no consistent event model — three contradictory definitions of "seen," and the burned case leaves an undefined Character/board state</h3>
+              <span class="finding-location">EXPERIENCE §State Patterns "Unseen Dot resolve-to-clear"; §UJ-2 step 4; mock-sendback.html</span>
+            </header>
+            <div class="finding-note">The spine text says passive render-tracking ("scrolled into view"); the sendback mock resolves actively via a "Looks good" button that exists in no spec; the burned case says "a choice made, or the burned explanation scrolled into view" — two resolving events for one need. Follow the scroll branch: need resolved → Character returns to Idle — but the order is still BURNED, the board retires only SERVED and scrapped lines, and one-Job-per-Character makes an Idle Character with a live BURNED order a state the model says can't exist. Underneath sits an unnamed entity: the need itself, which must be a durable per-need record surviving restart. Scroll-into-view is also the expensive choice (intersection observers, per-bubble anchors) for a benefit the mock itself abandons.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One sentence per need-type naming the exact resolving event (finished = explicit acknowledgment; ask = Allow or Deny clicked; burned = Try again or Scrap it clicked; drop scroll-into-view), plus one sentence on what a resolved-but-not-retired BURNED order means for Character availability.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-critical">critical</span>
+              <h3 class="finding-title">C-2. The landing-collision ask — the hardest interaction in the product — has no UX definition at all</h3>
+              <span class="finding-location">EXPERIENCE §Key Flows / §Component Patterns (absent); PRD FR-16</span>
+            </header>
+            <div class="finding-note">PRD FR-16 requires the Character to pause instead of landing silently, go Calling, and ask in plain language which version should win. The spine covers Allow/Deny, Try again/Scrap it, Send it back, even send-back entanglement — and skips the landing collision entirely. No flow, no component row, no copy, no board status while the landing is paused, no statement of what happens to the losing side's work. It is the more frequent case — it happens on the happy path whenever two lanes' honest work touches the same file. This is a hole, not an ambiguity.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Add the flow (it can reuse the either/or bubble pattern the entanglement row establishes) or explicitly defer it with the same [ASSUMPTION]/Open-Question rigor the rest of the document practices.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-1. "Folded technical detail" has no mapping onto the actual SDK message stream</h3>
+              <span class="finding-location">EXPERIENCE + DESIGN "Folded technical detail"; addendum SDK notes</span>
+            </header>
+            <div class="finding-note">"Raw output folds behind one plain line per bubble" presumes a bubble model never defined. Unanswered and load-bearing for FR-11: what is a bubble? What exactly folds when Claude's prose contains backticked paths? Who authors the plain line (Claude per fold, or app-synthesized from tool names)? And during a tool-only stretch, an open Work Window on a Working Character shows nothing moving — contradicting "progress is visible as it happens," with no spinner allowed to paper over it.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One paragraph: a bubble = X; folds contain Y; the plain line is authored by Z with fallback W; during tool-only stretches the window shows V.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-2. Cancel: the stop is buildable, but the spine is silent about everything cancel leaves behind</h3>
+              <span class="finding-location">EXPERIENCE "Cancel an order"; Cancel flow; addendum "streaming-input mode"</span>
+            </header>
+            <div class="finding-note">SDK interrupt() exists (requires streaming-input sessions — architecture must never use string prompts). Gaps after the stop: are the worktree's half-done changes discarded or kept? Does the conversation survive a cancel (FR-13)? Cancel while WAITING means resolving a pending canUseTool promise — do the live Allow/Deny buttons disable? And interrupt() stops at message boundaries, so keep the copy pointed at the landing guarantee, not a stopped-mid-keystroke guarantee.</div>
+            <div class="finding-fix"><strong>Fix:</strong> State the worktree and conversation aftermath, the cancelled-ask button rule, and pin the "within seconds" honesty in a story note.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-3. First Run's "silently prepares the folder" asserts silence over machinery with known, named failure modes</h3>
+              <span class="finding-location">EXPERIENCE §First Run steps 2–3; PRD FR-17/FR-19; addendum Conductor gotcha</span>
+            </header>
+            <div class="finding-note">Plain folder (the stated default!) means the app runs git init and commits Maksym's files under an app-authored identity — a product behavior the spine should own in one Krabs sentence, plus a defined experience when preparation fails (read-only folder, nested repo, iCloud path). Existing repos, dirty trees, node_modules with no .gitignore each differ. The untracked-files gotcha reads as data loss to Maksym — assert the bar ("a Lane always sees everything in the Project folder"). And abandoned first run: quit between steps — next launch resumes where? First Run, as written, violates the spine's own "never hide that something failed" rule by construction.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Name the failure-mode experiences; no design needed here, just the named states.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-4. Send it back: the button's lifetime is unspecified, and the spine's surfaces can't honor the PRD's durability promise</h3>
+              <span class="finding-location">EXPERIENCE "Send it back"; Send-it-back flow; PRD §9 Reliability, FR-13</span>
+            </header>
+            <div class="finding-note">Through a follow-up, two Send-it-back buttons exist in one conversation — does the older one still work? Through a new Job, the old conversation leaves the Work Window, yet PRD §9 lists per-order Send-it-back among surviving state and the board's retired lines click through to the current window only. Net: no surface exists from which an order older than the current conversation can be sent back.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Either scope Send it back to "the latest served order per Character, until the next Job" — a perfectly good v1 answer that should be written down — or give the board's retired lines a path to it.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-1. The sound stagger contradicts itself: "0.55s apart" and "never overlapping" cannot both be true</h3>
+              <span class="finding-location">EXPERIENCE Sound &amp; notification matrix; PRD §3 "Voice Line"</span>
+            </header>
+            <div class="finding-note">Catchphrase-length clips (1–3s) staggered 0.55s apart overlap for most of their duration. The intended rule is presumably end-of-clip + gap (queue, not offset). And: how deep does the queue go; does a queued line still play for an already-resolved need?</div>
+            <div class="finding-fix"><strong>Fix:</strong> One sentence: "serial queue, 0.55s gap after each clip ends, drop queued lines whose need is already resolved."</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-2. Notification click-through needs its edge cases defined, not just its happy path</h3>
+              <span class="finding-location">EXPERIENCE "Notification click-through"; §Foundation "one overlay at a time"</span>
+            </header>
+            <div class="finding-note">Undefined: clicking a stale notification whose need was already resolved; clicking while another Work Window or the Orders Board is open (the one-overlay rule implies swap — say it); clicking during First Run. Pause-on-quit conveniently means notifications only exist while the app runs — worth one sentence stating that.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Cheap sentences for each case; each is currently a story-time invention.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-3. WAITING-as-"handed out" still has no moment to exist, and the instant street flip papers over a real spin-up delay</h3>
+              <span class="finding-location">EXPERIENCE "Orders Board statuses" vs §UJ-1 step 5; PRD FR-3</span>
+            </header>
+            <div class="finding-note">UJ-1 shows COOKING immediately on handout; the status table says WAITING covers "handed out." Both can't be the default — and the real handout path (create worktree, start SDK session) can take seconds on a big repo.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Either delete handed-out-WAITING (keeping WAITING solely for paused-on-OK, its only load-bearing use) or define WAITING as the spin-up status.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-4. "Quitting mid-COOKING pauses the Job" promises a pause the SDK doesn't have</h3>
+              <span class="finding-location">EXPERIENCE "App quit / relaunch"; addendum "Sessions" per-cwd gotcha</span>
+            </header>
+            <div class="finding-note">Quit kills the process; "keep cooking" is resume: session_id from the same worktree cwd (so worktree paths must survive relaunch). Resume replays the conversation, not a half-executed action — the Krabs copy should stay honest ("I'll pick up where I left off, more or less"). And the flow is defined only for quitting; the reliability NFR includes crash and sleep.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One word ("quit or crash") closes the scope gap; keep the copy honest about the resume, not a literal pause.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-5. Denied notification permission has no degraded state — and the mock quietly makes permission mandatory</h3>
+              <span class="finding-location">EXPERIENCE §First Run step 4; mock-firstrun.html; PRD FR-7, SM-2</span>
+            </header>
+            <div class="finding-note">The mock disables "Open the town!" until Allow is clicked — an OS permission as a gate, which macOS doesn't even guarantee (the dialog can be denied, or auto-denied if previously refused). Neither artifact says what the town does when permission is denied.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Remove or justify the mock's gate; define one behavior for the denied state (Krabs notes it once, Voice Lines + dots carry the load, a re-ask path exists).</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-1. The volume slider is reachable only by "long-hover/secondary" — which the same document bans</h3>
+              <span class="finding-location">EXPERIENCE "Mute / volume" vs §Interaction Primitives "Banned"</span>
+            </header>
+            <div class="finding-note">Both routes are from the banned family, and neither is a plain click.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Click toggles a small popover containing both mute and the slider.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-2. The Home Base picker's spine and mock disagree on the input bar, and the zero-idle-crew case is undefined</h3>
+              <span class="finding-location">EXPERIENCE "Character picker"; §UJ-1 failure; mock-handout.html</span>
+            </header>
+            <div class="finding-note">The spine's failure case implies the input is live before a pick; the mock hides it. And when every Character is busy, the picker is a row of gray with no Krabs line for it.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Pick one input-bar staging; give Krabs a whole-crew-busy line ("Me whole crew's cookin' — check the board").</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-3. "The app icon is an Asset Slot" doesn't survive contact with macOS notifications</h3>
+              <span class="finding-location">DESIGN §Components "Notification content"</span>
+            </header>
+            <div class="finding-note">Notification banners show the bundle icon; runtime dock-icon swaps don't change it. Honoring the slot there means rewriting the app bundle — disproportionate.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Scope the slot to the dock icon, or drop the claim.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-4. The handout "acknowledgment tick" is a bundled sound in a product whose rule is every-sound-is-Maksym's-file</h3>
+              <span class="finding-location">EXPERIENCE §Sound matrix row 1 [ASSUMPTION]; DESIGN §Do's and Don'ts</span>
+            </header>
+            <div class="finding-note">Don't let the first shipped sound be the one that breaks the asset covenant.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Give the tick an Asset Slot with a labelled stand-in like everything else, or drop it (the street flip is already the acknowledgment).</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-5. First Run mock and spine disagree on step count and introduce unspecced chrome</h3>
+              <span class="finding-location">EXPERIENCE §Key Flows First Run; mock-firstrun.html; DESIGN §Components</span>
+            </header>
+            <div class="finding-note">Five beats in the spine including the assets offer; three in the mock, no assets. The Back/Next stepper bar and step-dots exist in no DESIGN component. The status of these scene mocks should be stated in one line.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Reconcile before a story developer treats the mock as binding.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-6. Deny's aftermath is inferable but unstated</h3>
+              <span class="finding-location">EXPERIENCE "Allow / Deny"; §State Patterns resolve-to-clear</span>
+            </header>
+            <div class="finding-note">Presumably the answer resolves the need, the Character returns to Working, and the board goes WAITING→COOKING — but "presumably" is the word this review exists to delete.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One clause: "Deny resolves the need; the Character resumes Working."</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <section class="reviewer-section">
+      <details>
+        <summary>
+          <h2>PM review — John (Product Manager, value fidelity)</h2>
+          <span class="reviewer-source">review-pm-john.md · 1 critical / 2 high / 4 medium / 5 low</span>
+        </summary>
+        <div class="dim-body">
+          <div class="dim-judgment">
+            <p>"Strong spine, one confession that doesn't match the alibi — the sendback mock quietly re-litigates a decision Maksym already closed." John put the PRD on one side of the table and the spines on the other, and asked each promise: were you kept, were you bent, or did somebody quietly bury you? Most of the file is a love letter to the PRD — the Glossary read verbatim, the diner voice hit dead center, the picker the PRD flagged as undesigned got designed. But the tidy files are where the bodies are: one contradiction of a signed confession, two promises that went missing between PRD and spine, and a handful of seams a non-technical man will catch his sleeve on. Verdict: <strong>approve with required changes</strong> — C-1 must be fixed before these mocks inform a single line of build; H-1 and H-2 must be resolved in EXPERIENCE.md before architecture inherits the holes.</p>
+          </div>
+        </div>
+        <div class="findings-list">
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-critical">critical</span>
+              <h3 class="finding-title">C-1. The sendback mock re-introduces the review gate Maksym explicitly rejected</h3>
+              <span class="finding-location">mock-sendback.html; PRD §3 Glossary "Serving", §6.2, FR-4, UJ-2</span>
+            </header>
+            <div class="finding-note">The confession on file: Maksym was offered a look-first gate and said no — auto-land, undo if unhappy. EXPERIENCE.md honors this; the mock clears the dot only when Maksym clicks "Looks good" or "Send it back," with a note that literally says "✓ Marked as seen." That's not seeing; that's approving — the review gate wearing a thumbs-up emoji as a disguise. Every served order now demands a click before the street goes quiet; the town stops being a friend who waves and becomes a coworker who needs sign-off. Mocks are what builders copy.</div>
+            <div class="finding-fix"><strong>Fix:</strong> The result scrolling into view clears the dot (per EXPERIENCE.md); "Send it back" stays as the only button; "Looks good" is deleted or becomes purely a fun optional reply, never a gate.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-1. "Trouble acknowledged by scrolling" sends the Character Idle while the BURNED order is still open — and breaks one-Job-per-Character</h3>
+              <span class="finding-location">EXPERIENCE §State Patterns "Unseen Dot resolve-to-clear"; PRD FR-4, FR-5, Glossary "Job"</span>
+            </header>
+            <div class="finding-note">Patrick burns an order; the explanation scrolls into view; per this spine the dot clears and Patrick returns to Idle — but nobody clicked Try again or Scrap it. The order is still BURNED, still active. The picker now shows Patrick full-color while he holds an open Job: either Home Base hands him a second Job (violates the one-Job decision) or the picker silently refuses (an invisible, unwritten rule). An Idle Patrick next to a BURNED board line breaks FR-3's guarantee that the street never lies.</div>
+            <div class="finding-fix"><strong>Fix:</strong> For BURNED, resolution = a choice made, full stop. Patrick stays Calling (or at minimum non-Idle, non-pickable) until Try again or Scrap it.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-high">high</span>
+              <h3 class="finding-title">H-2. The landing-collision ask — FR-16's other half — is nowhere in the spines</h3>
+              <span class="finding-location">EXPERIENCE Key Flows / Component Patterns / sound matrix (absent); PRD FR-16, FR-17, UJ-2</span>
+            </header>
+            <div class="finding-note">FR-16 made two promises; the second — what happens when two Characters' finished work collides at landing — has vanished. This is the single scariest moment in the whole product for a non-technical user: the one place where "isolated Lanes" stops being invisible. Whoever builds this will improvise, and improvised merge UX is how you get a technical merge screen with a wooden border.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Add a "Two orders collide at serving" key flow mirroring UJ-3's shape — Calling + Voice Line + notification, one either/or bubble, board shows WAITING, choice recorded in chat.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-1. First Run has no path for "Don't Allow" — and the mock holds the town hostage</h3>
+              <span class="finding-location">EXPERIENCE First Run step 4; mock-firstrun.html; PRD FR-19, FR-7, §2</span>
+            </header>
+            <div class="finding-note">The mock gates entry behind granting notifications — coercion, not a polite ask, and exactly the dark-pattern texture this product exists to avoid. And neither spine says what happens when Maksym hits Don't Allow on the real macOS dialog: a non-technical user stranded with no notifications, no explanation, no idea the app can't holler.</div>
+            <div class="finding-fix"><strong>Fix:</strong> The town opens regardless; Krabs reacts warmly to a denial ("No hollerin', then — watch for me red dots!") and the spec says where to re-ask later.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-2. The first-run mock dropped the assets step</h3>
+              <span class="finding-location">mock-firstrun.html; PRD FR-19, FR-18; EXPERIENCE First Run step 5</span>
+            </header>
+            <div class="finding-note">Every picture and sound being Maksym's own is the emotional heart of this product — the moment that invites him to bring his art is not a step you trim for a cleaner wizard.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Mock gets the fourth step back, matching EXPERIENCE.md.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-3. Placeholder Voice Lines aren't specced as per-Character distinct — so "know by ear" is dead at launch</h3>
+              <span class="finding-location">DESIGN.md (generic stand-ins); EXPERIENCE sound matrix; PRD FR-6, §2.1, §6.2</span>
+            </header>
+            <div class="finding-note">The MVP ships with placeholder sounds; real clips come later. If all three Characters fall back to the same labelled tick, on day one — the day that decides SM-1 — Maksym cannot tell by ear who's calling. The by-ear promise is one of the four Jobs To Be Done.</div>
+            <div class="finding-fix"><strong>Fix:</strong> One line: placeholder sounds are per-Character distinct (three different neutral tones is enough), just as picture stand-ins are per-Character emoji.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-medium">medium</span>
+              <h3 class="finding-title">M-4. What does the board say after "Send it back"? The mock invented a fifth status</h3>
+              <span class="finding-location">mock-sendback.html ("taken back"); EXPERIENCE Orders Board statuses; PRD FR-10, §3</span>
+            </header>
+            <div class="finding-note">"Taken back" exists nowhere in the PRD's binding status set, and EXPERIENCE.md never says what a sent-back order shows: stay SERVED (a lie), vanish, or a new word? A hole in a binding vocabulary, and the two artifacts already disagree through it.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Decide in EXPERIENCE.md — recommendation: sent-back orders join the retired history like scrapped ones, with the chosen word added to FR-10's set deliberately, not by mock accident.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-1. Volume-by-long-hover violates the spine's own banned list</h3>
+              <span class="finding-location">EXPERIENCE Mute/volume vs Interaction Primitives; PRD FR-8</span>
+            </header>
+            <div class="finding-note">The detective notes when a witness contradicts himself two paragraphs apart.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Make volume a plain click affordance (click opens a tiny wooden slider popover) and the file agrees with itself.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-2. Relaunch-resume has no row in the sound matrix</h3>
+              <span class="finding-location">EXPERIENCE "App quit / relaunch" vs Sound &amp; notification matrix; PRD §9, FR-6</span>
+            </header>
+            <div class="finding-note">Do paused Characters each play a Voice Line and fire a notification the moment the app opens — three staggered hollers before Maksym's coffee?</div>
+            <div class="finding-fix"><strong>Fix:</strong> Relaunch-resume should be dot + bubble only (Maksym is already looking at the app); say so.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-3. FR-2's drop-in flow has no UX beyond a reserved accent and a street position</h3>
+              <span class="finding-location">DESIGN.md (Sandy's tokens); EXPERIENCE IA table; PRD FR-2</span>
+            </header>
+            <div class="finding-note">Sandy's out of MVP, so this is low — but FR-2 is an in-PRD feature and "guided help" is a UX surface. A paragraph now saves a redesign when her pictures arrive, which the PRD calls emotionally load-bearing.</div>
+            <div class="finding-fix"><strong>Fix:</strong> A short paragraph on where the Character list lives and what the guidance looks like.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-4. Handout mock makes EXPERIENCE's failure case unreachable</h3>
+              <span class="finding-location">mock-handout.html vs EXPERIENCE §UJ-1 failure</span>
+            </header>
+            <div class="finding-note">Two different designs for the same moment. Either is fine — hiding the input is arguably cleaner — but the spine and the mock must tell the same story, because the failure copy only exists in one of them.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Align spine and mock on one staging.</div>
+          </article>
+          <article class="finding">
+            <header>
+              <span class="badge badge-sev-low">low</span>
+              <h3 class="finding-title">L-5. Mocks render Allow/Try-again in plain wood; DESIGN.md says Character accent</h3>
+              <span class="finding-location">DESIGN.md In-chat action buttons vs mock-burned.html, mock-sendback.html</span>
+            </header>
+            <div class="finding-note">Cosmetic, but DESIGN.md is supposed to be the token law and the mocks are supposed to demonstrate it.</div>
+            <div class="finding-fix"><strong>Fix:</strong> Align one to the other.</div>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <div class="mechanical">
+      <h3>Mechanical notes</h3>
+      <ul>
+        <li>Frontmatter drift from the format examples: EXPERIENCE.md uses <code>title:</code> where the examples use <code>name:</code>; DESIGN.md carries both but no <code>sources:</code> key — its source is named only in the description string. Consider adding <code>sources:</code> to DESIGN.md and <code>name:</code> to EXPERIENCE.md for uniform machine-reading.</li>
+        <li>Both spines are <code>status: draft</code>. If this pair is being handed to architecture as the contract, flip to <code>final</code> once the findings are resolved — downstream consumers should not have to guess whether a draft is binding.</li>
+        <li>Naming consistency is otherwise excellent: component names match between DESIGN.md Components and EXPERIENCE.md Component Patterns; the mockup's legacy state name "waiting" is correctly translated to Glossary "Calling" everywhere, with the rename documented in PRD §3.</li>
+        <li>Verbatim capture verified: all hex values, radii, typography sizes, actor positions, animation names/durations, and the 0.55s stagger match <code>mockup/bikini-town.html</code> exactly. The BURNED color is a flagged [ASSUMPTION] (#3a3a3a) and mock-burned.html already uses it consistently.</li>
+        <li>The <code>imports/</code> folder beside the spines is empty; <code>.memlog.md</code> is working memory — neither is referenced by the spines, no action needed.</li>
+      </ul>
+    </div>
+
+    <footer class="report-footer">
+      <div class="meta">
+        <span>Rubric: {output_folder}/planning-artifacts/ux-designs/ux-bikini-bottom-2026-07-12/review-rubric.md</span>
+        <span>Reviewers: review-ux-sally.md · review-architect-winston.md · review-pm-john.md</span>
+        <span>Generated: 2026-07-12</span>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

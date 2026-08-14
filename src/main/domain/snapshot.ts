@@ -1,0 +1,47 @@
+// The snapshot is a PURE FOLD over the event log (AD-2). No side effects,
+// no I/O — deterministic, so a boot-time replay yields exactly the live state.
+
+import type { DomainEvent } from "./events";
+import type { CharacterView, TownSnapshot } from "../../shared/ipc";
+
+export const BACKGROUND = "conch-day.png";
+
+/** The town before any Character exists (First Run shows over this). */
+export function emptyTown(): TownSnapshot {
+  return { seq: 0, background: BACKGROUND, characters: [], firstRun: null, openWindow: null, orders: [], muted: false, faces: {} };
+}
+
+export function fold(events: readonly DomainEvent[]): TownSnapshot {
+  const chars = new Map<string, CharacterView>();
+  let seq = 0;
+
+  for (const ev of events) {
+    if (ev.seq > seq) seq = ev.seq;
+    switch (ev.type) {
+      case "CharacterRegistered":
+        chars.set(ev.id, {
+          id: ev.id,
+          name: ev.name,
+          role: ev.role,
+          accent: ev.accent,
+          pos: ev.pos,
+          isHomeBase: ev.isHomeBase,
+          state: "idle",
+          unseen: false,
+          picture: null, // filled by the Asset Slot resolver in main (AD-7)
+        });
+        break;
+      case "CharacterStateChanged": {
+        const c = chars.get(ev.id);
+        if (c) {
+          c.state = ev.state;
+          // A Character needing Maksym is "unseen" until resolved (FR-4).
+          c.unseen = ev.state === "calling";
+        }
+        break;
+      }
+    }
+  }
+
+  return { seq, background: BACKGROUND, characters: [...chars.values()], firstRun: null, openWindow: null, orders: [], muted: false, faces: {} };
+}

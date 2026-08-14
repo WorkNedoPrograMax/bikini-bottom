@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bikini Bottom — living town</title>
+<style>
+  :root{
+    --disp:"Chalkboard SE","Comic Sans MS",ui-rounded,system-ui,sans-serif;
+    --body:ui-rounded,"SF Pro Rounded",-apple-system,system-ui,sans-serif;
+    --coral:#ff5a3c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#04222f;font-family:var(--body);display:flex;flex-direction:column;
+    min-height:100vh;align-items:center;justify-content:center;gap:10px;padding:14px}
+  .scene{position:relative;width:100%;max-width:1100px;line-height:0;border-radius:14px;overflow:hidden;
+    box-shadow:0 20px 50px rgba(0,0,0,.5)}
+  .scene img.bg{width:100%;display:block;transition:opacity .3s ease}
+
+  /* ---- characters on the street ---- */
+  .actor{position:absolute;transform:translate(-50%,-50%);cursor:pointer;text-align:center;z-index:6;
+    font-size:clamp(26px,3.4vw,46px);line-height:1}
+  .actor .who{filter:drop-shadow(0 4px 5px rgba(0,0,0,.5));display:inline-block}
+  .actor .who img{height:clamp(64px,9vw,120px);display:block}
+  .actor:hover .who{transform:scale(1.12)}
+  .actor .label{position:absolute;top:100%;left:50%;transform:translateX(-50%);margin-top:4px;
+    font-family:var(--disp);font-size:clamp(10px,1.3vw,14px);color:#fff;white-space:nowrap;
+    text-shadow:0 1px 5px rgba(0,0,0,.9)}
+  .actor.working .who{animation:workbob .7s ease-in-out infinite}
+  .actor .who:has(img){animation:none !important}
+  @keyframes workbob{0%,100%{transform:translateY(0) rotate(-4deg)}50%{transform:translateY(-4px) rotate(4deg)}}
+  .actor.working .tool{position:absolute;top:-6px;right:-14px;font-size:.5em;animation:spinny 1.1s linear infinite}
+  @keyframes spinny{to{transform:rotate(360deg)}}
+  .actor.idle .who{animation:sway 4s ease-in-out infinite}
+  @keyframes sway{0%,100%{transform:rotate(-3deg)}50%{transform:rotate(3deg)}}
+  .actor.waiting .who{animation:hop 1s ease-in-out infinite}
+  @keyframes hop{0%,100%{transform:translateY(0)}40%{transform:translateY(-10px)}}
+  .actor .wave{position:absolute;bottom:118%;left:50%;transform:translateX(-50%);background:#fffdf5;color:#0d3746;
+    font-family:var(--body);font-size:clamp(10px,1.3vw,13px);white-space:nowrap;padding:6px 10px;border-radius:12px;
+    box-shadow:0 5px 12px rgba(0,0,0,.4);display:none}
+  .actor.waiting .wave{display:block;animation:nudge 1s ease-in-out infinite}
+  @keyframes nudge{0%,100%{transform:translateX(-50%) translateY(0)}50%{transform:translateX(-50%) translateY(-3px)}}
+  .actor .wave::after{content:"";position:absolute;bottom:-7px;left:50%;transform:translateX(-50%);
+    border:7px solid transparent;border-top-color:#fffdf5;border-bottom:0}
+  .dot{position:absolute;top:-4px;right:-4px;width:15px;height:15px;border-radius:50%;background:var(--coral);
+    border:2px solid #fff;box-shadow:0 0 10px var(--coral);display:none;animation:ping 1.3s ease-in-out infinite}
+  .actor.waiting.unseen .dot{display:block}
+  @keyframes ping{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.25);opacity:.8}}
+
+  .topbtn{position:absolute;z-index:8;background:#c98a4e;color:#fff6e6;border:3px solid #7d4a1e;border-radius:12px;
+    font-family:var(--disp);font-size:14px;padding:7px 12px;cursor:pointer;box-shadow:0 4px 0 #6d3f19}
+  .topbtn:hover{filter:brightness(1.06)}
+  #statesBtn{left:14px;top:14px}
+  #ordersBtn{right:14px;top:14px}
+
+  .board-wrap{position:absolute;inset:0;z-index:12;display:none;align-items:center;justify-content:center;
+    background:rgba(4,25,34,.55)}
+  .board-wrap.show{display:flex}
+  .easel{width:min(92%,410px);transform:rotate(-1.6deg)}
+  .menu-paper{position:relative;background:linear-gradient(178deg,#f3dfa2,#eed490 60%,#e6c67a);
+    border-radius:7px 10px 6px 9px;padding:24px 26px 26px;
+    font-family:"Marker Felt","Chalkboard SE",var(--disp);color:#241d0e;line-height:1.25;
+    box-shadow:0 18px 44px rgba(0,0,0,.55), inset 0 0 70px rgba(150,110,40,.28)}
+  .menu-paper::before,.menu-paper::after{content:"";position:absolute;top:10px;width:12px;height:12px;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%,#9a9a9a,#3c3c3c);box-shadow:0 2px 3px rgba(0,0,0,.45)}
+  .menu-paper::before{left:15px}.menu-paper::after{right:15px}
+  .menu-paper h3{margin:0 0 4px;text-align:center;font-size:40px;line-height:1;color:#8c1e12;letter-spacing:1px;
+    text-transform:uppercase;text-shadow:1px 2px 0 rgba(60,10,5,.25);transform:rotate(-1deg)}
+  .menu-paper .sub{text-align:center;font-size:12px;color:#7a5c26;margin-bottom:16px}
+  .menu-paper ul{list-style:none;margin:0;padding:0;display:grid;gap:11px}
+  .menu-paper li{display:flex;align-items:baseline;gap:8px;font-size:18px;font-weight:700;letter-spacing:.4px}
+  .menu-paper li:nth-child(odd){transform:rotate(-.4deg)}
+  .menu-paper li:nth-child(even){transform:rotate(.35deg)}
+  .menu-paper .d{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:58%}
+  .menu-paper .dots{flex:1;border-bottom:3px dotted #2a2213;transform:translateY(-4px);min-width:18px}
+  .menu-paper .s{font-size:15px;text-transform:uppercase;letter-spacing:.8px}
+  .s-cook{color:#6b4a12}.s-serve{color:#2e5c2a}
+  .s-new{color:#20455a}.s-hey{color:#8c1e12}
+
+  .modal{position:absolute;inset:0;z-index:20;display:none;align-items:center;justify-content:center;
+    background:rgba(4,25,34,.62);padding:16px}
+  .modal.show{display:flex}
+  .talk{width:min(94%,520px);max-height:88%;display:flex;flex-direction:column;background:#f6e6b8;
+    border:8px solid #8a5a2c;outline:3px solid #5d3a15;border-radius:20px;
+    box-shadow:0 24px 60px rgba(0,0,0,.6);overflow:hidden;line-height:1.35}
+  .talk header{display:flex;align-items:center;gap:12px;padding:10px 16px;color:#fff;background:var(--accent,#4fb0a0);
+    border-bottom:3px solid rgba(0,0,0,.25)}
+  .talk header .face{font-size:30px;line-height:0}
+  .talk header .face img{height:52px;display:block;filter:drop-shadow(0 2px 3px rgba(0,0,0,.35))}
+  .talk header .h-name{font-family:"Marker Felt",var(--disp);font-size:22px;line-height:1.1;
+    text-shadow:0 1px 2px rgba(0,0,0,.35);letter-spacing:.5px}
+  .talk header .h-sub{font-size:11px;opacity:.92}
+  .talk header .x{margin-left:auto;cursor:pointer;background:rgba(0,0,0,.28);border:2px solid rgba(255,255,255,.7);color:#fff;
+    width:32px;height:32px;border-radius:50%;font-size:15px}
+  .convo{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:11px;
+    background:repeating-linear-gradient(180deg,#f6e6b8 0 24px,#f0dca4 24px 48px)}
+  .msg{max-width:82%;padding:9px 14px;border-radius:16px;font-size:14px;line-height:1.45}
+  .msg.you{align-self:flex-end;background:#bfe4f2;color:#11303e;border:2px solid #23485c;border-bottom-right-radius:4px}
+  .msg.them{align-self:flex-start;background:#fffaf0;color:#241d0e;border:2px solid #3a2c14;border-bottom-left-radius:4px}
+  .msg .frm{display:block;font-family:"Marker Felt",var(--disp);font-size:11px;text-transform:uppercase;
+    letter-spacing:.6px;opacity:.65;margin-bottom:2px}
+  .ask{display:flex;gap:9px;padding:12px;background:#e6cd92;border-top:3px solid #c9a95e}
+  .ask input{flex:1;border:2px solid #8a5a2c;border-radius:14px;padding:10px 14px;font-family:var(--body);font-size:14px;background:#fffaf0;color:#241d0e}
+  .ask input:focus{outline:2px solid var(--accent,#4fb0a0)}
+  .ask button{border:2px solid rgba(0,0,0,.3);border-radius:14px;padding:0 18px;font-family:"Marker Felt",var(--disp);
+    font-size:16px;color:#fff;background:var(--accent,#4fb0a0);cursor:pointer;box-shadow:0 3px 0 rgba(0,0,0,.25)}
+
+  .cap{color:#cdeff7;font-size:13px;text-align:center;max-width:70ch;line-height:1.5}
+  kbd{background:#0e3b4d;border:1px solid #2b6a83;border-radius:5px;padding:1px 6px;font-size:12px}
+  @media (prefers-reduced-motion: reduce){.actor .who,.dot,.actor .wave{animation:none}}
+</style>
+</head>
+<body>
+  <div class="scene" id="scene">
+    <img class="bg" src="conch-day.png" alt="Conch Street">
+
+    <button class="topbtn" id="ordersBtn" title="press M">📋 Orders</button>
+    <button class="topbtn" id="statesBtn" title="preview how the street looks in each mood">🎭 a normal day</button>
+
+    <!-- straight-on composition: rock left · moai center · pineapple right -->
+    <div class="actor working" data-lane="pat" style="left:16%;top:74%">
+      <span class="dot"></span><span class="who"><img src="assets/patrick-working.png" alt="Patrick hammering away"></span>
+      <div class="wave">All done — come see!</div><div class="label">Patrick · working…</div>
+    </div>
+
+    <div class="actor working" data-lane="sandy" style="left:31%;top:79%">
+      <span class="dot"></span><span class="who">🐿️</span>
+      <div class="wave">Experiment's done — come see!</div><div class="label">Sandy · working…</div>
+    </div>
+
+    <div class="actor idle" data-lane="krabs" style="left:63%;top:79%">
+      <span class="dot"></span><span class="who">🦀</span>
+      <div class="wave">Order's up — come see!</div><div class="label">Mr. Krabs · home base</div>
+    </div>
+
+    <div class="actor waiting unseen" data-lane="squid" style="left:47%;top:76%">
+      <span class="dot"></span><span class="who"><img src="assets/squidward-waiting.png" alt="Squidward waiting, arms crossed"></span>
+      <div class="wave">Finished — come look!</div><div class="label">Squidward · waiting for you</div>
+    </div>
+
+    <div class="actor working" data-lane="bob" style="left:80%;top:74%">
+      <span class="dot"></span><span class="who"><img src="assets/spongebob-working.png" alt="SpongeBob hard at work"></span>
+      <div class="wave">All done — come see!</div><div class="label">SpongeBob · working…</div>
+    </div>
+
+    <div class="board-wrap" id="board">
+      <div class="easel"><div class="menu-paper">
+        <h3>Today's Orders</h3>
+        <div class="sub">click anywhere to close · press M</div>
+        <ul>
+          <li>🦑<span class="d">Fix the refund message</span><span class="dots"></span><span class="s s-hey">waiting</span></li>
+          <li>⭐️<span class="d">Wonky button</span><span class="dots"></span><span class="s s-serve">served</span></li>
+          <li>🐿️<span class="d">Account-merge mystery</span><span class="dots"></span><span class="s s-cook">cooking</span></li>
+          <li>🧽<span class="d">New sign-up screen</span><span class="dots"></span><span class="s s-cook">cooking</span></li>
+        </ul>
+      </div></div>
+    </div>
+
+    <div class="modal" id="modal">
+      <div class="talk" id="talk">
+        <header>
+          <span class="face" id="mFace">🦑</span>
+          <div><div class="h-name" id="mName">Squidward</div><div class="h-sub" id="mSub">teal lane</div></div>
+          <button class="x" id="closeBtn" aria-label="close">✕</button>
+        </header>
+        <div class="convo" id="convo"></div>
+        <div class="ask"><input id="taskInput" placeholder="Tell them what to do…"><button id="sendBtn">Go</button></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="cap">The <b>straight-on daytime town</b>, crisp now. Click a neighbour to open their cozy work window (marks it seen → red dot clears). Orders board: <kbd>📋</kbd> or press <kbd>M</kbd>. The <kbd>🎭</kbd> button flips the whole street between resting / working / waiting so you can preview every mood.</p>
+
+<script>
+  const lanes = {
+    bob:  {name:"SpongeBob",sub:"the eager lane",face:"🧽",accent:"#f7b500",
+      convo:[["you","Build the new sign-up screen."],["them","On it! Form's drafted and the button's wired. Want the welcome email next?"]]},
+    squid:{name:"Squidward",sub:"the teal lane",face:"🦑",accent:"#4fb0a0",
+      convo:[["you","Fix the refund rejection message."],["them","Done. Scouts now see the full reason. …Can I go home now?"]]},
+    pat:  {name:"Patrick",sub:"the easy lane",face:"⭐️",accent:"#f072a6",
+      convo:[["you","Fix the wonky button."],["them","Fixed it! Uhhh… I think. It stopped being wonky, anyway."]]},
+    sandy:{name:"Sandy",sub:"the science lane",face:"🐿️",accent:"#8a6d3b",
+      convo:[["you","Figure out the account-merge mystery."],["them","Howdy! Runnin' experiments now — got three suspects and one hypothesis."]]},
+    krabs:{name:"Mr. Krabs",sub:"home base",face:"🦀",accent:"#c0392b",
+      convo:[["them","Ahoy Maksym! What job are we handin' out today, and to which of me crew?"]]},
+  };
+  const modal=document.getElementById('modal'),convo=document.getElementById('convo'),talk=document.getElementById('talk');
+  function openLane(id){
+    const l=lanes[id]; if(!l)return;
+    mFace.innerHTML=(cast[id]&&cast[id].imgs.idle)?'<img src="'+cast[id].imgs.idle+'" alt="'+l.name+'">':l.face;
+    mName.textContent=l.name; mSub.textContent=l.sub;
+    talk.style.setProperty('--accent',l.accent); convo.innerHTML='';
+    l.convo.forEach(([w,t])=>{const d=document.createElement('div');d.className='msg '+w;
+      d.innerHTML='<span class="frm">'+(w==='you'?'you':l.name)+'</span>'+t;convo.appendChild(d);});
+    taskInput.placeholder='Tell '+l.name+' what to do…'; modal.classList.add('show');
+    const a=document.querySelector('.actor[data-lane="'+id+'"]'); if(a)a.classList.remove('unseen');
+  }
+  document.querySelectorAll('.actor').forEach(a=>a.addEventListener('click',()=>openLane(a.dataset.lane)));
+  closeBtn.onclick=()=>modal.classList.remove('show');
+  modal.addEventListener('click',e=>{if(e.target===modal)modal.classList.remove('show')});
+  sendBtn.onclick=()=>{if(!taskInput.value.trim())return;
+    const y=document.createElement('div');y.className='msg you';y.innerHTML='<span class="frm">you</span>'+taskInput.value;
+    const t=document.createElement('div');t.className='msg them';t.innerHTML='<span class="frm">'+mName.textContent+'</span>…on it! (this is where Claude gets to work)';
+    convo.appendChild(y);convo.appendChild(t);taskInput.value='';convo.scrollTop=convo.scrollHeight;};
+  // per-character pictures for each mood; emoji fills in until a picture exists
+  const cast = {
+    pat:  {emoji:"⭐️", imgs:{idle:"assets/patrick-idle.png",   working:"assets/patrick-working.png",   waiting:"assets/patrick-waiting.png"}},
+    squid:{emoji:"🦑", imgs:{idle:"assets/squidward-idle.png", working:"assets/squidward-working.png", waiting:"assets/squidward-waiting.png"}},
+    bob:  {emoji:"🧽", imgs:{idle:"assets/spongebob-idle.png", working:"assets/spongebob-working.png", waiting:"assets/spongebob-waiting.png"}},
+    sandy:{emoji:"🐿️", imgs:{}},
+    krabs:{emoji:"🦀", imgs:{}},
+  };
+  const stateWord = {idle:"idle", working:"working…", waiting:"waiting for you"};
+
+  // placeholder voices — one signature sound per character until Maksym
+  // provides real voice clips (they'll drop into assets/sounds/)
+  const AC=window.AudioContext||window.webkitAudioContext; let ac=null;
+  const voiceBox={pat:{base:180,type:"triangle"},squid:{base:130,type:"sawtooth"},bob:{base:430,type:"square"},
+    sandy:{base:320,type:"sine"},krabs:{base:95,type:"sawtooth"}};
+  function blip(freq,type,t0,dur){
+    const o=ac.createOscillator(),g=ac.createGain();
+    o.type=type;o.frequency.value=freq;o.connect(g);g.connect(ac.destination);
+    g.gain.setValueAtTime(0,t0);g.gain.linearRampToValueAtTime(.16,t0+.02);
+    g.gain.exponentialRampToValueAtTime(.001,t0+dur);o.start(t0);o.stop(t0+dur+.05);
+  }
+  let stagger=0,staggerReset=null;
+  function playVoice(id,state){
+    if(!AC)return; ac=ac||new AC(); if(ac.state==="suspended")ac.resume();
+    const v=voiceBox[id],t=ac.currentTime+.03+stagger;
+    stagger+=.55; clearTimeout(staggerReset); staggerReset=setTimeout(()=>stagger=0,800);
+    const tune=state==="waiting"?[1,1.25,1.5]:state==="working"?[1,1.33]:[.75];
+    tune.forEach((m,i)=>blip(v.base*m,v.type,t+i*.15,.16));
+  }
+  function notify(id){
+    if(!("Notification" in window))return;
+    const fire=()=>new Notification(lanes[id].name+" is done!",{
+      body:"Come to Conch Street — "+lanes[id].name+" finished and is waiting for you.",silent:true});
+    if(Notification.permission==="granted")fire();
+    else if(Notification.permission!=="denied")Notification.requestPermission().then(p=>{if(p==="granted")fire()});
+  }
+  let booted=false;
+  function setState(id,state){
+    const a=document.querySelector('.actor[data-lane="'+id+'"]'); if(!a)return;
+    const prev=["idle","working","waiting"].find(s=>a.classList.contains(s));
+    a.classList.remove('idle','working','waiting','unseen'); a.classList.add(state);
+    if(state==='waiting')a.classList.add('unseen');
+    const c=cast[id], who=a.querySelector('.who');
+    who.innerHTML=c.imgs[state]?'<img src="'+c.imgs[state]+'" alt="'+lanes[id].name+'">':c.emoji;
+    a.querySelector('.label').textContent=lanes[id].name+' · '+stateWord[state];
+    if(booted&&state!==prev){playVoice(id,state); if(state==='waiting')notify(id);}
+  }
+  const scenes=[
+    {name:"a normal day", pat:"idle",    squid:"waiting", bob:"working", sandy:"working", krabs:"idle"},
+    {name:"all resting",  pat:"idle",    squid:"idle",    bob:"idle",    sandy:"idle",    krabs:"idle"},
+    {name:"all working",  pat:"working", squid:"working", bob:"working", sandy:"working", krabs:"working"},
+    {name:"all waiting",  pat:"waiting", squid:"waiting", bob:"waiting", sandy:"waiting", krabs:"waiting"},
+  ];
+  let sceneIdx=0;
+  function applyScene(i){const s=scenes[i];['pat','sandy','squid','krabs','bob'].forEach(k=>setState(k,s[k]));
+    statesBtn.textContent='🎭 '+s.name;}
+  statesBtn.onclick=()=>{sceneIdx=(sceneIdx+1)%scenes.length;applyScene(sceneIdx)};
+  applyScene(0); booted=true;
+  const board=document.getElementById('board');
+  function toggleBoard(){board.classList.toggle('show')}
+  ordersBtn.onclick=toggleBoard; board.addEventListener('click',()=>board.classList.remove('show'));
+  // daytime only — no day/night toggle
+  document.addEventListener('keydown',e=>{if(e.key==='m'||e.key==='M')toggleBoard();
+    if(e.key==='Escape'){modal.classList.remove('show');board.classList.remove('show')}});
+</script>
+</body>
+</html>

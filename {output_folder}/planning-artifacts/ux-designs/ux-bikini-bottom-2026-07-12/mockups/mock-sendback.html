@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bikini Bottom — send it back</title>
+<style>
+  :root{
+    --disp:"Chalkboard SE","Comic Sans MS",ui-rounded,system-ui,sans-serif;
+    --body:ui-rounded,"SF Pro Rounded",-apple-system,system-ui,sans-serif;
+    --coral:#ff5a3c; --accent:#f7b500; --mutedink:#7a6a55;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#04222f;font-family:var(--body);display:flex;flex-direction:column;
+    min-height:100vh;align-items:center;justify-content:center;gap:14px;padding:14px}
+  .talk{width:min(94%,520px);display:flex;flex-direction:column;background:#f6e6b8;
+    border:8px solid #8a5a2c;outline:3px solid #5d3a15;border-radius:20px;
+    box-shadow:0 24px 60px rgba(0,0,0,.6);overflow:hidden;line-height:1.35}
+  .talk header{display:flex;align-items:center;gap:12px;padding:10px 16px;color:#fff;background:var(--accent);
+    border-bottom:3px solid rgba(0,0,0,.25)}
+  .talk header .face{position:relative;font-size:30px;line-height:0}
+  .dot{position:absolute;top:-6px;right:-8px;width:15px;height:15px;border-radius:50%;background:var(--coral);
+    border:2px solid #fff;box-shadow:0 0 10px var(--coral);animation:cleared 2s ease-out forwards}
+  @keyframes cleared{0%{transform:scale(1);opacity:1}60%{transform:scale(1.25);opacity:.5}100%{transform:scale(.6);opacity:0}}
+  .talk header .h-name{font-family:"Marker Felt",var(--disp);font-size:22px;line-height:1.1;
+    text-shadow:0 1px 2px rgba(0,0,0,.35);letter-spacing:.5px}
+  .talk header .h-sub{font-size:11px;opacity:.92}
+  .convo{padding:16px;display:flex;flex-direction:column;gap:11px;
+    background:repeating-linear-gradient(180deg,#f6e6b8 0 24px,#f0dca4 24px 48px)}
+  .msg{max-width:82%;padding:9px 14px;border-radius:16px;font-size:14px;line-height:1.45}
+  .msg.you{align-self:flex-end;background:#bfe4f2;color:#11303e;border:2px solid #23485c;border-bottom-right-radius:4px}
+  .msg.them{align-self:flex-start;background:#fffaf0;color:#241d0e;border:2px solid #3a2c14;border-bottom-left-radius:4px}
+  .msg .frm{display:block;font-family:"Marker Felt",var(--disp);font-size:11px;text-transform:uppercase;
+    letter-spacing:.6px;opacity:.65;margin-bottom:2px}
+  .msg .note{display:block;margin-top:6px;font-size:12px;opacity:.75;font-style:italic}
+  .choices{align-self:flex-start;display:flex;gap:10px}
+  .wood{border:3px solid #7d4a1e;border-radius:12px;padding:9px 16px;font-family:"Marker Felt",var(--disp);
+    font-size:15px;color:#fff6e6;background:#c98a4e;cursor:pointer;box-shadow:0 4px 0 #6d3f19}
+  .wood:hover{filter:brightness(1.06)}
+  .wood:active{transform:translateY(2px);box-shadow:0 2px 0 #6d3f19}
+  .wood.quiet{background:#a08154;border-color:#6d5636;box-shadow:0 4px 0 #5b4326}
+  .dotnote{font-family:"Marker Felt",var(--disp);font-size:13px;color:#ffd9cf;display:flex;align-items:center;gap:8px}
+  .dotnote .mini{width:11px;height:11px;border-radius:50%;background:var(--coral);border:2px solid #fff;
+    box-shadow:0 0 8px var(--coral);animation:cleared 2s ease-out forwards;display:inline-block}
+  .dotnote small{color:#cdeff7;font-family:var(--body);font-style:italic}
+  .board{width:min(94%,520px);background:#8a5a2c;border:3px solid #5d3a15;border-radius:12px;
+    padding:8px 14px;display:flex;align-items:center;gap:10px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+  .board .b-label{font-family:"Marker Felt",var(--disp);font-size:12px;color:#f6e6b8;opacity:.8;letter-spacing:1px}
+  .board .b-line{flex:1;font-family:"Marker Felt",var(--disp);font-size:14px;color:#fff6e6}
+  .board .b-status{font-family:"Marker Felt",var(--disp);font-size:13px;padding:2px 10px;border-radius:8px;
+    background:#f6e6b8;color:#2c6b2f;letter-spacing:1px}
+  .board .b-status.back{color:var(--mutedink);text-decoration:none;background:#e8dcc4}
+  .cap{color:#cdeff7;font-size:13px;text-align:center;max-width:70ch;line-height:1.5}
+</style>
+</head>
+<body>
+  <p class="dotnote"><span class="mini"></span> <span>The red dot cleared the moment this result appeared&nbsp;<small>— seen means shown, no click needed.</small></span></p>
+
+  <div class="talk">
+    <header>
+      <span class="face">🧽<span class="dot"></span></span>
+      <div><div class="h-name">SpongeBob</div><div class="h-sub">the eager lane</div></div>
+    </header>
+    <div class="convo" id="convo">
+      <div class="msg you"><span class="frm">you</span>Rename all the product pages to the new names.</div>
+      <div class="msg them"><span class="frm">SpongeBob</span>All done! I renamed all the product pages. The work's already in your project. Take a look — and if it's not right, just send it back!</div>
+      <div class="choices" id="choices">
+        <button class="wood" id="backBtn">↩️ Send it back</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="board">
+    <span class="b-label">ORDER BOARD</span>
+    <span class="b-line">Rename the product pages — SpongeBob</span>
+    <span class="b-status" id="bstatus">SERVED ✓</span>
+  </div>
+
+  <p class="cap"><b>Serving &amp; Send it back</b>: finished work lands in your project by itself, and the dot clears as soon as the result is shown. No approval click — the only button is <i>Send it back</i>, which puts the project back exactly how it was before this order.</p>
+
+<script>
+  const convo=document.getElementById('convo');
+  const choices=document.getElementById('choices');
+  const backBtn=document.getElementById('backBtn');
+  function bubble(text,note){
+    const d=document.createElement('div');d.className='msg them';
+    d.innerHTML='<span class="frm">SpongeBob</span>'+text+(note?'<span class="note">'+note+'</span>':'');
+    convo.insertBefore(d,choices);
+  }
+  let confirmRow=null,confirmMsg=null;
+  backBtn.onclick=()=>{
+    if(confirmRow)return;
+    confirmMsg=document.createElement('div');confirmMsg.className='msg them';
+    confirmMsg.innerHTML='<span class="frm">SpongeBob</span>Send it back? I\'ll put the Project back how it was.';
+    convo.insertBefore(confirmMsg,choices);
+    confirmRow=document.createElement('div');confirmRow.className='choices';
+    const aye=document.createElement('button');aye.className='wood';aye.textContent='↩️ Aye, send it back';
+    const keep=document.createElement('button');keep.className='wood quiet';keep.textContent='Keep it';
+    confirmRow.append(aye,keep);
+    convo.insertBefore(confirmRow,choices);
+    aye.onclick=()=>{
+      confirmRow.remove();confirmMsg.remove();confirmRow=confirmMsg=null;
+      choices.remove();
+      bubble("Sent back! Your project is exactly like it was before this order. Want me to try it a different way? Just say the word.","↩️ The board shows this order as sent back.");
+      const s=document.getElementById('bstatus');s.textContent='SENT BACK';s.classList.add('back');
+    };
+    keep.onclick=()=>{
+      confirmRow.remove();confirmMsg.remove();confirmRow=confirmMsg=null;
+    };
+  };
+</script>
+</body>
+</html>

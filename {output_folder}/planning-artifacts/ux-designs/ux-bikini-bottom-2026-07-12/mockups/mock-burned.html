@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bikini Bottom — a burned order</title>
+<style>
+  :root{
+    --disp:"Chalkboard SE","Comic Sans MS",ui-rounded,system-ui,sans-serif;
+    --body:ui-rounded,"SF Pro Rounded",-apple-system,system-ui,sans-serif;
+    --accent:#f072a6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#04222f;font-family:var(--body);display:flex;flex-direction:column;
+    min-height:100vh;align-items:center;justify-content:center;gap:14px;padding:14px}
+  /* slice of the Orders Board paper */
+  .menu-paper{position:relative;width:min(94%,410px);transform:rotate(-1.2deg);
+    background:linear-gradient(178deg,#f3dfa2,#eed490 60%,#e6c67a);
+    border-radius:7px 10px 6px 9px;padding:16px 26px 18px;
+    font-family:"Marker Felt","Chalkboard SE",var(--disp);color:#241d0e;line-height:1.25;
+    box-shadow:0 18px 44px rgba(0,0,0,.55), inset 0 0 70px rgba(150,110,40,.28)}
+  .menu-paper::before,.menu-paper::after{content:"";position:absolute;top:10px;width:12px;height:12px;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%,#9a9a9a,#3c3c3c);box-shadow:0 2px 3px rgba(0,0,0,.45)}
+  .menu-paper::before{left:15px}.menu-paper::after{right:15px}
+  .menu-paper h3{margin:0 0 10px;text-align:center;font-size:26px;line-height:1;color:#8c1e12;letter-spacing:1px;
+    text-transform:uppercase;text-shadow:1px 2px 0 rgba(60,10,5,.25);transform:rotate(-1deg)}
+  .menu-paper ul{list-style:none;margin:0;padding:0;display:grid;gap:11px}
+  .menu-paper li{display:flex;align-items:baseline;gap:8px;font-size:17px;font-weight:700;letter-spacing:.4px}
+  .menu-paper li:nth-child(odd){transform:rotate(-.4deg)}
+  .menu-paper li:nth-child(even){transform:rotate(.35deg)}
+  .menu-paper .d{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:58%}
+  .menu-paper .dots{flex:1;border-bottom:3px dotted #2a2213;transform:translateY(-4px);min-width:18px}
+  .menu-paper .s{font-size:14px;text-transform:uppercase;letter-spacing:.8px}
+  .s-cook{color:#6b4a12}.s-serve{color:#2e5c2a}.s-burn{color:#3a3a3a}
+  /* the work window */
+  .talk{width:min(94%,520px);display:flex;flex-direction:column;background:#f6e6b8;
+    border:8px solid #8a5a2c;outline:3px solid #5d3a15;border-radius:20px;
+    box-shadow:0 24px 60px rgba(0,0,0,.6);overflow:hidden;line-height:1.35}
+  .talk header{display:flex;align-items:center;gap:12px;padding:10px 16px;color:#fff;background:var(--accent);
+    border-bottom:3px solid rgba(0,0,0,.25)}
+  .talk header .face{font-size:30px;line-height:0}
+  .talk header .h-name{font-family:"Marker Felt",var(--disp);font-size:22px;line-height:1.1;
+    text-shadow:0 1px 2px rgba(0,0,0,.35);letter-spacing:.5px}
+  .talk header .h-sub{font-size:11px;opacity:.92}
+  .convo{padding:16px;display:flex;flex-direction:column;gap:11px;
+    background:repeating-linear-gradient(180deg,#f6e6b8 0 24px,#f0dca4 24px 48px)}
+  .msg{max-width:82%;padding:9px 14px;border-radius:16px;font-size:14px;line-height:1.45}
+  .msg.you{align-self:flex-end;background:#bfe4f2;color:#11303e;border:2px solid #23485c;border-bottom-right-radius:4px}
+  .msg.them{align-self:flex-start;background:#fffaf0;color:#241d0e;border:2px solid #3a2c14;border-bottom-left-radius:4px}
+  .msg .frm{display:block;font-family:"Marker Felt",var(--disp);font-size:11px;text-transform:uppercase;
+    letter-spacing:.6px;opacity:.65;margin-bottom:2px}
+  .choices{align-self:flex-start;display:flex;gap:10px}
+  .wood{border:3px solid #7d4a1e;border-radius:12px;padding:9px 16px;font-family:"Marker Felt",var(--disp);
+    font-size:15px;color:#fff6e6;background:#c98a4e;cursor:pointer;box-shadow:0 4px 0 #6d3f19}
+  .wood:hover{filter:brightness(1.06)}
+  .wood:active{transform:translateY(2px);box-shadow:0 2px 0 #6d3f19}
+  .wood:disabled{opacity:.45;cursor:not-allowed;filter:grayscale(.6)}
+  .cap{color:#cdeff7;font-size:13px;text-align:center;max-width:70ch;line-height:1.5}
+</style>
+</head>
+<body>
+  <div class="menu-paper">
+    <h3>Today's Orders</h3>
+    <ul>
+      <li>🦑<span class="d">Fix the refund message</span><span class="dots"></span><span class="s s-serve">served</span></li>
+      <li>⭐️<span class="d">Wonky button</span><span class="dots"></span><span class="s s-burn">burned</span></li>
+      <li>🧽<span class="d">New sign-up screen</span><span class="dots"></span><span class="s s-cook">cooking</span></li>
+    </ul>
+  </div>
+
+  <div class="talk">
+    <header>
+      <span class="face">⭐️</span>
+      <div><div class="h-name">Patrick</div><div class="h-sub">the easy lane</div></div>
+    </header>
+    <div class="convo" id="convo">
+      <div class="msg you"><span class="frm">you</span>Fix the wonky button.</div>
+      <div class="msg them"><span class="frm">Patrick</span>Uh oh. I burned this one — the internet cut out halfway. Nothing broke, your project is untouched. Want me to give it another go, or should we scrap this order?</div>
+      <div class="choices" id="choices">
+        <button class="wood" id="retryBtn">🔁 Try again</button>
+        <button class="wood" id="scrapBtn">🗑 Scrap this order</button>
+      </div>
+    </div>
+  </div>
+
+  <p class="cap">A <b>burned order</b>: when a job hits trouble, the character explains what happened in plain words and offers plain choices — never a silent failure, never an error screen.</p>
+
+<script>
+  const convo=document.getElementById('convo');
+  function bubble(text){
+    const d=document.createElement('div');d.className='msg them';
+    d.innerHTML='<span class="frm">Patrick</span>'+text;convo.appendChild(d);
+  }
+  function lock(){document.querySelectorAll('.choices .wood').forEach(b=>b.disabled=true)}
+  document.getElementById('retryBtn').onclick=()=>{lock();
+    bubble("Okey dokey — back on the grill! 🔥 I'm trying the whole thing again from the top. The board says COOKING again.");};
+  document.getElementById('scrapBtn').onclick=()=>{lock();
+    bubble("Order scrapped! No harm done — your project is exactly as it was. I'll be out front by my rock if you need me. 🪨");};
+</script>
+</body>
+</html>
