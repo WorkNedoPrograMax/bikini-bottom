@@ -358,7 +358,12 @@ async function sendTgTown(): Promise<void> {
     else if (lanes!.isPaused(id)) s = "⏸ paused — keep cooking?";
     else if (lanes!.isBurned(id)) s = "⚠️ hit a snag";
     const title = lanes!.lastPromptFor(id);
-    return `<b>${tgEsc(tgName(id))}</b>: ${s}${title ? `\n   ↳ ${tgEsc(title.slice(0, 60))}` : ""}`;
+    // The chalk line — or, while working in silence, how long it's been quiet.
+    const v = lanes!.view(id);
+    let note = "";
+    if (v.note) note = `\n   ↳ ${tgEsc(v.note)}`;
+    else if (lanes!.isWorking(id)) note = `\n   ↳ (no update yet${v.taskStartedAt ? ` · ${Math.max(1, Math.round((Date.now() - v.taskStartedAt) / 60_000))} min` : ""})`;
+    return `<b>${tgEsc(tgName(id))}</b>: ${s}${title ? `\n   ↳ ${tgEsc(title.slice(0, 60))}` : ""}${note}`;
   });
   // The reserve light, when lit: one line per lit window.
   const fuel = lanes.fuel();
@@ -399,27 +404,49 @@ function buildOrders(chars: TownSnapshot["characters"]): TownSnapshot["orders"] 
     else if (v.collision || lanes.hasPendingAsk(c.id) || lanes.hasPendingChoice(c.id) || lanes.isPaused(c.id)) status = "WAITING";
     else if (v.sentBack) status = "SENT BACK";
     else status = "SERVED";
-    out.push({ characterId: c.id, name: c.name, title: title.replace(/\s+/g, " ").slice(0, 48), status });
+    out.push({ characterId: c.id, name: c.name, title: title.replace(/\s+/g, " ").slice(0, 48), status, note: v.note });
   }
   return out;
 }
 
 function snapshot(): TownSnapshot {
   const base = projectLog ? fold(projectLog.all()) : emptyTown();
+  // The chalk line lives in the lane (not the event log) — fill it in here.
+  if (lanes) for (const c of base.characters) { if (!c.isHomeBase) { const v = lanes.view(c.id); c.note = v.note; c.noteAt = v.noteAt; } }
+  applyFixture(base); // dev/screenshot hook only (BIKINI_FIXTURE) — a no-op in normal runs
   // Resolve every visual through the Asset Slot resolver (AD-7).
   for (const c of base.characters) c.picture = resolvePicture(ASSETS_DIR, c.id, c.state);
   base.background = resolveBackground(ASSETS_DIR, base.background) ?? base.background;
   base.firstRun = firstRun;
   base.openWindow = buildWindow(base.characters);
-  base.orders = buildOrders(base.characters);
+  base.orders = (base as any).__fixtureOrders || buildOrders(base.characters);
   base.muted = muted;
   // Portraits for all UI chrome (no emoji, AD-7).
   base.faces = {};
   for (const r of ROSTER) base.faces[r.id] = resolveFace(ASSETS_DIR, r.id);
   // The reserve light (town-wide usage windows), and its words when lit.
   base.fuel = lanes?.fuel() ?? EMPTY_FUEL;
-  base.fuelSign = fuelSignFor(base.fuel);
+  base.fuelSign = (base as any).__fixtureFuelSign !== undefined ? (base as any).__fixtureFuelSign : fuelSignFor(base.fuel);
+  delete (base as any).__fixtureOrders; delete (base as any).__fixtureFuelSign;
   return base;
+}
+
+// Dev/screenshot hook ONLY (like BIKINI_BOARD / BIKINI_OPEN): BIKINI_FIXTURE=<file.json>
+// overlays parts of the snapshot so a state that needs a live job (a working
+// character with a chalk line, a full Orders board) can be photographed with
+// `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
+// orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
+let fixture: { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null } | null | undefined;
+function applyFixture(base: TownSnapshot): void {
+  if (fixture === undefined) {
+    fixture = null;
+    const f = process.env.BIKINI_FIXTURE;
+    if (f) { try { fixture = JSON.parse(require("node:fs").readFileSync(f, "utf8")); } catch (e) { log("app", "BIKINI_FIXTURE unreadable — ignored", { error: String(e) }); } }
+  }
+  if (!fixture) return;
+  if (fixture.characters) for (const c of base.characters) Object.assign(c, fixture.characters[c.id] || {});
+  if (fixture.orders) (base as any).__fixtureOrders = fixture.orders;
+  if (fixture.fuelSign !== undefined) (base as any).__fixtureFuelSign = fixture.fuelSign;
 }
 
 function pushSnapshot(): void {

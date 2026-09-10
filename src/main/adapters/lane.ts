@@ -11,7 +11,7 @@ import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
 import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
 import { clearStrayApiKey } from "./claude";
-import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue } from "./guards";
+import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue, sanitizeStatus, statusAccepted, fallbackNote } from "./guards";
 import { log } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -199,6 +199,9 @@ interface PersistedLane {
     taskTokens?: number;
     stats?: JobStats;
     limitedUntil?: number;
+    // The chalk line (Job 2): the character's own status + when it wrote it.
+    note?: string | null;
+    noteAt?: number;
   };
 }
 
@@ -258,6 +261,10 @@ interface Lane {
   limitedUntil: number;         // epoch ms Claude's usage limit resets (0 = not limited)
   limitTimer: ReturnType<typeof setTimeout> | null; // auto-resume when the limit resets
   limitSeen: { resetsAt: number; text: string } | null; // a limit signal seen during the current turn
+  // Chalk line (Job 2): ONE sentence in the character's own words about where it
+  // is, posted via `post_status`. Shown under its name on the street.
+  note: string | null;
+  noteAt: number;               // epoch ms of the last accepted line (cooldown anchor)
 }
 
 /** Adoption support (Scout & Runner): a character labels an existing lane.
@@ -297,6 +304,9 @@ export interface LaneView {
   limitedUntil: number;
   /** This job's running tally (with the live phase's time folded in). */
   jobStats: JobStats;
+  /** The chalk line — the character's own one-sentence status, or null. */
+  note: string | null;
+  noteAt: number;
   /** Prior conversations for this Character (newest last). */
   pastSessions: { index: number; title: string }[];
   /** A past session being browsed, or null when on the current conversation. */
@@ -378,6 +388,7 @@ export class LaneManager {
           conversation: l.conversation, sessionId: l.sessionId, lastPrompt: l.lastPrompt,
           baseSha: l.baseSha, servedTip: l.servedTip, served: l.served, sentBack: l.sentBack,
           taskStartedAt: l.taskStartedAt, taskTokens: l.taskTokens, stats: l.stats, limitedUntil: l.limitedUntil,
+          note: l.note, noteAt: l.noteAt,
         },
       };
     }
@@ -403,6 +414,7 @@ export class LaneManager {
         stats: { ...EMPTY_JOB_STATS, ...(cur?.stats ?? {}) }, phase: null, phaseSince: 0,
         lastAskAnsweredAt: 0, nudged: false,
         limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null,
+        note: cur?.note ?? null, noteAt: cur?.noteAt ?? 0,
       }).get(id)!;
       // Closed the app while waiting out a usage limit? Keep waiting — and keep
       // the promise to pick up by ourselves when it resets.
@@ -473,6 +485,7 @@ export class LaneManager {
         }
         return s;
       })(),
+      note: l.note, noteAt: l.noteAt,
       pastSessions: l.archive.map((s, i) => ({ index: i, title: s.title })),
       viewing: l.viewing != null && l.archive[l.viewing]
         ? { index: l.viewing, readOnly: l.viewReadOnly, messages: l.archive[l.viewing].messages, asking: l.askingPast }
@@ -511,6 +524,7 @@ export class LaneManager {
     l.sessionId = null; l.lastPrompt = prompt;
     l.todos = []; l.taskStartedAt = Date.now(); l.taskTokens = 0; // fresh job → fresh plan/timer/spend
     l.stats = { ...EMPTY_JOB_STATS }; l.phase = null; l.phaseSince = 0; l.nudged = false; l.lastAskAnsweredAt = 0;
+    l.note = null; l.noteAt = 0; // a fresh order starts with a clean chalk line
     this.clearLimit(l); // a new order never inherits an old limit hold
     // Remember the main-line commit this Job builds on (for landing/undo, AD-5).
     try { l.baseSha = await headSha(this.projectPath); } catch { l.baseSha = null; }
@@ -749,6 +763,7 @@ export class LaneManager {
     l.burned = false; l.paused = false; l.working = false;
     this.clearWatchdog(l);
     this.setPhase(l, "waiting");
+    l.note = null; l.noteAt = 0; // nothing to report about a scrapped order
     l.conversation.push({ from: "them", text: "Scrapped. That order's off the books." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -858,6 +873,7 @@ export class LaneManager {
     l.sessionId = sess.sdkSessionId;
     l.lastPrompt = prompt;
     l.viewing = null; l.burned = false; l.paused = false;
+    l.note = null; l.noteAt = 0; // a promoted old order must not carry a stale chalk line
     l.conversation.push({ from: "you", text: prompt });
     this.onChange();
     log("lane", `${id} resumed a past order as current`, { sessionId: sess.sdkSessionId });
@@ -1132,6 +1148,8 @@ export class LaneManager {
     this.onChange();
     const lastReply = [...l.conversation].reverse().find((m) => m.from === "them" && !m.tool);
     const summary = (lastReply?.text || "finished the job").replace(/\s+/g, " ").slice(0, 90);
+    // Never wrote a chalk line? The first line of the final reply stands in.
+    if (l.note === null) { const fb = fallbackNote(lastReply?.text || ""); if (fb) { l.note = fb; l.noteAt = Date.now(); this.persist(); this.onChange(); } }
     log("lane", `${id} idle`, summary);
     this.onFinished(id, summary);
     void this.integrate(id); // land the work in the Project (AD-5)
@@ -1218,6 +1236,27 @@ export class LaneManager {
             return { content: [{ type: "text", text: answer }] };
           },
         ),
+        // The chalk line (Job 2): one plain sentence about where it is, shown under
+        // its name on the street. Never blocks, never a question.
+        tool(
+          "post_status",
+          "Post ONE plain sentence for Maksym about where you are right now (what just happened → what's next). Call it after every meaningful step or phase change. It is not a question and it never waits.",
+          { status: z.string().describe("One plain sentence, no Markdown, not a question — e.g. 'reproduced the refund bug, testing a fix'.") },
+          async (args) => {
+            const line = sanitizeStatus(args.status);
+            if (!line) {
+              return { content: [{ type: "text", text: "Not posted — give one plain sentence about where you are (not a question; questions go through ask_maksym). Carry on." }] };
+            }
+            if (!statusAccepted(l.noteAt)) {
+              return { content: [{ type: "text", text: "Kept your previous line (you posted one moments ago). Carry on." }] };
+            }
+            l.note = line; l.noteAt = Date.now();
+            log("lane", `${id} status`, line);
+            this.persist();
+            this.onChange();
+            return { content: [{ type: "text", text: "Posted. Carry on." }] };
+          },
+        ),
       ],
     });
 
@@ -1243,6 +1282,7 @@ export class LaneManager {
             preset: "claude_code",
             append: "If you need Maksym to decide, choose, approve, or answer ANYTHING before you can correctly continue, you MUST call the `ask_maksym` tool and WAIT — it blocks until he actually replies (he taps an option or types his own answer). Never write a question only in prose and then keep going, and NEVER assume, invent, guess, or imagine his answer. Do not say you have 'his decisions', 'as he decided', or 'per your call' unless an `ask_maksym` answer really came back to you this turn. If the answer would change WHAT you build, ask via `ask_maksym` and wait BEFORE building anything; if it's a minor call, make a sensible choice and note it rather than blocking."
               + " HOW to ask — Maksym is one person running several of you at once, and every question stops him and rings his phone. So: (1) BATCH. Finish the step you're on, gather EVERY open question, and ask them together in ONE `ask_maksym` call using the `questions` array — never one question now and another ten minutes later. Natural batching points: after planning, after a design walkthrough, before opening a PR. (2) Progress is NOT a question. 'Fixed it', 'Deployed to staging', 'Done — take a look' go in your normal reply; never route them through `ask_maksym`. (3) Prefer deciding small things yourself and saying what you chose. The tool enforces (1) and (2): a lone follow-up question right after his last answer, or a question whose options are all acknowledgments, is bounced back to you — that means keep working and batch, not stop."
+              + " KEEP MAKSYM POSTED: after every meaningful step or phase change, call `post_status` with ONE plain sentence about where you are (what just happened → what's next) — it never waits, and it is NOT a substitute for `ask_maksym`: anything you need him to decide still goes through `ask_maksym`."
               + serverNote,
           },
           // Load the repo's full setup (CLAUDE.md, skills, /commands, rules,

@@ -171,3 +171,56 @@ export function fuelWarnDue(prev: Fuel, next: Fuel, warnedFor: number): boolean 
   const was = prev.fiveHour;
   return !was || was.level === "dark" || was.resetsAt !== g.resetsAt;
 }
+
+// ───────────────────────── Chalk line (Job 2, Orca plan) ─────────────────────
+// A character's own one-sentence status ("reproduced the refund bug, testing a
+// fix"), posted via the `post_status` tool and shown under its name on the
+// street, on the Orders board and in /town.
+
+const NOTE_MAX = 90;
+const NOTE_COOLDOWN_MS = 20_000;
+
+/** Strip the Markdown a model tends to sprinkle in, and flatten to one line. */
+export function stripMarkdown(raw: string): string {
+  return String(raw || "")
+    .replace(/```[\s\S]*?```/g, " ")           // fenced code
+    .replace(/`([^`]*)`/g, "$1")               // inline code
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")     // images
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")   // links → text
+    .replace(/^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/gm, "") // headings, quotes, bullets
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")        // bold
+    .replace(/(\*|_)(.*?)\1/g, "$2")           // italics
+    .replace(/~~(.*?)~~/g, "$1")               // strike
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Cut to `max` characters on a word boundary, with an ellipsis. */
+export function cutWords(s: string, max: number = NOTE_MAX): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max - 1);
+  const sp = cut.lastIndexOf(" ");
+  return (sp > max * 0.5 ? cut.slice(0, sp) : cut).replace(/[\s,;:·—–-]+$/, "") + "…";
+}
+
+/** A posted status → the chalk line, or null when there is nothing to show:
+ *  empty, or a QUESTION (ends with "?") — questions go through ask_maksym. */
+export function sanitizeStatus(raw: string): string | null {
+  const s = stripMarkdown(raw);
+  if (!s) return null;
+  if (/\?\s*$/.test(s)) return null;
+  return cutWords(s, NOTE_MAX);
+}
+
+/** Accept a new status? Not within 20 s of the last accepted one — the tool
+ *  then answers "kept your previous line" (never an error). */
+export function statusAccepted(lastAt: number, now: number = Date.now()): boolean {
+  return !lastAt || now - lastAt >= NOTE_COOLDOWN_MS;
+}
+
+/** No status was ever posted → the first line of the final reply stands in. */
+export function fallbackNote(finalReply: string): string | null {
+  const firstLine = String(finalReply || "").split(/\n+/).map((l) => stripMarkdown(l)).find((l) => l.length > 0);
+  if (!firstLine) return null;
+  return cutWords(firstLine, NOTE_MAX);
+}

@@ -23,6 +23,10 @@ export interface CharacterView {
   unseen: boolean;
   /** Resolved picture (file:// URL) for the current State, or null → stand-in (AD-7). */
   picture: string | null;
+  /** The chalk line: the character's own one-sentence status, or null. */
+  note: string | null;
+  /** Epoch ms the chalk line was written (0 if none). */
+  noteAt: number;
 }
 
 /** First Run walkthrough steps (FR-19). Folder is mandatory; notifications/
@@ -204,6 +208,8 @@ export interface OrderLine {
   name: string;
   title: string;
   status: OrderStatus;
+  /** The character's chalk line (its own status), or null. */
+  note: string | null;
 }
 
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */

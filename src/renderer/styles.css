@@ -41,6 +41,16 @@ html, body {
   font-size: clamp(10px, 1.3vw, 14px); color: #fff; white-space: nowrap;
   text-shadow: 0 1px 5px rgba(0,0,0,.9);
 }
+/* The chalk line — the character's own one-sentence status, under its name.
+   20 characters wide, two lines at most, so three characters don't collide. */
+.actor .note {
+  position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  margin-top: calc(6px + clamp(10px, 1.3vw, 14px) * 1.2);
+  font-family: var(--disp); font-size: clamp(11px, 1.1vw, 13px); line-height: 1.25;
+  color: rgba(255, 255, 255, .82); text-shadow: 0 1px 5px rgba(0,0,0,.9);
+  width: 20ch; max-width: 20ch; white-space: normal; text-align: center;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .dot {
   position: absolute; top: -4px; right: -4px; width: 15px; height: 15px;
   border-radius: 50%; background: var(--coral); border: 2px solid #fff;
@@ -401,8 +411,14 @@ html, body {
 }
 .menu-paper .sub { text-align: center; font-size: 12px; color: #7a5c26; margin-bottom: 16px; }
 .menu-paper ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 11px; }
-.menu-paper li { display: flex; align-items: baseline; gap: 8px; font-size: 18px; font-weight: 700; letter-spacing: .4px; cursor: pointer; }
+.menu-paper li { display: flex; flex-direction: column; gap: 2px; font-size: 18px; font-weight: 700; letter-spacing: .4px; cursor: pointer; }
+.menu-paper .line { display: flex; align-items: baseline; gap: 8px; }
 .menu-paper li:hover .d { text-decoration: underline; }
+/* the chalk line under an order: faint, one line, the character's own words */
+.menu-paper li .note {
+  font-size: 12px; font-weight: 400; letter-spacing: 0; color: #7a5c26; opacity: .85;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-left: 30px;
+}
 .menu-paper .d { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 56%; display: flex; align-items: center; gap: 6px; }
 .menu-paper .d img { height: 22px; width: auto; flex: none; }
 .menu-paper .dots { flex: 1; border-bottom: 3px dotted #2a2213; transform: translateY(-4px); min-width: 18px; }

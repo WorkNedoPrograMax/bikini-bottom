@@ -30,6 +30,7 @@ export function fold(events: readonly DomainEvent[]): TownSnapshot {
           state: "idle",
           unseen: false,
           picture: null, // filled by the Asset Slot resolver in main (AD-7)
+          note: null, noteAt: 0, // the chalk line lives in the lane; main fills it
         });
         break;
       case "CharacterStateChanged": {

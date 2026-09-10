@@ -3,7 +3,7 @@
 // usage-limit messages. Run after `npm run build`:  node scripts/check-guards.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { isAckOnly, parseLimitText, normalizeResetsAt, fmtClock, foldFuel, fuelWord, fuelWarnDue, fuelStale, fmtWhen } = require("../dist/main/adapters/guards.js");
+const { isAckOnly, parseLimitText, normalizeResetsAt, fmtClock, foldFuel, fuelWord, fuelWarnDue, fuelStale, fmtWhen, sanitizeStatus, statusAccepted, fallbackNote } = require("../dist/main/adapters/guards.js");
 
 let fails = 0;
 const ok = (cond, msg) => { if (!cond) { fails++; console.log("  ✗", msg); } else console.log("  ✓", msg); };
@@ -140,6 +140,32 @@ ok(pctIn.fiveHour.util === 0.82 && pctIn.fiveHour.level === "amber", "a 0–100 
 ok(foldFuel(EMPTY, { type: "monthly", status: "rejected", resetsAt: 1 }) === EMPTY, "an unknown window type is ignored");
 ok(fuelWarnDue(EMPTY, pctIn, 1788956400 * 1000) === false, "already warned for this window (persisted) → quiet after a restart");
 ok(fuelWarnDue(EMPTY, pctIn, 0) === true, "…but a window we never warned about → warn");
+
+// ───────────── Chalk line (Orca plan, Job 2) ─────────────
+console.log("sanitizeStatus — the character's own status line:");
+ok(sanitizeStatus("reproduced the refund bug, testing a fix") === "reproduced the refund bug, testing a fix", "a plain sentence passes as-is");
+ok(sanitizeStatus("  **Done:** fixed `Categories.tsx`   — now  running\nthe tests ") === "Done: fixed Categories.tsx — now running the tests", `markdown + newlines stripped, whitespace collapsed: ${sanitizeStatus("  **Done:** fixed `Categories.tsx`   — now  running\nthe tests ")}`);
+ok(sanitizeStatus("## Status\n- [x] wrote the [plan](http://x) for *phase 2*") === "Status [x] wrote the plan for phase 2", `heading/bullet/link/italic stripped: ${sanitizeStatus("## Status\n- [x] wrote the [plan](http://x) for *phase 2*")}`);
+const rant = "I have now finished re-checking every single one of the seventeen affected components across the pricing, claims and onboarding flows, and I am fairly confident that the remaining discrepancies are all caused by the stale cache layer that we discussed earlier this morning, so the next step is to flush it and re-run the whole suite end to end before opening the PR";
+const cut = sanitizeStatus(rant);
+ok(cut.length <= 90 && cut.endsWith("…") && !/\s…$/.test(cut) && rant.startsWith(cut.slice(0, -1)), `a 300-char rant is cut at ≤90 on a word boundary: "${cut}"`);
+ok(sanitizeStatus("Should I also fix the footer?") === null, "a question → null (questions go through ask_maksym)");
+ok(sanitizeStatus("**Which one?**  ") === null, "a markdown-wrapped question → null");
+ok(sanitizeStatus("") === null && sanitizeStatus("   \n  ") === null && sanitizeStatus("**") === null, "empty / whitespace / bare markdown → null");
+ok(sanitizeStatus("Is it done? Yes — deploying now") === "Is it done? Yes — deploying now", "a '?' mid-sentence is fine (only a trailing one is a question)");
+
+console.log("statusAccepted — 20 s cooldown (answers 'kept your previous line', never an error):");
+const t0 = Date.parse("2026-09-09T10:00:00Z");
+ok(statusAccepted(0, t0) === true, "first line ever → accepted");
+ok(statusAccepted(t0, t0 + 5_000) === false, "5 s after the last one → kept the previous line");
+ok(statusAccepted(t0, t0 + 19_999) === false, "19.9 s → still kept");
+ok(statusAccepted(t0, t0 + 20_000) === true, "20 s → accepted");
+
+console.log("fallbackNote — first line of the final reply when no status was ever posted:");
+ok(fallbackNote("## Done\n\nI fixed the **refund** bug in `claims.ts` and added a test.\n\nNext: …") === "Done", "a heading first line → its text");
+ok(fallbackNote("\n\n- Fixed the refund bug in `claims.ts`\n- Added a test") === "Fixed the refund bug in claims.ts", "leading blank lines skipped; bullet + code stripped");
+ok(fallbackNote(rant).length <= 90 && fallbackNote(rant).endsWith("…"), "a long first line is cut at ≤90");
+ok(fallbackNote("") === null && fallbackNote("   ") === null, "nothing said → null");
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");
 process.exit(fails ? 1 : 0);
