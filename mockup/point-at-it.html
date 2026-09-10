@@ -157,6 +157,24 @@
   .toast{position:absolute;left:50%;bottom:34px;transform:translateX(-50%) translateY(20px);z-index:20;opacity:0;pointer-events:none;
     background:#4a2e14;color:#f3dfa2;border:3px solid var(--btn-edge);border-radius:12px;font-family:var(--disp);font-size:14px;padding:9px 16px;box-shadow:0 4px 0 var(--btn-shadow);transition:all .25s}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  /* Phone / Desktop switch + desktop (browser-tab) frame */
+  .mode{display:inline-flex;border:2px solid var(--btn-edge);border-radius:10px;overflow:hidden;box-shadow:0 2px 0 var(--btn-shadow);vertical-align:middle;margin-left:8px}
+  .mode button{border:none;background:var(--btn);color:#fff6e6;font-family:"Marker Felt",var(--disp);font-size:12px;padding:3px 10px;cursor:pointer}
+  .mode button.on{background:#4a2e14;color:#ffd77a}
+  .stage.desktop .phone{width:100%;max-width:1100px;flex:1 1 auto;border-radius:12px;padding:0;background:#dfe2ea;box-shadow:0 14px 34px rgba(0,0,0,.35);display:flex;flex-direction:column}
+  .stage.desktop .notch,.stage.desktop .sb,.stage.desktop .tabs{display:none}
+  .stage.desktop .urlbar{display:flex;align-items:center;gap:8px;height:36px;padding:0 12px;background:#dfe2ea;font-family:-apple-system,Helvetica,Arial,sans-serif;font-size:12px;color:#3b4252;flex:none}
+  .stage.desktop .urlbar i{width:10px;height:10px;border-radius:50%;background:#c4c8d4;display:inline-block}
+  .stage.desktop .urlbar span{flex:1;background:#fff;border-radius:8px;height:24px;display:flex;align-items:center;padding:0 10px;color:#6b7284}
+  .urlbar{display:none}
+  .stage.desktop .screen{border-radius:0 0 12px 12px;flex:1;min-height:0;font-size:15px}
+  .stage.desktop .screen .top{padding:14px 28px}
+  .stage.desktop .screen .top h1{font-size:26px}
+  .stage.desktop .screen .search{margin:16px 28px 0;max-width:420px}
+  .stage.desktop .screen .seg{margin:14px 28px 0;max-width:360px}
+  .stage.desktop .screen .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));align-content:start;padding:16px 28px}
+  .work-card.pointing.desktop .chat{flex:0 0 24%}
+  .work-card.pointing.desktop .tray{flex:0 0 300px}
   .cap{position:absolute;bottom:2px;left:50%;transform:translateX(-50%);color:#7fb4c4;font-size:11px;white-space:nowrap}
 </style>
 </head>
@@ -169,7 +187,7 @@
       <div style="display:flex;flex-direction:column;justify-content:center;line-height:1.15">
         <div class="h-name">SpongeBob</div>
         <div class="h-sub">the eager lane · sr-bob</div>
-        <div class="h-task"><span style="opacity:.9">Order:</span> Tidy up the Plans screen on phones</div>
+        <div class="h-task"><span style="opacity:.9">Order:</span> Tidy up the Plans screen</div>
       </div>
       <button class="wood-btn point-btn" id="pointBtn">Point at it</button>
       <button class="x" title="close">✕</button>
@@ -179,7 +197,7 @@
       <!-- chat -->
       <div class="chat">
         <div class="convo" id="convo">
-          <div class="msg you"><span class="frm">you</span>Have a look at the Plans screen on a phone — a few things look off but it's hard to describe in words.</div>
+          <div class="msg you"><span class="frm">you</span>Have a look at the Plans screen — a few things look off but it's hard to describe in words.</div>
           <div class="msg them"><span class="frm">SpongeBob</span>Aye aye! Press <b>Point at it</b> up top, and just click the bits that bug you. I'll get a picture of each one plus its exact colours and sizes, so you don't have to explain a thing.</div>
         </div>
         <div class="ask"><input id="taskInput" placeholder="Tell SpongeBob what to do…"><button id="goBtn">Go</button></div>
@@ -187,9 +205,10 @@
 
       <!-- the lane's own app, phone-width -->
       <div class="stage" id="stage">
-        <div class="stage-cap"><b>SpongeBob's app</b> · localhost:3100/plans · phone view<br><span style="font-size:12px">Hover to see the outline, click to pick it. Esc stops pointing.</span></div>
+        <div class="stage-cap"><b>SpongeBob's app</b> · localhost:3100/plans <span class="mode" id="mode"><button data-m="desktop" class="on">Desktop</button><button data-m="phone">Phone</button></span><br><span style="font-size:12px">Hover to see the outline, click to pick it. Esc stops pointing. Switch the view to point at the phone layout instead.</span></div>
         <div class="phone">
           <div class="notch"></div>
+          <div class="urlbar"><i></i><i></i><i></i><span>localhost:3100/plans</span></div>
           <div class="screen" id="screen">
             <div class="sb"><span>9:41</span><span class="sig"><i style="height:5px"></i><i style="height:8px"></i><i style="height:11px"></i><i style="height:14px"></i></span></div>
             <div class="top"><div class="back">‹</div><h1>Plans</h1><div class="avatar">ML</div></div>
@@ -263,7 +282,12 @@
   const cardsEl=document.getElementById('cards'), countEl=document.getElementById('count'), sendBtn=document.getElementById('sendBtn');
   const pointBtn=document.getElementById('pointBtn'), convo=document.getElementById('convo');
   let picks=[]; // {el, summary, thumb(dataURL), note}
-  let pointing=false;
+  let pointing=false, mode='desktop';
+  const modeEl=document.getElementById('mode');
+  function setMode(m){ mode=m; stage.classList.toggle('desktop',m==='desktop'); card.classList.toggle('desktop',m==='desktop');
+    modeEl.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.m===m)); picks=[]; render(); }
+  modeEl.addEventListener('click',e=>{ const b=e.target.closest('button'); if(b&&b.dataset.m!==mode){ setMode(b.dataset.m); toast(b.dataset.m==='phone'?'Phone view. Anything picked before was let go.':'Desktop view. Anything picked before was let go.'); } });
+  function viewWord(){ return mode==='phone'?'390px phone view':Math.round(screen.getBoundingClientRect().width)+'px desktop view'; }
 
   /* ---------- pointing mode ---------- */
   function setPointing(on){
@@ -402,7 +426,7 @@
   /* ---------- compose + preview + send ---------- */
   function compose(){
     const n=picks.length;
-    let out=`Maksym pointed at ${n===1?'one thing':n+' things'} on ${URL_} (390px phone view).\n\n`;
+    let out=`Maksym pointed at ${n===1?'one thing':n+' things'} on ${URL_} (${viewWord()}).\n\n`;
     picks.forEach((p,i)=>{ const s=p.summary;
       out+=`${i+1}) ${s.kind}${s.text?' “'+s.text+'”':''} ${s.w}×${s.h}, ${s.colorIsBg?'':'text '}${s.colorWord} ${s.color}, ${s.font}${s.radius?', '+s.radius+'px corners':''} — `;
       out+=p.note.trim()?`Maksym: “${p.note.trim()}”`:'Maksym: no note, just look at it.'; out+=` [picture ${i+1}]\n`; });
@@ -431,7 +455,7 @@
   function toast(m){ toastEl.textContent=m; toastEl.classList.add('show'); clearTimeout(tt); tt=setTimeout(()=>toastEl.classList.remove('show'),2200); }
   document.getElementById('goBtn').onclick=()=>{ const v=taskInput.value.trim(); if(!v)return; const d=document.createElement('div'); d.className='msg you'; d.innerHTML='<span class="frm">you</span>'+esc(v); convo.appendChild(d); taskInput.value=''; convo.scrollTop=convo.scrollHeight; };
   taskInput.addEventListener('keydown',e=>{ if(e.key==='Enter') goBtn.click(); });
-  render();
+  setMode('desktop'); render();
 })();
 </script>
 </body>
