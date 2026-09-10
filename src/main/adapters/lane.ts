@@ -307,6 +307,8 @@ export interface LaneView {
   /** The chalk line — the character's own one-sentence status, or null. */
   note: string | null;
   noteAt: number;
+  /** Epoch ms the current phase (working / waiting) began — "· 12 min" on the board. */
+  phaseSince: number;
   /** Prior conversations for this Character (newest last). */
   pastSessions: { index: number; title: string }[];
   /** A past session being browsed, or null when on the current conversation. */
@@ -486,6 +488,7 @@ export class LaneManager {
         return s;
       })(),
       note: l.note, noteAt: l.noteAt,
+      phaseSince: l.phaseSince,
       pastSessions: l.archive.map((s, i) => ({ index: i, title: s.title })),
       viewing: l.viewing != null && l.archive[l.viewing]
         ? { index: l.viewing, readOnly: l.viewReadOnly, messages: l.archive[l.viewing].messages, asking: l.askingPast }

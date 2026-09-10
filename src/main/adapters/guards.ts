@@ -224,3 +224,11 @@ export function fallbackNote(finalReply: string): string | null {
   if (!firstLine) return null;
   return cutWords(firstLine, NOTE_MAX);
 }
+
+// ───────────────────────── Catch-up board (Job 3, Orca plan) ─────────────────
+/** A faint one-line preview of the last thing a character said: fences and
+ *  Markdown stripped, one line, ≤90 chars on a word boundary; null if nothing. */
+export function previewOf(text: string | null | undefined): string | null {
+  const s = stripMarkdown(text || "");
+  return s ? cutWords(s, 90) : null;
+}

@@ -3,7 +3,7 @@
 // usage-limit messages. Run after `npm run build`:  node scripts/check-guards.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { isAckOnly, parseLimitText, normalizeResetsAt, fmtClock, foldFuel, fuelWord, fuelWarnDue, fuelStale, fmtWhen, sanitizeStatus, statusAccepted, fallbackNote } = require("../dist/main/adapters/guards.js");
+const { isAckOnly, parseLimitText, normalizeResetsAt, fmtClock, foldFuel, fuelWord, fuelWarnDue, fuelStale, fmtWhen, sanitizeStatus, statusAccepted, fallbackNote, previewOf } = require("../dist/main/adapters/guards.js");
 
 let fails = 0;
 const ok = (cond, msg) => { if (!cond) { fails++; console.log("  ✗", msg); } else console.log("  ✓", msg); };
@@ -166,6 +166,15 @@ ok(fallbackNote("## Done\n\nI fixed the **refund** bug in `claims.ts` and added 
 ok(fallbackNote("\n\n- Fixed the refund bug in `claims.ts`\n- Added a test") === "Fixed the refund bug in claims.ts", "leading blank lines skipped; bullet + code stripped");
 ok(fallbackNote(rant).length <= 90 && fallbackNote(rant).endsWith("…"), "a long first line is cut at ≤90");
 ok(fallbackNote("") === null && fallbackNote("   ") === null, "nothing said → null");
+
+// ───────────── Catch-up board (Orca plan, Job 3) ─────────────
+console.log("previewOf — a faint one-line preview of the last thing said:");
+ok(previewOf("Served! Your work is in the project now — Send it back if you don't like it.") === "Served! Your work is in the project now — Send it back if you don't like it.", "a short plain reply passes as-is");
+ok(previewOf("## Done\n\nHere's the diff:\n```ts\nconst x = 1;\n```\nTests pass.") === "Done Here's the diff: Tests pass.", `heading + fenced code dropped, one line: ${previewOf("## Done\n\nHere's the diff:\n```ts\nconst x = 1;\n```\nTests pass.")}`);
+ok(previewOf("Should I **also** fix the `footer` on [the plans page](http://x)?") === "Should I also fix the footer on the plans page?", "a question keeps its '?' (previews are not statuses)");
+const longReply = "I finished the migration of the pricing tables and re-ran the whole suite twice to be sure, then pushed the branch and opened the PR against pre-staging with the summary you asked for";
+ok(previewOf(longReply).length <= 90 && previewOf(longReply).endsWith("…"), `a long reply is cut at ≤90 on a word boundary: ${previewOf(longReply)}`);
+ok(previewOf("") === null && previewOf(null) === null && previewOf(undefined) === null && previewOf("```\n\n```") === null, "nothing / only a fence → null");
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");
 process.exit(fails ? 1 : 0);

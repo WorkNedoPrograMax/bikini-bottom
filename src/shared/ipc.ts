@@ -7,6 +7,10 @@ export type CharacterId = "bob" | "squid" | "pat" | "krabs";
 /** A Character's visible State, shown by its picture (PRD Glossary; FR-3). */
 export type CharacterState = "idle" | "working" | "calling";
 
+/** WHY a character needs you (or null: working / idle). The Orders board and the
+ *  street label word it in kitchen terms; Telegram /town uses the same order. */
+export type Attention = "question" | "approval" | "limit" | "paused" | "snag" | "collision" | "done" | null;
+
 /** One Character as the renderer needs to draw it. */
 export interface CharacterView {
   id: CharacterId;
@@ -27,6 +31,8 @@ export interface CharacterView {
   note: string | null;
   /** Epoch ms the chalk line was written (0 if none). */
   noteAt: number;
+  /** Why it needs you right now, or null. */
+  attention: Attention;
 }
 
 /** First Run walkthrough steps (FR-19). Folder is mandatory; notifications/
@@ -199,8 +205,10 @@ export interface FuelSign {
   stale: boolean;
 }
 
-/** An Orders Board status (FR-10). Diner vocabulary. */
-export type OrderStatus = "WAITING" | "COOKING" | "SERVED" | "BURNED" | "SCRAPPED" | "SENT BACK";
+/** An Orders Board status (FR-10). Kitchen vocabulary that tells the cases apart:
+ *  ASKING YOU (a question) · NEEDS A YES (a permission) · ON HOLD (Claude's usage
+ *  limit) · CHECK-IN (paused at a checkpoint) · MIXED UP (a landing collision). */
+export type OrderStatus = "WAITING" | "ASKING YOU" | "NEEDS A YES" | "ON HOLD" | "CHECK-IN" | "MIXED UP" | "COOKING" | "SERVED" | "BURNED" | "SCRAPPED" | "SENT BACK";
 
 /** One line on the Galley Grub Orders Board. */
 export interface OrderLine {
@@ -210,6 +218,17 @@ export interface OrderLine {
   status: OrderStatus;
   /** The character's chalk line (its own status), or null. */
   note: string | null;
+  /** Why it needs you (drives ordering + the street word), or null. */
+  attention: Attention;
+  /** A faint one-line preview of the last thing the character said (or the
+   *  question it's asking), or null. */
+  preview: string | null;
+  /** Epoch ms this situation began (0 if unknown) — "· 12 min" on the board. */
+  since: number;
+  /** ON HOLD only: epoch ms Claude's limit resets (0 otherwise). */
+  holdUntil: number;
+  /** CSS-safe form of the status: "asking-you", "needs-a-yes", "on-hold"… */
+  slug: string;
 }
 
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */

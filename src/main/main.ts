@@ -18,8 +18,8 @@ import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { srProjectFor } from "./config/adoptions";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
-import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge } from "../shared/ipc";
-import { fmtClock, fmtWhen, fuelWord, fuelStale } from "./adapters/guards";
+import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus } from "../shared/ipc";
+import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
 const IDLE_PREP = { status: "idle" as const, message: "" };
 const IDLE_CLAUDE = { status: "idle" as const, message: "" };
@@ -350,6 +350,7 @@ async function handleTgText(text: string): Promise<void> {
 
 async function sendTgTown(): Promise<void> {
   if (!tg || !lanes) return;
+  const orders = snapshot().orders;
   const lines = TG_CHARS.map((id) => {
     let s = "💤 idle";
     if (lanes!.isWorking(id)) s = "⏳ working";
@@ -363,7 +364,11 @@ async function sendTgTown(): Promise<void> {
     let note = "";
     if (v.note) note = `\n   ↳ ${tgEsc(v.note)}`;
     else if (lanes!.isWorking(id)) note = `\n   ↳ (no update yet${v.taskStartedAt ? ` · ${Math.max(1, Math.round((Date.now() - v.taskStartedAt) / 60_000))} min` : ""})`;
-    return `<b>${tgEsc(tgName(id))}</b>: ${s}${title ? `\n   ↳ ${tgEsc(title.slice(0, 60))}` : ""}${note}`;
+    // Needs you? Add what it's asking / the last thing it said, so you can decide from the phone.
+    const line = orders.find((o) => o.characterId === id);
+    const needsYou = line && line.attention && line.attention !== "done" && line.attention !== "limit";
+    const preview = needsYou && line!.preview ? `\n   💬 ${tgEsc(line!.preview)}` : "";
+    return `<b>${tgEsc(tgName(id))}</b>: ${s}${title ? `\n   ↳ ${tgEsc(title.slice(0, 60))}` : ""}${note}${preview}`;
   });
   // The reserve light, when lit: one line per lit window.
   const fuel = lanes.fuel();
@@ -389,6 +394,27 @@ async function onTerminalState(id: CharacterId, state: CharacterState): Promise<
   onLaneChange();
 }
 
+/** WHY a character needs you — ONE predicate order, shared by the Orders board,
+ *  the street label and Telegram /town (it was /town's order first). */
+function attentionFor(id: CharacterId, state: CharacterState): Attention {
+  if (!lanes) return null;
+  if (lanes.isWorking(id)) return null;
+  if (lanes.hasPendingChoice(id)) return "question";
+  if (lanes.hasPendingAsk(id)) return "approval";
+  if (lanes.limitedUntil(id)) return "limit";
+  if (lanes.isPaused(id)) return "paused";
+  if (lanes.isBurned(id)) return "snag";
+  if (lanes.view(id).collision) return "collision";
+  if (state === "calling") return "done";
+  return null;
+}
+
+/** Board words for each attention, kitchen vocabulary (no car metaphors). */
+const ORDER_WORD: Record<Exclude<Attention, null>, OrderStatus> = {
+  question: "ASKING YOU", approval: "NEEDS A YES", limit: "ON HOLD", paused: "CHECK-IN",
+  snag: "BURNED", collision: "MIXED UP", done: "SERVED",
+};
+
 /** Derive the Orders Board (FR-9, FR-10) from each Lane's current situation. */
 function buildOrders(chars: TownSnapshot["characters"]): TownSnapshot["orders"] {
   if (!lanes) return [];
@@ -398,13 +424,23 @@ function buildOrders(chars: TownSnapshot["characters"]): TownSnapshot["orders"] 
     const title = lanes.lastPromptFor(c.id);
     if (!title) continue; // never had a Job → no line
     const v = lanes.view(c.id);
-    let status: TownSnapshot["orders"][number]["status"];
+    const attention = attentionFor(c.id, c.state);
+    let status: OrderStatus;
     if (lanes.isWorking(c.id)) status = "COOKING";
-    else if (lanes.isBurned(c.id)) status = "BURNED";
-    else if (v.collision || lanes.hasPendingAsk(c.id) || lanes.hasPendingChoice(c.id) || lanes.isPaused(c.id)) status = "WAITING";
+    else if (attention && attention !== "done") status = ORDER_WORD[attention];
     else if (v.sentBack) status = "SENT BACK";
     else status = "SERVED";
-    out.push({ characterId: c.id, name: c.name, title: title.replace(/\s+/g, " ").slice(0, 48), status, note: v.note });
+    // The preview: the question being asked, the permission wanted, or else
+    // the last thing the character said (tool chatter excluded).
+    const lastSaid = v.conversation.slice().reverse().find((m) => m.from === "them" && !m.tool)?.text ?? null;
+    const preview = attention === "question" ? previewOf(v.pendingChoice?.questions?.[0]?.question)
+      : attention === "approval" ? previewOf(v.pendingAsk)
+      : previewOf(lastSaid);
+    out.push({
+      characterId: c.id, name: c.name, title: title.replace(/\s+/g, " ").slice(0, 48), status, note: v.note,
+      attention, preview, since: v.phaseSince, holdUntil: v.limitedUntil,
+      slug: status.toLowerCase().replace(/\s+/g, "-"),
+    });
   }
   return out;
 }
@@ -412,7 +448,7 @@ function buildOrders(chars: TownSnapshot["characters"]): TownSnapshot["orders"] 
 function snapshot(): TownSnapshot {
   const base = projectLog ? fold(projectLog.all()) : emptyTown();
   // The chalk line lives in the lane (not the event log) — fill it in here.
-  if (lanes) for (const c of base.characters) { if (!c.isHomeBase) { const v = lanes.view(c.id); c.note = v.note; c.noteAt = v.noteAt; } }
+  if (lanes) for (const c of base.characters) { if (!c.isHomeBase) { const v = lanes.view(c.id); c.note = v.note; c.noteAt = v.noteAt; c.attention = attentionFor(c.id, c.state); } }
   applyFixture(base); // dev/screenshot hook only (BIKINI_FIXTURE) — a no-op in normal runs
   // Resolve every visual through the Asset Slot resolver (AD-7).
   for (const c of base.characters) c.picture = resolvePicture(ASSETS_DIR, c.id, c.state);

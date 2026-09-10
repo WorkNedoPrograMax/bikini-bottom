@@ -392,7 +392,8 @@ html, body {
   display: flex; align-items: center; justify-content: center;
   background: rgba(4, 25, 34, .55);
 }
-.easel { width: min(92%, 430px); transform: rotate(-1.6deg); }
+/* wide enough for "NEEDS A YES · 12 min" beside a title without spilling off the paper */
+.easel { width: min(94%, 540px); transform: rotate(-1.6deg); }
 .menu-paper {
   position: relative; padding: 24px 26px 26px;
   background: linear-gradient(178deg, #f3dfa2, #eed490 60%, #e6c67a);
@@ -419,12 +420,20 @@ html, body {
   font-size: 12px; font-weight: 400; letter-spacing: 0; color: #7a5c26; opacity: .85;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-left: 30px;
 }
-.menu-paper .d { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 56%; display: flex; align-items: center; gap: 6px; }
+.menu-paper .d { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 52%; min-width: 0; display: flex; align-items: center; gap: 6px; }
+.menu-paper .d img { flex: none; }
 .menu-paper .d img { height: 22px; width: auto; flex: none; }
 .menu-paper .dots { flex: 1; border-bottom: 3px dotted #2a2213; transform: translateY(-4px); min-width: 18px; }
-.menu-paper .s { font-size: 14px; text-transform: uppercase; letter-spacing: .8px; white-space: nowrap; }
-.s-WAITING { color: #8c1e12; } .s-COOKING { color: #6b4a12; } .s-SERVED { color: #2e5c2a; }
-.s-BURNED { color: #3a3a3a; } .s-SCRAPPED, .s-SENT.back { color: #7a6a55; }
+.menu-paper .s { flex: none; font-size: 13px; text-transform: uppercase; letter-spacing: .6px; white-space: nowrap; }
+/* status colours (classes are CSS-safe slugs: "s-asking-you", "s-sent-back"…)
+   needs-you → red · on hold → grey · cooking → brown · served → green */
+.s-waiting, .s-asking-you, .s-needs-a-yes, .s-check-in, .s-mixed-up { color: #8c1e12; }
+.s-on-hold { color: #6f6a60; }
+.s-cooking { color: #6b4a12; }
+.s-served { color: #2e5c2a; }
+.s-burned { color: #3a3a3a; }
+.s-scrapped, .s-sent-back { color: #7a6a55; }
+.menu-paper li .note.needs { color: #6b2a1e; opacity: .95; }
 .menu-paper .empty { text-align: center; color: #7a5c26; font-size: 15px; }
 @media (prefers-reduced-motion: reduce) {
   .actor .who, .dot { animation: none !important; }
