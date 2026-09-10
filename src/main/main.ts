@@ -14,6 +14,7 @@ import { prepareProject } from "./adapters/git";
 import { checkClaude, clearStrayApiKey } from "./adapters/claude";
 import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon } from "./adapters/assets";
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
+import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { srProjectFor } from "./config/adoptions";
 import { initLog, log } from "./log";
@@ -48,6 +49,10 @@ let terminals: TerminalManager | null = null;
 let openWindowId: CharacterId | null = null;
 let firstRun: FirstRunView | null = null;
 let muted = false;
+// "Point at it" (Orca plan, Job 5): the engine + tray manager, one lane at a time.
+let pointer: PointerManager | null = null;
+// The S&R adoption table (where each lane's app runs), kept for the pointer's URL.
+let adoptSupport: AdoptionSupport | null = null;
 
 async function seedTownIfEmpty(log: EventLog): Promise<void> {
   if (log.all().length > 0) return;
@@ -78,6 +83,7 @@ async function openProjectLog(projectPath: string): Promise<void> {
       },
     };
   }
+  adoptSupport = adopt;
   lanes = new LaneManager(projectPath, projectLog, onLaneChange, fireFinishNotification, emitSoundCue, () => cfg.data.bypassPermissions, adopt,
     { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning });
   // Real-terminal characters (squid): the actual `claude` CLI in the lane
@@ -143,7 +149,7 @@ function buildWindow(chars: TownSnapshot["characters"]): WindowView | null {
         available: TERMINAL_IDS.has(x.id) || (x.state === "idle" && !(lanes?.isWorking(x.id) ?? false)),
         stateWord: STATE_WORD[x.state],
       }));
-    return { characterId: c.id, name: c.name, role: c.role, accent: c.accent, isHomeBase: true, terminal: false, crew, conversation: [], working: false, pendingAsk: null, pendingChoice: null, burned: false, paused: false, served: false, collision: false, agents: 0, agentNames: [], agentIcon: null, activity: null, taskTitle: null, todos: [], taskStartedAt: 0, taskTokens: 0, beatAt: 0, limitedUntil: 0, jobStats: EMPTY_JOB_STATS, pastSessions: [], viewing: null };
+    return { characterId: c.id, name: c.name, role: c.role, accent: c.accent, isHomeBase: true, terminal: false, crew, conversation: [], working: false, pendingAsk: null, pendingChoice: null, burned: false, paused: false, served: false, collision: false, agents: 0, agentNames: [], agentIcon: null, activity: null, taskTitle: null, todos: [], taskStartedAt: 0, taskTokens: 0, beatAt: 0, limitedUntil: 0, jobStats: EMPTY_JOB_STATS, pastSessions: [], viewing: null, pointer: null, picks: [] };
   }
   const isTerm = TERMINAL_IDS.has(c.id);
   const v = lanes?.view(c.id);
@@ -172,7 +178,21 @@ function buildWindow(chars: TownSnapshot["characters"]): WindowView | null {
     jobStats: v?.jobStats ?? EMPTY_JOB_STATS,
     pastSessions: v?.pastSessions ?? [],
     viewing: v?.viewing ?? null,
+    // Point at it: only lanes with a running app (S&R adoptions) get the button.
+    pointer: pointer?.view(c.id, pointerUrlFor(c.id)) ?? null,
+    picks: pointer?.cards(c.id) ?? [],
+    ...(loadFixture()?.window || {}), // dev/screenshot overlay only (BIKINI_FIXTURE)
   };
+}
+
+/** Where this lane's own app is running (the adoption's frontend port), or null.
+ *  The engine shows THIS; a lane without an app has no "Point at it" button. */
+function pointerUrlFor(id: CharacterId): string | null {
+  if (id === "krabs") return null;
+  const fx = loadFixture();
+  if (fx?.pointerUrl) return fx.pointerUrl; // dev/screenshot hook only
+  const port = adoptSupport?.adoptionFor(id)?.frontendPort;
+  return port ? `http://localhost:${port}` : null;
 }
 
 const ASSETS_DIR = path.join(__dirname, "../../assets");
@@ -482,13 +502,18 @@ function snapshot(): TownSnapshot {
 // character with a chalk line, a full Orders board) can be photographed with
 // `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
 // orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
-let fixture: { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null } | null | undefined;
-function applyFixture(base: TownSnapshot): void {
+type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView> };
+let fixture: Fixture | null | undefined;
+function loadFixture(): Fixture | null {
   if (fixture === undefined) {
     fixture = null;
     const f = process.env.BIKINI_FIXTURE;
     if (f) { try { fixture = JSON.parse(require("node:fs").readFileSync(f, "utf8")); } catch (e) { log("app", "BIKINI_FIXTURE unreadable — ignored", { error: String(e) }); } }
   }
+  return fixture ?? null;
+}
+function applyFixture(base: TownSnapshot): void {
+  loadFixture();
   if (!fixture) return;
   if (fixture.characters) for (const c of base.characters) Object.assign(c, fixture.characters[c.id] || {});
   if (fixture.orders) (base as any).__fixtureOrders = fixture.orders;
@@ -496,7 +521,18 @@ function applyFixture(base: TownSnapshot): void {
 }
 
 function pushSnapshot(): void {
+  // The pointer's engine floats over the page: it may only show inside the lane's
+  // own open Work Window (not another window, not a past order, not First Run).
+  if (pointer) {
+    const viewingPast = !!(openWindowId && openWindowId !== "krabs" && lanes && lanes.view(openWindowId).viewing);
+    pointer.reconcile(firstRun ? null : openWindowId, viewingPast);
+  }
   if (winAlive()) win!.webContents.send(CHANNELS.snapshot, snapshot());
+}
+
+/** A transient one-liner for the tray (never persisted, like sound cues). */
+function toast(text: string): void {
+  if (winAlive()) win!.webContents.send(CHANNELS.toast, { text });
 }
 
 // The lane engine's "something changed" callback. If a Character finishes/needs
@@ -550,7 +586,7 @@ async function runClaudeCheck(): Promise<void> {
 }
 
 async function handleIntent(intent: Intent): Promise<void> {
-  log("intent", intent.type, { ...intent, type: undefined });
+  if (intent.type !== "pointerBounds") log("intent", intent.type, { ...intent, type: undefined, notes: undefined });
   switch (intent.type) {
     case "rendererReady":
       pushSnapshot();
@@ -761,8 +797,48 @@ async function handleIntent(intent: Intent): Promise<void> {
       break;
 
     case "openPast":
+      pointer?.close(); // pointing only makes sense on the live order
       if (lanes) lanes.openPast(intent.characterId, intent.index);
       break;
+
+    // ── Point at it (Orca plan, Job 5) ──
+    case "pointerOpen": {
+      const url = pointerUrlFor(intent.characterId);
+      if (pointer && url && openWindowId === intent.characterId) pointer.open(intent.characterId, url);
+      break;
+    }
+    case "pointerClose":
+      pointer?.close();
+      break;
+    case "pointerBounds":
+      pointer?.setBounds({ x: intent.x, y: intent.y, w: intent.w, h: intent.h });
+      break;
+    case "pointerArm":
+      pointer?.arm(intent.on);
+      break;
+    case "pointerView":
+      if (pointer) await pointer.setView(intent.characterId, intent.view);
+      break;
+    case "removePick":
+      pointer?.removePick(intent.characterId, intent.id);
+      break;
+    case "previewPicks":
+      pointer?.openPreview(intent.characterId, intent.notes || {});
+      break;
+    case "closePreview":
+      pointer?.closePreview();
+      break;
+    case "sendPicks": {
+      // ONE follow-up: the short composed brief + each picture inline + the JSON
+      // file (saved into the lane, path handed over). A lane that never had an
+      // order gets it as its first order instead.
+      if (!pointer || !lanes) break;
+      const out = pointer.take(intent.characterId, intent.notes || {});
+      if (!out) break;
+      if (lanes.view(intent.characterId).conversation.length) void lanes.followUp(intent.characterId, out.text, out.attachments);
+      else void lanes.startJob(intent.characterId, out.text, out.attachments);
+      break;
+    }
 
     case "closePast":
       if (lanes) lanes.closePast(intent.characterId);
@@ -805,7 +881,11 @@ async function createWindow(): Promise<void> {
       const delay = Number(process.env.BIKINI_CAPTURE_DELAY || 1400);
       setTimeout(async () => {
         try {
-          const img = await win!.webContents.capturePage();
+          let img = await win!.webContents.capturePage();
+          // The pointer's engine is a child view the page capture can't see —
+          // paste its own picture into place so the photo shows what Maksym sees.
+          const over = pointer ? await pointer.shot() : null;
+          if (over) img = compositeOver(img, over.image, over.bounds, img.getSize().width / win!.getContentSize()[0]);
           await require("node:fs").promises.writeFile(capturePath, img.toPNG());
           console.log(`[capture] wrote ${capturePath}`);
         } catch (e) { console.log(`[capture] failed: ${(e as Error).message}`); }
@@ -831,13 +911,34 @@ async function createWindow(): Promise<void> {
   });
   // When the window is actually destroyed, drop the reference so nothing tries
   // to talk to a dead window (that's the "Object has been destroyed" crash).
-  win.on("closed", () => { win = null; });
+  win.on("closed", () => { pointer?.close(); win = null; });
+  // The pointer's engine is a child view of this window: it must not linger when
+  // the window is minimised or hidden (it comes back with it).
+  win.on("minimize", () => pointer?.hideForWindow());
+  win.on("hide", () => pointer?.hideForWindow());
+  win.on("restore", () => pointer?.showForWindow());
+  win.on("show", () => pointer?.showForWindow());
 
   await win.loadFile(path.join(__dirname, "../../src/renderer/index.html"));
 }
 
 /** True only when we have a usable, non-destroyed window to talk to. */
 function winAlive(): boolean { return !!win && !win.isDestroyed(); }
+
+/** Dev/screenshot hook only: paste `top` onto `base` at `at` (CSS px × scale). */
+function compositeOver(base: Electron.NativeImage, top: Electron.NativeImage, at: { x: number; y: number }, scale: number): Electron.NativeImage {
+  const b = base.toBitmap(), bs = base.getSize();
+  const t = top.toBitmap(), ts = top.getSize();
+  const ox = Math.max(0, Math.round(at.x * scale)), oy = Math.round(at.y * scale);
+  const w = Math.min(ts.width, bs.width - ox);
+  if (w <= 0) return base;
+  for (let row = 0; row < ts.height; row++) {
+    const y = oy + row;
+    if (y < 0 || y >= bs.height) continue;
+    t.copy(b, (y * bs.width + ox) * 4, row * ts.width * 4, row * ts.width * 4 + w * 4);
+  }
+  return nativeImage.createFromBitmap(b, { width: bs.width, height: bs.height, scaleFactor: 1 });
+}
 
 // True only when we mean to actually quit (so the window `close` handler above
 // lets the window go instead of just hiding it).
@@ -920,6 +1021,21 @@ app.whenReady().then(async () => {
   });
 
   await createWindow();
+  pointer = new PointerManager({
+    win: () => (winAlive() ? win : null),
+    onChange: pushSnapshot,
+    toast,
+    viewFor: (id) => cfg.data.pointerView?.[id] ?? "desktop",
+    saveView: (id, view) => cfg.save({ pointerView: { ...(cfg.data.pointerView || {}), [id]: view } }),
+  });
+  // Dev/screenshot hooks only: BIKINI_POINT=1 opens "Point at it" on the launched
+  // window; BIKINI_POINT_CLICKS="x,y;x,y" then clicks those spots in the page.
+  if (process.env.BIKINI_POINT === "1" && openWindowId && !firstRun) {
+    const url = pointerUrlFor(openWindowId);
+    if (url) pointer.open(openWindowId, url);
+    const clicks = (process.env.BIKINI_POINT_CLICKS || "").split(";").map((s) => s.split(",").map(Number)).filter((p) => p.length === 2 && p.every(isFinite)) as [number, number][];
+    if (clicks.length) pointer.debugClicks(clicks, process.env.BIKINI_POINT_PREVIEW ?? null);
+  }
   updateSleepBlocker(); // keep the Mac awake for the whole run (Telegram reachability)
   startTelegram(); // phone remote control, if a token+chat are configured
   // Clicking the dock icon re-opens the (hidden) town — same running session.

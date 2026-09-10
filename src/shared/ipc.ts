@@ -93,6 +93,56 @@ export interface CrewChip {
   stateWord: string;
 }
 
+// ───────────── Point at it (Orca plan, Job 5) ─────────────
+// One thing Maksym pointed at in the lane's own running app. ENGINE-NEUTRAL: the
+// web engine fills `details` with colour/font/radius/cssPath/html; a future
+// simulator engine would put class + accessibility id there instead. Everything
+// that words a Pick renders only what is present.
+export interface PickRect { x: number; y: number; w: number; h: number }
+export interface Pick {
+  /** Engine-issued id, stable for the life of the pick (removal, pins). */
+  id: string;
+  /** A plain kind word: button, heading, field, tab, card, label, picture, text, box, link, bar. */
+  kind: string;
+  /** What it says (≤80 chars), or "" when it has no words. */
+  label: string;
+  /** Where it sits in the page's viewport, CSS px. */
+  rect: PickRect;
+  /** A cropped screenshot of it, PNG base64 (≤400 px wide), or null. */
+  image: string | null;
+  /** Maksym's note — filled in from the tray when he sends. */
+  note: string;
+  /** Whatever the engine knows, as plain strings. */
+  details: Record<string, string>;
+}
+/** A Pick as the tray draws it — main words the summary so the view stays dumb. */
+export interface PickCard extends Pick {
+  /** "160×44 · #e74c3c · 14px" — only the parts the engine knew. */
+  summary: string;
+  /** The swatch colour (background, else text colour), or null. */
+  swatch: string | null;
+}
+/** At most this many picks per message (the send must stay small). */
+export const MAX_PICKS = 5;
+/** Which engine shows the app — never "what web page": a simulator fits too. */
+export type PointerKind = "web" | "simulator";
+export interface PointerView {
+  kind: PointerKind;
+  /** The page currently shown (web), or the base URL when closed. */
+  url?: string;
+  /** Desktop (the default; Maksym develops in a desktop browser) or a 390 px phone.
+   *  A hint the engine may ignore (a simulator is always phone-shaped). */
+  view: "desktop" | "phone";
+  /** Is the engine showing the app inside this Work Window right now? */
+  open: boolean;
+  /** Armed = clicks pick things; off = clicks work as usual (browse the app). */
+  armed: boolean;
+  /** The engine couldn't show the app (e.g. the lane's server is down), or null. */
+  error: string | null;
+  /** The composed message, while the "what they will read" preview is up; else null. */
+  preview: string | null;
+}
+
 /** The open window overlay — Home Base (picker) or a Character's Work Window. */
 export interface WindowView {
   characterId: CharacterId;
@@ -152,6 +202,11 @@ export interface WindowView {
   pastSessions: { index: number; title: string }[];
   /** A past session being browsed ("just asking"), or null on the current one. */
   viewing: { index: number; readOnly: boolean; messages: ChatMessage[]; asking: boolean } | null;
+  /** "Point at it": the engine that can show this lane's own running app, or
+   *  null when there is none (Home Base, or a lane without an app). */
+  pointer: PointerView | null;
+  /** What Maksym has pointed at so far (the tray), oldest first. */
+  picks: PickCard[];
   /** Terminal-mode only: the character's past Claude sessions (its "Past orders"),
    *  newest first. Clicking one resumes it in the terminal via `claude --resume`. */
   termSessions?: { sessionId: string; title: string }[];
@@ -284,6 +339,16 @@ export type Intent =
   | { type: "askPast"; characterId: CharacterId; prompt: string }
   | { type: "resumePast"; characterId: CharacterId; index: number; prompt: string }
   | { type: "remindLater"; characterId: CharacterId }
+  // Point at it (Job 5). Bounds are window-content CSS px, measured by the renderer.
+  | { type: "pointerOpen"; characterId: CharacterId }
+  | { type: "pointerClose" }
+  | { type: "pointerBounds"; x: number; y: number; w: number; h: number }
+  | { type: "pointerArm"; on: boolean }
+  | { type: "pointerView"; characterId: CharacterId; view: "desktop" | "phone" }
+  | { type: "removePick"; characterId: CharacterId; id: string }
+  | { type: "previewPicks"; characterId: CharacterId; notes: Record<string, string> }
+  | { type: "closePreview" }
+  | { type: "sendPicks"; characterId: CharacterId; notes: Record<string, string> }
   | { type: "toggleMute" };
 
 /** A one-shot sound cue (transient, view-only — like the token stream). */
@@ -294,11 +359,15 @@ export interface SoundCue {
   url: string | null;
 }
 
+/** A one-line, transient notice for the tray ("Five is plenty…"). View-only. */
+export interface Toast { text: string }
+
 /** Channel names, shared so both sides agree. */
 export const CHANNELS = {
   snapshot: "town:snapshot",
   intent: "town:intent",
   sound: "town:sound",
+  toast: "town:toast",
   // Real-terminal (node-pty) channels for terminal-mode characters (e.g. squid).
   termOpen: "term:open",     // renderer → main: {id, cols, rows}
   termInput: "term:input",   // renderer → main: {id, data}

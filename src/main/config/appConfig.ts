@@ -5,7 +5,7 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { FirstRunStep } from "../../shared/ipc";
+import type { FirstRunStep, CharacterId } from "../../shared/ipc";
 
 export interface AppConfigData {
   projectPath: string | null;
@@ -24,6 +24,8 @@ export interface AppConfigData {
    *  must be set for the bridge to run; kept in local config, never in source. */
   telegramToken: string | null;
   telegramChatId: number | null;
+  /** "Point at it": the last Desktop / Phone choice per lane (desktop when unset). */
+  pointerView: Partial<Record<CharacterId, "desktop" | "phone">>;
 }
 
 const DEFAULTS: AppConfigData = {
@@ -36,6 +38,7 @@ const DEFAULTS: AppConfigData = {
   srDryRun: true,
   telegramToken: null,
   telegramChatId: null,
+  pointerView: {},
 };
 
 export class AppConfig {

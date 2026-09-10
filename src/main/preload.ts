@@ -3,7 +3,7 @@
 // no fs, no direct SDK/git access ever reaches the view.
 
 import { contextBridge, ipcRenderer, clipboard } from "electron";
-import { CHANNELS, type Intent, type TownSnapshot, type SoundCue, type CharacterId } from "../shared/ipc";
+import { CHANNELS, type Intent, type TownSnapshot, type SoundCue, type Toast, type CharacterId } from "../shared/ipc";
 
 contextBridge.exposeInMainWorld("town", {
   send(intent: Intent) {
@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld("town", {
   },
   onSound(cb: (cue: SoundCue) => void) {
     ipcRenderer.on(CHANNELS.sound, (_e, cue: SoundCue) => cb(cue));
+  },
+  // A transient one-liner for the "Point at it" tray (never persisted).
+  onToast(cb: (t: Toast) => void) {
+    ipcRenderer.on(CHANNELS.toast, (_e, t: Toast) => cb(t));
   },
   // Dev/screenshot hook only: open the Orders Board on launch.
   initialBoard: process.env.BIKINI_BOARD === "1",
