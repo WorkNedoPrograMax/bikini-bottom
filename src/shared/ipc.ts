@@ -131,6 +131,11 @@ export interface WindowView {
   taskTokens: number;
   /** Epoch ms of the last sign of life (for a live "active Ns ago" heartbeat). */
   beatAt: number;
+  /** Claude's usage limit is used up: epoch ms when it resets (0 = not limited).
+   *  The Character is paused until then and picks up by itself. */
+  limitedUntil: number;
+  /** Running tally for the current job, so its cost is visible while it runs. */
+  jobStats: JobStats;
   /** Prior conversations for this Character (newest last). */
   pastSessions: { index: number; title: string }[];
   /** A past session being browsed ("just asking"), or null on the current one. */
@@ -139,6 +144,30 @@ export interface WindowView {
    *  newest first. Clicking one resumes it in the terminal via `claude --resume`. */
   termSessions?: { sessionId: string; title: string }[];
 }
+
+/** What one job has cost so far — the numbers that were invisible on 25 Aug 2026
+ *  (7,900 turns, 89 helpers, 33 questions across two characters, nobody could
+ *  see it). All counters reset when a NEW order is handed out. */
+export interface JobStats {
+  /** Answered turns (one per message the character finished replying to). */
+  turns: number;
+  /** Sub-agents ("helpers") called in so far. */
+  helpers: number;
+  /** Times it stopped to ask Maksym a question. */
+  asks: number;
+  /** Size of the conversation Claude re-reads every turn (input + cache), from
+   *  the last turn. This is what makes a long order slow and expensive. */
+  ctxTokens: number;
+  /** Time the character was actually working vs. sitting idle waiting on Maksym. */
+  workingMs: number;
+  waitingMs: number;
+  /** How many times this job ran into Claude's usage limit. */
+  limitHits: number;
+  /** Last reported share of the usage limit already used (0–1), or null. */
+  limitUtil: number | null;
+}
+
+export const EMPTY_JOB_STATS: JobStats = { turns: 0, helpers: 0, asks: 0, ctxTokens: 0, workingMs: 0, waitingMs: 0, limitHits: 0, limitUtil: null };
 
 /** An Orders Board status (FR-10). Diner vocabulary. */
 export type OrderStatus = "WAITING" | "COOKING" | "SERVED" | "BURNED" | "SCRAPPED" | "SENT BACK";

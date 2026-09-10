@@ -18,7 +18,8 @@ import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { srProjectFor } from "./config/adoptions";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
-import { CHANNELS, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState } from "../shared/ipc";
+import { CHANNELS, EMPTY_JOB_STATS, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState } from "../shared/ipc";
+import { fmtClock } from "./adapters/guards";
 
 const IDLE_PREP = { status: "idle" as const, message: "" };
 const IDLE_CLAUDE = { status: "idle" as const, message: "" };
@@ -141,7 +142,7 @@ function buildWindow(chars: TownSnapshot["characters"]): WindowView | null {
         available: TERMINAL_IDS.has(x.id) || (x.state === "idle" && !(lanes?.isWorking(x.id) ?? false)),
         stateWord: STATE_WORD[x.state],
       }));
-    return { characterId: c.id, name: c.name, role: c.role, accent: c.accent, isHomeBase: true, terminal: false, crew, conversation: [], working: false, pendingAsk: null, pendingChoice: null, burned: false, paused: false, served: false, collision: false, agents: 0, agentNames: [], agentIcon: null, activity: null, taskTitle: null, todos: [], taskStartedAt: 0, taskTokens: 0, beatAt: 0, pastSessions: [], viewing: null };
+    return { characterId: c.id, name: c.name, role: c.role, accent: c.accent, isHomeBase: true, terminal: false, crew, conversation: [], working: false, pendingAsk: null, pendingChoice: null, burned: false, paused: false, served: false, collision: false, agents: 0, agentNames: [], agentIcon: null, activity: null, taskTitle: null, todos: [], taskStartedAt: 0, taskTokens: 0, beatAt: 0, limitedUntil: 0, jobStats: EMPTY_JOB_STATS, pastSessions: [], viewing: null };
   }
   const isTerm = TERMINAL_IDS.has(c.id);
   const v = lanes?.view(c.id);
@@ -166,6 +167,8 @@ function buildWindow(chars: TownSnapshot["characters"]): WindowView | null {
     taskStartedAt: v?.taskStartedAt ?? 0,
     taskTokens: v?.taskTokens ?? 0,
     beatAt: v?.beatAt ?? 0,
+    limitedUntil: v?.limitedUntil ?? 0,
+    jobStats: v?.jobStats ?? EMPTY_JOB_STATS,
     pastSessions: v?.pastSessions ?? [],
     viewing: v?.viewing ?? null,
   };
@@ -219,14 +222,26 @@ function notifyTelegram(id: CharacterId): void {
   if (!tg || !lanes || id === "krabs") return;
   const nm = tgName(id);
   if (lanes.hasPendingChoice(id)) {
-    const q = lanes.view(id).pendingChoice?.questions?.[0];
+    const qs = lanes.view(id).pendingChoice?.questions || [];
+    const q = qs[0];
     if (!q) return;
-    const rows: TgButton[][] = q.options.map((o, i) => [{ text: o.label.slice(0, 60), data: `ans:${id}:${i}` }]);
     tgExpect = { mode: "answer", id };
+    if (qs.length > 1) {
+      // A BATCH of questions (the character gathered them, as asked). Buttons
+      // only fit one question, so list them all with numbered options and take
+      // one reply line per question (a number or your own words).
+      const body = qs.map((qq, qi) => `<b>${qi + 1}.</b> ${tgEsc(qq.question)}\n` + qq.options.map((o, oi) => `   ${oi + 1}) ${tgEsc(o.label.slice(0, 80))}`).join("\n")).join("\n\n");
+      void tg.sendLong(`❓ <b>${tgEsc(nm)}</b> has ${qs.length} questions — all at once:\n\n${body}\n\n<i>Reply with one line per question: the option number, or your own words.</i>`);
+      return;
+    }
+    const rows: TgButton[][] = q.options.map((o, i) => [{ text: o.label.slice(0, 60), data: `ans:${id}:${i}` }]);
     void tg.send(`❓ <b>${tgEsc(nm)}</b> asks:\n${tgEsc(q.question)}\n\n<i>Tap an option, or reply with your own answer.</i>`, rows);
   } else if (lanes.hasPendingAsk(id)) {
     tgExpect = { mode: "answer", id };
     void tg.send(`🔐 <b>${tgEsc(nm)}</b> needs approval:\n${tgEsc(lanes.view(id).pendingAsk || "…")}`, [[{ text: "✅ Allow", data: `perm:${id}:allow` }, { text: "🚫 Deny", data: `perm:${id}:deny` }]]);
+  } else if (lanes.limitedUntil(id)) {
+    // Usage limit: nothing to decide — it resumes by itself. Just say so honestly.
+    void tg.send(`⏳ <b>${tgEsc(nm)}</b> ran into Claude's usage limit — it resets at ${tgEsc(fmtClock(lanes.limitedUntil(id)))} and ${tgEsc(nm)} will pick up by itself then. Nothing is lost.`, [[{ text: "🗑 Scrap the order", data: `scrap:${id}` }]]);
   } else if (lanes.isPaused(id)) {
     void tg.send(`⏸ <b>${tgEsc(nm)}</b> paused at a checkpoint — keep cooking?`, [[{ text: "🍳 Keep cooking", data: `retry:${id}` }, { text: "🗑 Scrap", data: `scrap:${id}` }]]);
   } else if (lanes.isBurned(id)) {
@@ -293,7 +308,22 @@ async function handleTgCommand(cmd: string, args: string): Promise<void> {
 async function handleTgText(text: string): Promise<void> {
   if (!tgExpect) { await tg?.send("Not sure what that's for. Try /town or /new."); return; }
   const { mode, id } = tgExpect; tgExpect = null;
-  if (mode === "answer") { await handleIntent({ type: "answerQuestion", characterId: id, answers: [text] }); await tg?.send(`✅ Told ${tgName(id)}: "${tgEsc(text)}"`); }
+  if (mode === "answer") {
+    // A batch of questions → one reply line per question; a bare number picks
+    // that option. A single question → the whole text is the answer.
+    const qs = lanes?.view(id).pendingChoice?.questions || [];
+    let answers = [text];
+    if (qs.length > 1) {
+      const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+      answers = qs.map((q, qi) => {
+        const line = lines[qi] || "";
+        const n = /^\d+[.)]?$/.test(line) ? parseInt(line, 10) : 0;
+        return (n >= 1 && n <= q.options.length) ? q.options[n - 1].label : line;
+      });
+    }
+    await handleIntent({ type: "answerQuestion", characterId: id, answers });
+    await tg?.send(`✅ Told ${tgName(id)}: "${tgEsc(answers.join(" · "))}"`);
+  }
   else { await handleIntent({ type: "handOutJob", characterId: id, prompt: text }); await tg?.send(`📋 Handed ${tgName(id)} the job.`); }
 }
 
@@ -303,6 +333,7 @@ async function sendTgTown(): Promise<void> {
     let s = "💤 idle";
     if (lanes!.isWorking(id)) s = "⏳ working";
     else if (lanes!.hasPendingChoice(id) || lanes!.hasPendingAsk(id)) s = "❓ waiting for you";
+    else if (lanes!.limitedUntil(id)) s = `⏳ waiting for Claude's limit (resets ${fmtClock(lanes!.limitedUntil(id))})`;
     else if (lanes!.isPaused(id)) s = "⏸ paused — keep cooking?";
     else if (lanes!.isBurned(id)) s = "⚠️ hit a snag";
     const title = lanes!.lastPromptFor(id);

@@ -6,10 +6,12 @@ import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod";
 import path from "node:path";
 import { readFileSync, promises as fs } from "node:fs";
-import type { CharacterId, ChatMessage, AskChoice, Attachment } from "../../shared/ipc";
+import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats } from "../../shared/ipc";
+import { EMPTY_JOB_STATS } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
 import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
 import { clearStrayApiKey } from "./claude";
+import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly } from "./guards";
 import { log } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -132,6 +134,32 @@ const HELPER_GRACE_MS = 45_000;
 // a backstop so a genuinely-lost signal can't hang "working" forever.
 const HELPER_STALL_MS = 900_000; // 15 min
 
+// QUESTION BATCHING (25 Aug 2026: Patrick called ask_maksym 33 times in one day,
+// mostly 1–2 questions at a time, ~half of them progress reports dressed as
+// questions — Maksym spent 4–7 h/character just waiting). The repo's prose rule
+// ("never drip-feed questions") didn't hold, so the TOOL enforces it: a second
+// single question within this window of the last answer is bounced back with
+// "batch it" (a `questions` array of 2+ always goes through, so does
+// `batchComplete: true`), and an ask whose every option is a mere acknowledgment
+// ("I'll check it", "Looks good, keep going") is bounced as a status update.
+const ASK_COOLDOWN_MS = 5 * 60_000;
+
+// USAGE LIMIT: when Claude's subscription limit is used up, the CLI ends the
+// turn with "You've hit your session limit · resets 1:40pm" and an error result.
+// Bikini used to show that as a generic burn ("something went wrong — try
+// again"), and every Try again paid a cold resume of the whole conversation just
+// to fail again (5 presses in 90 s on 25 Aug). Now: PAUSE with the honest reason
+// and the reset time, refuse retries until then, and resume by ourselves.
+const LIMIT_FALLBACK_MS = 60 * 60_000; // if no reset time can be read, wait an hour
+const LIMIT_RESUME_SLACK_MS = 45_000;   // resume a bit after the reset, not on the dot
+
+// LONG-ORDER NUDGE: past any of these, the character says once, in chat, that
+// the next task should be a NEW order (fresh session). A day-long order is what
+// pushed context to ~550k tokens per turn and tripped the limit three times.
+const NUDGE_CTX_TOKENS = 400_000;
+const NUDGE_HOURS = 4;
+const NUDGE_OUT_TOKENS = 1_000_000;
+
 // PreToolUse hook verdicts (AD-6).
 const ALLOW = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } } as const;
 const DENY = {
@@ -166,6 +194,11 @@ interface PersistedLane {
     servedTip: string | null;
     served: boolean;
     sentBack: boolean;
+    // Job meter + limit hold (optional: older files won't have them).
+    taskStartedAt?: number;
+    taskTokens?: number;
+    stats?: JobStats;
+    limitedUntil?: number;
   };
 }
 
@@ -181,6 +214,7 @@ interface Lane {
   superseded: boolean; // this turn was interrupted by a newer one — don't burn it
   resumedSession: boolean; // did THIS session open with a cold resume (vs warm)?
   turnsThisSession: number; // turns answered since this session opened (1 = first)
+  lastCallCtx: number;      // context size of the LATEST single model call (input+cache read+cache write) — the true "memory" size
   // Live streaming session (terminal-style): one persistent query fed by `pump`.
   pump: Pump | null;
   sdkQuery: any | null;         // the running query() — for interrupt()
@@ -215,6 +249,15 @@ interface Lane {
   viewing: number | null;       // index of a past session being browsed, or null
   viewReadOnly: boolean;        // is the browsed session in look-only mode?
   askingPast: boolean;          // a read-only/past turn is running
+  // Job meter (visible cost) + question batching + usage-limit hold:
+  stats: JobStats;              // this job's running tally (turns, helpers, asks, context, time)
+  phase: "working" | "waiting" | null; // what the working/waiting clocks are currently counting
+  phaseSince: number;           // epoch ms the current phase began
+  lastAskAnsweredAt: number;    // epoch ms Maksym last answered an ask_maksym (cooldown anchor)
+  nudged: boolean;              // the once-per-job "start the next task as a new order" note was shown
+  limitedUntil: number;         // epoch ms Claude's usage limit resets (0 = not limited)
+  limitTimer: ReturnType<typeof setTimeout> | null; // auto-resume when the limit resets
+  limitSeen: { resetsAt: number; text: string } | null; // a limit signal seen during the current turn
 }
 
 /** Adoption support (Scout & Runner): a character labels an existing lane.
@@ -250,6 +293,10 @@ export interface LaneView {
   taskTokens: number;
   /** Epoch ms of the last sign of life from the session (0 if none). */
   beatAt: number;
+  /** Claude's usage limit resets at (epoch ms); 0 when not limited. */
+  limitedUntil: number;
+  /** This job's running tally (with the live phase's time folded in). */
+  jobStats: JobStats;
   /** Prior conversations for this Character (newest last). */
   pastSessions: { index: number; title: string }[];
   /** A past session being browsed, or null when on the current conversation. */
@@ -296,6 +343,7 @@ export class LaneManager {
         current: {
           conversation: l.conversation, sessionId: l.sessionId, lastPrompt: l.lastPrompt,
           baseSha: l.baseSha, servedTip: l.servedTip, served: l.served, sentBack: l.sentBack,
+          taskStartedAt: l.taskStartedAt, taskTokens: l.taskTokens, stats: l.stats, limitedUntil: l.limitedUntil,
         },
       };
     }
@@ -311,16 +359,38 @@ export class LaneManager {
         conversation: cur?.conversation ?? [], working: false, burned: false, paused: false,
         sessionId: cur?.sessionId ?? null, lastPrompt: cur?.lastPrompt ?? null,
         abort: null, cancelled: false, superseded: false,
-        resumedSession: false, turnsThisSession: 0,
+        resumedSession: false, turnsThisSession: 0, lastCallCtx: 0,
         pump: null, sdkQuery: null, outstanding: 0, awaitingIdle: false, awaitSince: 0, idleAt: 0, helperFinishedAt: 0, idleTimer: null,
-        activity: null, todos: [], taskStartedAt: 0, taskTokens: 0, beatAt: 0, lastBeatPush: 0, sessionLoop: null,
+        activity: null, todos: [], taskStartedAt: cur?.taskStartedAt ?? 0, taskTokens: cur?.taskTokens ?? 0, beatAt: 0, lastBeatPush: 0, sessionLoop: null,
         pending: null, pendingChoice: null, watchdog: null, agents: new Map(), notified: new Set(),
         baseSha: cur?.baseSha ?? null, servedTip: cur?.servedTip ?? null,
         served: cur?.served ?? false, sentBack: cur?.sentBack ?? false, collision: false,
         archive: saved?.archive ?? [], viewing: null, viewReadOnly: true, askingPast: false,
+        stats: { ...EMPTY_JOB_STATS, ...(cur?.stats ?? {}) }, phase: null, phaseSince: 0,
+        lastAskAnsweredAt: 0, nudged: false,
+        limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null,
       }).get(id)!;
+      // Closed the app while waiting out a usage limit? Keep waiting — and keep
+      // the promise to pick up by ourselves when it resets.
+      if (l.limitedUntil > Date.now()) { l.paused = true; this.scheduleLimitResume(id); }
+      else l.limitedUntil = 0;
     }
     return l;
+  }
+
+  /** Epoch ms Claude's usage limit resets for this character (0 = not limited). */
+  limitedUntil(id: CharacterId): number { const l = this.lane(id); return l.limitedUntil > Date.now() ? l.limitedUntil : 0; }
+
+  /** The working/waiting clocks: switch what's being counted, banking the time
+   *  spent in the phase that just ended. Waiting = idle/asking/paused, i.e. the
+   *  hours Maksym couldn't see on 25 Aug (4.2 h and 7.4 h per character). */
+  private setPhase(l: Lane, phase: "working" | "waiting"): void {
+    const now = Date.now();
+    if (l.phase && l.phaseSince) {
+      const dt = Math.max(0, now - l.phaseSince);
+      if (l.phase === "working") l.stats.workingMs += dt; else l.stats.waitingMs += dt;
+    }
+    l.phase = phase; l.phaseSince = now;
   }
 
   conversationFor(id: CharacterId): ChatMessage[] { return this.lane(id).conversation; }
@@ -359,6 +429,16 @@ export class LaneManager {
       taskStartedAt: l.taskStartedAt,
       taskTokens: l.taskTokens,
       beatAt: l.beatAt,
+      limitedUntil: l.limitedUntil > Date.now() ? l.limitedUntil : 0,
+      // Stats with the CURRENT phase's elapsed time folded in, so the clocks tick.
+      jobStats: (() => {
+        const s = { ...l.stats };
+        if (l.phase && l.phaseSince) {
+          const dt = Math.max(0, Date.now() - l.phaseSince);
+          if (l.phase === "working") s.workingMs += dt; else s.waitingMs += dt;
+        }
+        return s;
+      })(),
       pastSessions: l.archive.map((s, i) => ({ index: i, title: s.title })),
       viewing: l.viewing != null && l.archive[l.viewing]
         ? { index: l.viewing, readOnly: l.viewReadOnly, messages: l.archive[l.viewing].messages, asking: l.askingPast }
@@ -396,6 +476,8 @@ export class LaneManager {
     l.conversation = [{ from: "you", text: prompt, images: imageUrls(attachments), files: fileNames(attachments) }];
     l.sessionId = null; l.lastPrompt = prompt;
     l.todos = []; l.taskStartedAt = Date.now(); l.taskTokens = 0; // fresh job → fresh plan/timer/spend
+    l.stats = { ...EMPTY_JOB_STATS }; l.phase = null; l.phaseSince = 0; l.nudged = false; l.lastAskAnsweredAt = 0;
+    this.clearLimit(l); // a new order never inherits an old limit hold
     // Remember the main-line commit this Job builds on (for landing/undo, AD-5).
     try { l.baseSha = await headSha(this.projectPath); } catch { l.baseSha = null; }
     l.servedTip = null; l.served = false; l.sentBack = false; l.collision = false;
@@ -420,10 +502,107 @@ export class LaneManager {
    *  prompt from scratch). */
   async retry(id: CharacterId): Promise<void> {
     const l = this.lane(id);
+    // Waiting out Claude's usage limit and Maksym presses Try again anyway? His
+    // call — the reset clock can be conservative. Drop the hold and try; if the
+    // limit is still on, the turn ends with the limit error and we park again
+    // with the freshly reported reset time (one cold re-read, no loop).
+    if (l.limitedUntil > Date.now()) {
+      log("limit", `${id} retry during limit hold — trying now anyway`, { resetsAt: new Date(l.limitedUntil).toISOString() });
+      this.clearLimit(l);
+      l.burned = false; l.paused = false;
+      l.conversation.push({ from: "you", text: "Try again now." });
+      l.conversation.push({ from: "them", text: "🔁 Trying now — if Claude's limit is still on, I'll wait it out again with the new reset time.", tool: true });
+      this.onChange();
+      void this.send(id, "Continue from where you left off and finish what you were doing.", false);
+      return;
+    }
+    this.clearLimit(l);
     l.burned = false; l.paused = false;
     l.conversation.push({ from: "you", text: "Keep going — pick up where you left off." });
     this.onChange();
     void this.send(id, "Continue from where you left off and finish what you were doing.", false);
+  }
+
+  /** Forget a usage-limit hold (new order, scrap, cancel, or the limit reset). */
+  private clearLimit(l: Lane): void {
+    l.limitedUntil = 0; l.limitSeen = null;
+    if (l.limitTimer) { clearTimeout(l.limitTimer); l.limitTimer = null; }
+  }
+
+  /** Claude's usage limit is used up. NOT a burn: pause with the honest reason
+   *  and the reset time, hold the session's place, and come back by ourselves.
+   *  (Before: "something went wrong — try again", and each Try again cold-
+   *  resumed the whole conversation only to fail again.) */
+  private async pauseForLimit(id: CharacterId, seen: { resetsAt: number; text: string }): Promise<void> {
+    const l = this.lane(id);
+    const resetsAt = seen.resetsAt > Date.now() ? seen.resetsAt : Date.now() + LIMIT_FALLBACK_MS;
+    l.limitSeen = null;
+    l.limitedUntil = resetsAt;
+    l.stats.limitHits++;
+    this.endSession(l);
+    l.paused = true; l.burned = false; l.working = false; l.activity = null; l.agents.clear();
+    this.clearWatchdog(l);
+    this.setPhase(l, "waiting");
+    l.conversation.push({ from: "them", text: `⏳ Claude's usage limit is used up for now — it resets at ${fmtClock(resetsAt)}. I'm holding my place and will pick up again by myself right after; nothing is lost. (Scrap it if you'd rather drop this order.)` });
+    log("limit", `${id} paused — usage limit`, { resetsAt: new Date(resetsAt).toISOString(), hits: l.stats.limitHits, seen: seen.text.slice(0, 80) });
+    await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
+    this.onCue(id, "ready"); // so the phone hears about it (main.ts words it as a limit, not a snag)
+    this.scheduleLimitResume(id);
+    this.persist();
+    this.onChange();
+  }
+
+  /** Arm the auto-resume for a limit hold: a beat after the reset, carry on.
+   *  Belt AND braces: a one-shot timer plus a 30 s sweep (`limitSweep`) — macOS
+   *  throttles a backgrounded app's long timers (App Nap), which made the first
+   *  live resume fire 9 minutes late on 25 Aug; short periodic checks don't drift. */
+  private scheduleLimitResume(id: CharacterId): void {
+    const l = this.lane(id);
+    if (l.limitTimer) clearTimeout(l.limitTimer);
+    const delay = Math.max(15_000, l.limitedUntil - Date.now() + LIMIT_RESUME_SLACK_MS);
+    l.limitTimer = setTimeout(() => { l.limitTimer = null; this.resumeAfterLimit(id); }, delay);
+    if (!this.limitSweep) {
+      this.limitSweep = setInterval(() => {
+        let anyHeld = false;
+        for (const [cid, ln] of this.lanes) {
+          if (!ln.paused || !ln.limitedUntil) continue;
+          anyHeld = true;
+          if (Date.now() >= ln.limitedUntil + LIMIT_RESUME_SLACK_MS) this.resumeAfterLimit(cid);
+        }
+        if (!anyHeld && this.limitSweep) { clearInterval(this.limitSweep); this.limitSweep = null; }
+      }, 30_000);
+    }
+  }
+  private limitSweep: ReturnType<typeof setInterval> | null = null;
+
+  /** The limit has reset → carry on where we left off. Idempotent. */
+  private resumeAfterLimit(id: CharacterId): void {
+    const l = this.lane(id);
+    if (!l.paused || !l.limitedUntil) return; // scrapped / resumed by hand meanwhile
+    if (Date.now() < l.limitedUntil) return;   // not yet
+    this.clearLimit(l);
+    l.paused = false;
+    l.conversation.push({ from: "them", text: "🔔 Claude's limit has reset — picking up right where I left off." });
+    log("limit", `${id} limit reset — resuming`);
+    this.onChange();
+    void this.send(id, "Continue from where you left off and finish what you were doing.", false);
+  }
+
+  /** Once per job: when an order has grown long/heavy, say so in chat and point
+   *  at the fix (next task = NEW order). Informational — no chime, no pause. */
+  private maybeNudge(id: CharacterId, ctx: number): void {
+    const l = this.lane(id);
+    if (l.nudged || !l.taskStartedAt) return;
+    const hours = (Date.now() - l.taskStartedAt) / 3_600_000;
+    const why: string[] = [];
+    if (ctx >= NUDGE_CTX_TOKENS) why.push(`my memory for this order is up to ${Math.round(ctx / 1000)}k tokens`);
+    if (hours >= NUDGE_HOURS) why.push(`it's been running ${Math.floor(hours)} hours`);
+    if (l.taskTokens >= NUDGE_OUT_TOKENS) why.push(`I've written ${(l.taskTokens / 1e6).toFixed(1)}M tokens`);
+    if (!why.length) return;
+    l.nudged = true;
+    const helpers = l.stats.helpers ? `, with ${l.stats.helpers} helpers called in so far` : "";
+    l.conversation.push({ from: "them", text: `🧭 Heads-up from the kitchen: ${why.join(", ")}${helpers}. Long orders get slower and pricier with every step — the whole conversation is re-read each turn, and that's what runs into Claude's limit. When this piece lands, hand the next task out as a NEW order (fresh start) instead of adding it here.` });
+    log("lane", `${id} long-order nudge`, { ctx, hours: hours.toFixed(1), out: l.taskTokens, helpers: l.stats.helpers });
   }
 
   /** Deliver a user message to the character's live session, starting (or
@@ -440,6 +619,8 @@ export class LaneManager {
     }
     l.outstanding++;
     l.working = true; l.burned = false; l.paused = false; l.cancelled = false; l.awaitingIdle = false;
+    l.limitSeen = null; // a fresh turn starts with a clean slate (no stale limit flag from an old turn)
+    this.setPhase(l, "working");
     if (l.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = null; }
     // Reset the heartbeat to NOW so the "working" strip counts from THIS message,
     // not from the character's last activity (which could be minutes ago after it
@@ -530,8 +711,10 @@ export class LaneManager {
     const l = this.lane(id);
     l.cancelled = true;
     this.endSession(l);
+    this.clearLimit(l);
     l.burned = false; l.paused = false; l.working = false;
     this.clearWatchdog(l);
+    this.setPhase(l, "waiting");
     l.conversation.push({ from: "them", text: "Scrapped. That order's off the books." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -548,8 +731,10 @@ export class LaneManager {
     if (!l.working && !l.pump) return;
     l.cancelled = true;
     this.endSession(l);
+    this.clearLimit(l);
     l.working = false;
     this.clearWatchdog(l);
+    this.setPhase(l, "waiting");
     l.conversation.push({ from: "them", text: "Okay — I stopped. Nothing was left half-done." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -741,6 +926,7 @@ export class LaneManager {
     await this.log.append({ type: "PermissionAnswered", id, allow });
     l.conversation.push({ from: "you", text: allow ? "Allowed." : "Don't do that." });
     l.working = true;
+    this.setPhase(l, "working");
     await this.log.append({ type: "CharacterStateChanged", id, state: "working" });
     this.persist();
     this.onChange();
@@ -754,8 +940,15 @@ export class LaneManager {
   private promptChoice(id: CharacterId, ask: AskChoice): Promise<string> {
     const l = this.lane(id);
     const q0 = ask.questions[0];
-    l.conversation.push({ from: "them", text: `🤔 ${q0 ? q0.question : "I have a question."}`, tool: true });
+    // One question → its text in the bubble (the option buttons follow). A
+    // BATCH → say how many; the panel titles each one.
+    const head = ask.questions.length > 1
+      ? `🤔 I've got ${ask.questions.length} questions for you — all in one go:`
+      : `🤔 ${q0 ? q0.question : "I have a question."}`;
+    l.conversation.push({ from: "them", text: head, tool: true });
     l.working = false;
+    l.stats.asks++;
+    this.setPhase(l, "waiting");
     l.pendingChoice = null;
     void this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
     this.clearWatchdog(l);
@@ -780,6 +973,8 @@ export class LaneManager {
     const { textSuffix } = await this.prepareAttachments(id, attachments, true); // images-as-files (tool result is text)
     l.conversation.push({ from: "you", text: shown, images: imageUrls(attachments), files: fileNames(attachments) });
     l.working = true;
+    l.lastAskAnsweredAt = Date.now(); // anchors the ask cooldown (batch, don't drip)
+    this.setPhase(l, "working");
     await this.log.append({ type: "CharacterStateChanged", id, state: "working" });
     this.armWatchdog(id);
     this.persist();
@@ -838,6 +1033,7 @@ export class LaneManager {
     l.burned = true; // set before ending so the session loop's catch won't double-burn
     this.endSession(l); // stop the live session — nothing keeps writing after a burn
     l.working = false; this.clearWatchdog(l);
+    this.setPhase(l, "waiting");
     l.conversation.push({ from: "them", text: `Uh oh — I burned this one: ${reason}. Nothing broke; your project is untouched. Try again, or scrap it?` });
     await this.log.append({ type: "JobBurned", id, reason });
     await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
@@ -894,6 +1090,7 @@ export class LaneManager {
     this.clearWatchdog(l);
     l.working = false;
     l.agents.clear();
+    this.setPhase(l, "waiting");
     l.idleAt = Date.now(); // remember when we chimed → suppress straggler re-chimes
     await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
     this.onCue(id, "ready"); // truly finished — call Maksym
@@ -917,7 +1114,7 @@ export class LaneManager {
     l.agents.clear();
     l.abort = new AbortController();
     l.resumedSession = !!(resume && l.sessionId); // first turn will be a cold resume
-    l.turnsThisSession = 0;
+    l.turnsThisSession = 0; l.lastCallCtx = 0;
     log("lane", `${id} session start`, { cwd, resume: l.resumedSession, keepWarmMs: KEEPWARM_MS });
 
     // Give the Character a real "ask Maksym" tool. When it needs a decision it
@@ -931,21 +1128,59 @@ export class LaneManager {
       tools: [
         tool(
           "ask_maksym",
-          "Ask Maksym a question and offer clickable answer choices. Use this whenever you'd otherwise ask him to decide or choose between options — he sees buttons and can also type his own answer. Returns his answer as text.",
+          "Ask Maksym to DECIDE something, with clickable answer choices; blocks until he answers and returns his answer as text. Only for real decisions that change what you do next — never for progress reports ('Fixed…', 'Deployed…', 'Done…'): write those as normal text and keep working. Maksym wants questions BATCHED: finish the current step, collect every open question, then ask them all in ONE call via `questions` (each answered separately). A lone follow-up question within a few minutes of his last answer is bounced back with 'batch it' unless you set batchComplete=true (meaning: nothing else can come up, this one blocks everything).",
           {
-            question: z.string().describe("The question to ask — clear and specific."),
-            options: z.array(z.string()).min(2).max(6).describe("2–6 short answer choices to show as buttons."),
+            question: z.string().optional().describe("A single question — clear and specific. (Or use `questions` for several at once.)"),
+            options: z.array(z.string()).min(2).max(6).optional().describe("2–6 short answer choices for `question`."),
             multiSelect: z.boolean().optional().describe("true if he may pick more than one option."),
+            questions: z.array(z.object({
+              question: z.string().describe("The question — clear and specific."),
+              options: z.array(z.string()).min(2).max(6).describe("2–6 short answer choices."),
+              multiSelect: z.boolean().optional(),
+            })).min(1).max(8).optional().describe("Several questions asked together in one go (preferred over asking one at a time)."),
+            batchComplete: z.boolean().optional().describe("Set true only when this single question blocks all further work and no other question can come up. Skips the batching cooldown."),
           },
           async (args) => {
+            // Normalise the two shapes into one list.
+            const list = (args.questions && args.questions.length
+              ? args.questions
+              : (args.question ? [{ question: args.question, options: args.options || [], multiSelect: args.multiSelect }] : [])
+            ).filter((q) => q.question && q.options && q.options.length >= 2);
+            if (!list.length) {
+              return { content: [{ type: "text", text: "Nothing was asked: pass `question` + `options` (2–6), or a `questions` array of those." }] };
+            }
+            // GUARD 1 — a status update is not a question. If every option is a
+            // mere acknowledgment ("I'll check it", "Looks good, keep going"),
+            // Maksym isn't deciding anything; he's being made to click through a
+            // progress report (that was ~half of Patrick's 33 asks on 25 Aug).
+            const acks = list.filter((q) => isAckOnly(q.options));
+            if (acks.length === list.length) {
+              log("lane", `${id} ask bounced — status update, not a decision`, { q: list[0].question.slice(0, 80) });
+              return { content: [{ type: "text", text: "Not sent to Maksym — this reads as a progress update, not a decision: every option is just an acknowledgment. Say it in your normal reply (he reads everything you write) and KEEP WORKING; do not wait for a reply. Use ask_maksym only when he must CHOOSE between outcomes that change what you build or do next." }] };
+            }
+            // GUARD 2 — batch, don't drip. A lone question minutes after his last
+            // answer means you're asking one at a time. Go collect the rest first.
+            const sinceAnswer = l.lastAskAnsweredAt ? Date.now() - l.lastAskAnsweredAt : Infinity;
+            if (list.length === 1 && !args.batchComplete && sinceAnswer < ASK_COOLDOWN_MS) {
+              const mins = Math.max(1, Math.round(sinceAnswer / 60_000));
+              log("lane", `${id} ask bounced — cooldown (batch it)`, { sinceMin: mins, q: list[0].question.slice(0, 80) });
+              return { content: [{ type: "text", text: `Not sent yet — Maksym answered you only ${mins} minute${mins === 1 ? "" : "s"} ago, and he wants questions BATCHED, not one at a time (every question pauses him and his phone rings). Do this instead: keep working on everything that does NOT depend on this answer, note every other question that comes up, and then call ask_maksym ONCE with a \`questions\` array holding all of them. If this one question truly blocks all further work and nothing else can come up, call again with batchComplete: true.` }] };
+            }
             const answer = await this.promptChoice(id, {
-              questions: [{
-                question: args.question,
+              questions: list.map((q) => ({
+                question: q.question,
                 header: "",
-                multiSelect: !!args.multiSelect,
-                options: (args.options || []).map((o: string) => ({ label: o })),
-              }],
+                multiSelect: !!q.multiSelect,
+                options: q.options.map((o: string) => ({ label: o })),
+              })),
             });
+            // Several questions → the answers come back in the same order, one per line.
+            if (list.length > 1) {
+              const parts = answer.split(" · ");
+              const lines = list.map((q, i) => `${i + 1}. ${q.question}\n   → ${parts[i] ?? "(no answer)"}`);
+              const extra = parts.length > list.length ? "\n" + parts.slice(list.length).join(" · ") : "";
+              return { content: [{ type: "text", text: lines.join("\n") + extra }] };
+            }
             return { content: [{ type: "text", text: answer }] };
           },
         ),
@@ -972,7 +1207,9 @@ export class LaneManager {
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
-            append: "If you need Maksym to decide, choose, approve, or answer ANYTHING before you can correctly continue, you MUST call the `ask_maksym` tool and WAIT — it blocks until he actually replies (he taps an option or types his own answer). Never write a question only in prose and then keep going, and NEVER assume, invent, guess, or imagine his answer. Do not say you have 'his decisions', 'as he decided', or 'per your call' unless an `ask_maksym` answer really came back to you this turn. If the answer would change WHAT you build, ask via `ask_maksym` and wait BEFORE building anything; if it's a minor call, make a sensible choice and note it rather than blocking." + serverNote,
+            append: "If you need Maksym to decide, choose, approve, or answer ANYTHING before you can correctly continue, you MUST call the `ask_maksym` tool and WAIT — it blocks until he actually replies (he taps an option or types his own answer). Never write a question only in prose and then keep going, and NEVER assume, invent, guess, or imagine his answer. Do not say you have 'his decisions', 'as he decided', or 'per your call' unless an `ask_maksym` answer really came back to you this turn. If the answer would change WHAT you build, ask via `ask_maksym` and wait BEFORE building anything; if it's a minor call, make a sensible choice and note it rather than blocking."
+              + " HOW to ask — Maksym is one person running several of you at once, and every question stops him and rings his phone. So: (1) BATCH. Finish the step you're on, gather EVERY open question, and ask them together in ONE `ask_maksym` call using the `questions` array — never one question now and another ten minutes later. Natural batching points: after planning, after a design walkthrough, before opening a PR. (2) Progress is NOT a question. 'Fixed it', 'Deployed to staging', 'Done — take a look' go in your normal reply; never route them through `ask_maksym`. (3) Prefer deciding small things yourself and saying what you chose. The tool enforces (1) and (2): a lone follow-up question right after his last answer, or a question whose options are all acknowledgments, is bounced back to you — that means keep working and batch, not stop."
+              + serverNote,
           },
           // Load the repo's full setup (CLAUDE.md, skills, /commands, rules,
           // agents, connectors) so the character is as smart as the terminal.
@@ -1005,6 +1242,7 @@ export class LaneManager {
                 const question = this.describe(toolName, ti);
                 l.conversation.push({ from: "them", text: question, tool: true });
                 l.working = false;
+                this.setPhase(l, "waiting");
                 await this.log.append({ type: "PermissionAsked", id });
                 await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
                 this.clearWatchdog(l);
@@ -1032,7 +1270,18 @@ export class LaneManager {
           l.activity = "thinking…";
           if (l.beatAt - l.lastBeatPush > 1500) { l.lastBeatPush = l.beatAt; this.onChange(); }
         }
-        if (msg.type === "system" && msg.subtype === "init") {
+        if (mtype === "rate_limit_event") {
+          // Subscription usage-limit status from the CLI. "rejected" = the turn
+          // is about to end with the limit error → remember it so the result is
+          // handled as a limit PAUSE, not a generic burn. Any status carries the
+          // share already used (shown on the job meter).
+          const info = ((msg as any).rate_limit_info || {}) as Record<string, any>;
+          if (typeof info.utilization === "number") l.stats.limitUtil = info.utilization > 1 ? info.utilization / 100 : info.utilization;
+          log("limit", `${id} rate_limit_event`, { status: info.status, type: info.rateLimitType, util: info.utilization, resetsAt: info.resetsAt });
+          if (info.status === "rejected") {
+            l.limitSeen = { resetsAt: normalizeResetsAt(info.resetsAt), text: `usage limit (${info.rateLimitType || "session"})` };
+          }
+        } else if (msg.type === "system" && msg.subtype === "init") {
           l.sessionId = msg.session_id;
           log("lane", `${id} session ready`, { sessionId: msg.session_id, cwd });
         } else if (mtype === "system" && msub === "task_started") {
@@ -1046,6 +1295,7 @@ export class LaneManager {
           else if (key && !l.agents.has(key)) {
             const name = helperName(m); // subagent_type / workflow / description
             l.agents.set(key, name);
+            l.stats.helpers++;
             l.conversation.push({ from: "them", text: `🐟 Called in a helper — ${name}`, tool: true });
             log("tool", `${id} helper started (task_started)`, { name, key, agents: l.agents.size });
             this.onChange();
@@ -1116,10 +1366,20 @@ export class LaneManager {
           // letting bumpIdle's grace window catch the follow-up before chiming.
           if (l.awaitingIdle && tasks.length === 0) { l.agents.clear(); l.helperFinishedAt = Date.now(); this.bumpIdle(id); }
         } else if (msg.type === "assistant") {
+          // Each assistant message is ONE model call; its usage is that call's real
+          // context size. (The `result` usage below is SUMMED over every call in
+          // the turn — 4 tool calls at ~190k each read as "784k" — so never use
+          // that sum as the memory size.)
+          const au = (msg.message as any).usage;
+          if (au) { const c = (au.input_tokens || 0) + (au.cache_read_input_tokens || 0) + (au.cache_creation_input_tokens || 0); if (c > 0) l.lastCallCtx = c; }
           for (const block of msg.message.content) {
             if (block.type === "text" && block.text.trim()) {
               l.conversation.push({ from: "them", text: block.text.trim() });
               l.activity = "writing a reply…";
+              // "You've hit your session limit · resets 1:40pm" arrives as plain
+              // text before the error result — read the reset clock from it.
+              const lim = parseLimitText(block.text);
+              if (lim) l.limitSeen = { resetsAt: l.limitSeen?.resetsAt || lim.resetsAt, text: lim.text };
               log("lane", `${id} said`, block.text.replace(/\s+/g, " ").slice(0, 120));
             } else if (block.type === "tool_use") {
               // Sub-agents ("helpers") launch via the "Agent"/"Task" tool. Only
@@ -1129,6 +1389,7 @@ export class LaneManager {
                 if (!l.agents.has(block.id)) {
                   const name = helperName((block as any).input);
                   l.agents.set(block.id, name);
+                  l.stats.helpers++;
                   l.conversation.push({ from: "them", text: `🐟 Called in a helper — ${name}`, tool: true });
                   log("tool", `${id} helper started (tool_use)`, { name, agents: l.agents.size });
                 }
@@ -1167,18 +1428,29 @@ export class LaneManager {
           // (a full re-read of the conversation — the app-specific cost we want to
           // MEASURE and minimise). Any later turn in the session is warm.
           const coldResume = l.turnsThisSession === 1 && l.resumedSession;
-          const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+          // `usage` on a result is the TOTAL over every model call in this turn
+          // (a 4-call turn at ~190k context reports ~780k). The memory size we
+          // show/nudge on is the LATEST single call, tracked from assistant
+          // messages above; fall back to total ÷ calls if none was seen.
+          const turnInput = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+          const calls = Math.max(1, Number((msg as any).num_turns) || 1);
+          const ctx = l.lastCallCtx > 0 ? l.lastCallCtx : Math.round(turnInput / calls);
           log("usage", `${id} turn`, {
             input: u.input_tokens, cacheRead: u.cache_read_input_tokens,
             cacheWrite: u.cache_creation_input_tokens, out: u.output_tokens,
-            ctx, coldResume, warm: !coldResume, sessionTurn: l.turnsThisSession,
+            turnInput, ctx, coldResume, warm: !coldResume, sessionTurn: l.turnsThisSession,
             turns: (msg as any).num_turns,
           });
           l.taskTokens += (u.output_tokens || 0); // running output-token spend for this job
+          l.stats.turns++;
+          if (ctx > 0) l.stats.ctxTokens = ctx; // what the next call will re-read (latest call size, NOT the turn total)
           log("lane", `${id} message answered`, { subtype: sub, isError: isErr, turns: (msg as any).num_turns, outstanding: l.outstanding });
           l.outstanding = Math.max(0, l.outstanding - 1);
           if (isErr) {
             console.error(`[bikini] lane ${id} error result: ${sub}`);
+            // Claude's usage limit — the CLI reports it as is_error + "success".
+            // Not a failure of the job: pause honestly and auto-resume at reset.
+            if (l.limitSeen) { await this.pauseForLimit(id, l.limitSeen); return; }
             this.endSession(l);
             // Hitting the step cap is NOT a failure — it's a deliberate check-in
             // so a big job can't run up spend unattended. PAUSE and ask instead of
@@ -1186,7 +1458,7 @@ export class LaneManager {
             // (context preserved, never replays), with a fresh step budget. This
             // is the whole point of the cap: bound unattended runs, lose nothing.
             if (sub === "error_max_turns") {
-              l.paused = true; l.working = false; this.clearWatchdog(l);
+              l.paused = true; l.working = false; this.clearWatchdog(l); this.setPhase(l, "waiting");
               l.conversation.push({ from: "them", text: "That's a big job — I've taken a lot of steps, so I paused to check in before spending more (so I don't run up your bill while you're away). Nothing's lost. Want me to keep cooking? I'll pick up right where I left off." });
               await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
               this.onCue(id, "ready"); // needs a decision — call Maksym
@@ -1204,6 +1476,8 @@ export class LaneManager {
             await this.burn(id, reasonFromError(reasonHint));
             return;
           }
+          l.limitSeen = null; // a limit mention that did NOT end the turn (e.g. a helper's) is not ours
+          this.maybeNudge(id, ctx);
           this.persist(); // save progress (survives restart)
           // If more messages appear outstanding OR helpers are still running,
           // HOLD (stay working, Cancel active) but arm the quiet-timer so silence
@@ -1246,6 +1520,13 @@ export class LaneManager {
       // that's not a failure. Next message resumes a fresh one.
       if (!l.working) { log("lane", `${id} idle session closed`, { note: String(e?.message || e).slice(0, 80) }); return; }
       const raw = (e && (e.stack || e.message)) || String(e);
+      // Died on the usage limit (as an exception rather than an error result) →
+      // same honest pause + auto-resume, not a burn.
+      if (l.limitSeen || /session limit|usage limit|rate.?limit|\b429\b/i.test(raw)) {
+        log("limit", `${id} threw on usage limit`, { error: raw.slice(0, 120) });
+        await this.pauseForLimit(id, l.limitSeen || { resetsAt: 0, text: raw.slice(0, 120) });
+        return;
+      }
       console.error(`[bikini] lane ${id} burned — real error:\n${raw}`); // → /tmp/bikini-live.log
       log("burn", `${id} threw`, { error: raw });
       await this.burn(id, reasonFromError(e && (e.message || String(e)) || "unknown"));
