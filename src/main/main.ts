@@ -18,8 +18,8 @@ import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { srProjectFor } from "./config/adoptions";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
-import { CHANNELS, EMPTY_JOB_STATS, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState } from "../shared/ipc";
-import { fmtClock } from "./adapters/guards";
+import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge } from "../shared/ipc";
+import { fmtClock, fmtWhen, fuelWord, fuelStale } from "./adapters/guards";
 
 const IDLE_PREP = { status: "idle" as const, message: "" };
 const IDLE_CLAUDE = { status: "idle" as const, message: "" };
@@ -78,7 +78,8 @@ async function openProjectLog(projectPath: string): Promise<void> {
       },
     };
   }
-  lanes = new LaneManager(projectPath, projectLog, onLaneChange, fireFinishNotification, emitSoundCue, () => cfg.data.bypassPermissions, adopt);
+  lanes = new LaneManager(projectPath, projectLog, onLaneChange, fireFinishNotification, emitSoundCue, () => cfg.data.bypassPermissions, adopt,
+    { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning });
   // Real-terminal characters (squid): the actual `claude` CLI in the lane
   // worktree. onData/onExit stream straight to the renderer's xterm.
   terminals = new TerminalManager(
@@ -185,6 +186,26 @@ function emitSoundCue(id: CharacterId, kind: "start" | "ready"): void {
   if (winAlive()) win!.webContents.send(CHANNELS.sound, { characterId: id, kind, url });
   if (kind === "ready") notifyTelegram(id); // a character needs attention → ping the phone
   else if (kind === "start") notifyTgStart(id); // a job kicked off → ping the phone
+}
+
+// Reserve light (Job 1): the FIRST time the 5-hour tank lights up in a window,
+// one line to the phone. Once per window — the lane persists what it warned about.
+function onFuelWarning(g: Gauge): void {
+  if (!tg) return;
+  const pct = g.util !== null ? ` (${Math.round(g.util * 100)}% used)` : "";
+  const when = g.resetsAt ? ` — resets ${fmtWhen(g.resetsAt)}` : "";
+  void tg.send(`⛽ Claude's 5-hour tank is in reserve${pct}${when}. Long orders will slow down; hand the next task out as a NEW order.`);
+}
+
+/** The street sign's words, from the town-wide fuel reading (null = dark/hidden).
+ *  The 5-hour tank is the headline; the weekly window is the tooltip — unless
+ *  only the weekly one is lit, in which case IT is the headline. */
+function fuelSignFor(fuel: Fuel, now: number = Date.now()): FuelSign | null {
+  const five = fuelWord(fuel.fiveHour, now, "Reserve");
+  const week = fuelWord(fuel.sevenDay, now, "Weekly reserve");
+  if (five && fuel.fiveHour) return { level: fuel.fiveHour.level as FuelSign["level"], text: five, title: week || "", stale: fuelStale(fuel.fiveHour, now) };
+  if (week && fuel.sevenDay) return { level: fuel.sevenDay.level as FuelSign["level"], text: week, title: "", stale: fuelStale(fuel.sevenDay, now) };
+  return null;
 }
 
 function notifyTgStart(id: CharacterId): void {
@@ -339,6 +360,9 @@ async function sendTgTown(): Promise<void> {
     const title = lanes!.lastPromptFor(id);
     return `<b>${tgEsc(tgName(id))}</b>: ${s}${title ? `\n   ↳ ${tgEsc(title.slice(0, 60))}` : ""}`;
   });
+  // The reserve light, when lit: one line per lit window.
+  const fuel = lanes.fuel();
+  for (const w of [fuelWord(fuel.fiveHour, Date.now(), "Reserve"), fuelWord(fuel.sevenDay, Date.now(), "Weekly reserve")]) if (w) lines.push(`⛽ ${tgEsc(w)}`);
   await tg.send("🏙 <b>Town status</b>\n" + lines.join("\n"));
 }
 
@@ -392,6 +416,9 @@ function snapshot(): TownSnapshot {
   // Portraits for all UI chrome (no emoji, AD-7).
   base.faces = {};
   for (const r of ROSTER) base.faces[r.id] = resolveFace(ASSETS_DIR, r.id);
+  // The reserve light (town-wide usage windows), and its words when lit.
+  base.fuel = lanes?.fuel() ?? EMPTY_FUEL;
+  base.fuelSign = fuelSignFor(base.fuel);
   return base;
 }
 

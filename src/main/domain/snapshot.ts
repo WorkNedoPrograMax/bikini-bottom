@@ -3,12 +3,13 @@
 
 import type { DomainEvent } from "./events";
 import type { CharacterView, TownSnapshot } from "../../shared/ipc";
+import { EMPTY_FUEL } from "../../shared/ipc";
 
 export const BACKGROUND = "conch-day.png";
 
 /** The town before any Character exists (First Run shows over this). */
 export function emptyTown(): TownSnapshot {
-  return { seq: 0, background: BACKGROUND, characters: [], firstRun: null, openWindow: null, orders: [], muted: false, faces: {} };
+  return { seq: 0, background: BACKGROUND, characters: [], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null };
 }
 
 export function fold(events: readonly DomainEvent[]): TownSnapshot {
@@ -43,5 +44,5 @@ export function fold(events: readonly DomainEvent[]): TownSnapshot {
     }
   }
 
-  return { seq, background: BACKGROUND, characters: [...chars.values()], firstRun: null, openWindow: null, orders: [], muted: false, faces: {} };
+  return { seq, background: BACKGROUND, characters: [...chars.values()], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null };
 }

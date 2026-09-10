@@ -6,12 +6,12 @@ import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod";
 import path from "node:path";
 import { readFileSync, promises as fs } from "node:fs";
-import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats } from "../../shared/ipc";
-import { EMPTY_JOB_STATS } from "../../shared/ipc";
+import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats, Fuel, Gauge } from "../../shared/ipc";
+import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
 import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
 import { clearStrayApiKey } from "./claude";
-import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly } from "./guards";
+import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue } from "./guards";
 import { log } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -318,9 +318,22 @@ export class LaneManager {
     /** When true, characters never stop to ask — bypass permissions (Maksym's pref). */
     private getBypass: () => boolean = () => false,
     /** Scout & Runner adoption: a character labels an existing lane (or null). */
-    private adopt: AdoptionSupport | null = null
+    private adopt: AdoptionSupport | null = null,
+    /** Reserve light (Orca plan, Job 1): where to persist the town-wide usage
+     *  windows (<userData>/fuel.json) and whom to tell the first time the 5-hour
+     *  tank lights up. Both optional — tests and the smoke path run without. */
+    private fuelOpts: { fuelFile?: string; onFuelWarning?: (g: Gauge) => void } = {}
   ) {
     this.sessionsFile = path.join(projectPath, ".bikini", "sessions.json");
+    if (fuelOpts.fuelFile) {
+      try {
+        const raw = JSON.parse(readFileSync(fuelOpts.fuelFile, "utf8"));
+        if (raw && typeof raw === "object") {
+          this.fuelState = { fiveHour: raw.fuel?.fiveHour ?? null, sevenDay: raw.fuel?.sevenDay ?? null };
+          this.warnedFor = Number(raw.warnedFor) || 0;
+        }
+      } catch { /* no fuel.json yet — dark */ }
+    }
     try {
       const raw = JSON.parse(readFileSync(this.sessionsFile, "utf8"));
       // Migrate the old shape ({id: ArchivedSession[]}) → {id: {archive,current}}.
@@ -332,6 +345,27 @@ export class LaneManager {
 
   private sessionsFile: string;
   private loaded: Record<string, PersistedLane> = {};
+
+  // Reserve light: Claude's usage windows are per ACCOUNT, not per character, so
+  // every lane's rate_limit_event folds into this one town-wide reading.
+  private fuelState: Fuel = EMPTY_FUEL;
+  private warnedFor = 0; // resetsAt of the 5-hour window we already warned about
+  /** The town-wide usage windows (for the street sign + /town). */
+  fuel(): Fuel { return this.fuelState; }
+  private takeFuelEvent(id: CharacterId, info: Record<string, any>): void {
+    const ev = { type: String(info.rateLimitType || ""), status: String(info.status || ""), util: typeof info.utilization === "number" ? info.utilization : undefined, resetsAt: info.resetsAt, at: Date.now() };
+    const prev = this.fuelState;
+    const next = foldFuel(prev, ev);
+    if (next === prev) return;
+    this.fuelState = next;
+    if (fuelWarnDue(prev, next, this.warnedFor) && next.fiveHour) {
+      this.warnedFor = next.fiveHour.resetsAt;
+      log("limit", `${id} reserve light ON`, { util: next.fiveHour.util, level: next.fiveHour.level, resetsAt: new Date(next.fiveHour.resetsAt).toISOString() });
+      try { this.fuelOpts.onFuelWarning?.(next.fiveHour); } catch { /* never let a notifier break the lane */ }
+    }
+    if (this.fuelOpts.fuelFile) void fs.writeFile(this.fuelOpts.fuelFile, JSON.stringify({ fuel: this.fuelState, warnedFor: this.warnedFor }), "utf8").catch(() => {});
+    this.onChange();
+  }
 
   /** Persist each Character's past sessions AND current conversation so a
    *  close/reopen keeps everything (the live chat, not just old orders). */
@@ -1278,6 +1312,7 @@ export class LaneManager {
           const info = ((msg as any).rate_limit_info || {}) as Record<string, any>;
           if (typeof info.utilization === "number") l.stats.limitUtil = info.utilization > 1 ? info.utilization / 100 : info.utilization;
           log("limit", `${id} rate_limit_event`, { status: info.status, type: info.rateLimitType, util: info.utilization, resetsAt: info.resetsAt });
+          this.takeFuelEvent(id, info); // the town-wide reserve light
           if (info.status === "rejected") {
             l.limitSeen = { resetsAt: normalizeResetsAt(info.resetsAt), text: `usage limit (${info.rateLimitType || "session"})` };
           }

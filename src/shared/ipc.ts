@@ -169,6 +169,32 @@ export interface JobStats {
 
 export const EMPTY_JOB_STATS: JobStats = { turns: 0, helpers: 0, asks: 0, ctxTokens: 0, workingMs: 0, waitingMs: 0, limitHits: 0, limitUtil: null };
 
+/** One window of Claude's subscription limit, as the street's RESERVE LIGHT
+ *  sees it. Claude only reports a level once it's past ~75% used, so this is a
+ *  warning light, not a gauge: dark most of the day, then amber/red/empty. */
+export interface Gauge {
+  /** Share already used (0–1), or null while dark (nothing reported yet). */
+  util: number | null;
+  /** Epoch ms this window resets (0 if unknown). */
+  resetsAt: number;
+  /** Epoch ms of the reading this came from (for "as of 12 min ago"). */
+  at: number;
+  level: "dark" | "amber" | "red" | "empty";
+}
+/** The two windows Claude enforces: the rolling 5-hour tank and the weekly one. */
+export interface Fuel { fiveHour: Gauge | null; sevenDay: Gauge | null; }
+export const EMPTY_FUEL: Fuel = { fiveHour: null, sevenDay: null };
+/** The wooden sign as the renderer draws it: null when every window is dark. */
+export interface FuelSign {
+  level: "amber" | "red" | "empty";
+  /** "Reserve · 82% used · resets 1:40 PM" — main words it (guards.fuelWord). */
+  text: string;
+  /** Tooltip: the other window's word (the weekly one), or "". */
+  title: string;
+  /** The reading is older than 10 min (nobody has worked since). */
+  stale: boolean;
+}
+
 /** An Orders Board status (FR-10). Diner vocabulary. */
 export type OrderStatus = "WAITING" | "COOKING" | "SERVED" | "BURNED" | "SCRAPPED" | "SENT BACK";
 
@@ -196,6 +222,10 @@ export interface TownSnapshot {
   muted: boolean;
   /** Per-Character portrait (file:// URL) for all UI chrome — no emoji (AD-7). */
   faces: Partial<Record<CharacterId, string | null>>;
+  /** Claude's usage-limit windows, town-wide (the reserve light's data). */
+  fuel: Fuel;
+  /** The reserve light as drawn, or null when dark (hidden). */
+  fuelSign: FuelSign | null;
 }
 
 /** Renderer → main. Named intents only — never raw fs/git/SDK calls (AD-4). */

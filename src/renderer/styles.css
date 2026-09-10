@@ -363,6 +363,20 @@ html, body {
 .topbtn:hover { filter: brightness(1.06); }
 #ordersBtn { right: 14px; }
 #muteBtn { left: 14px; }
+/* The reserve light — a small dark-wood sign beside Orders. Dark (hidden) most of
+   the day; its lettering glows amber when Claude's 5-hour tank is in its last
+   quarter, red in the last 10%, coral once it's empty. */
+.fuel {
+  position: absolute; z-index: 8; top: 14px; right: 134px;
+  background: #4a2e14; color: #f3dfa2; border: 3px solid #7d4a1e; border-radius: 12px;
+  font-family: var(--disp); font-size: 13px; line-height: 1.2; padding: 8px 12px;
+  box-shadow: 0 4px 0 #6d3f19; max-width: 44ch;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default;
+}
+.fuel.amber { color: #ffcf5a; text-shadow: 0 0 8px rgba(255, 190, 60, .75); }
+.fuel.red { color: #ff8a6a; text-shadow: 0 0 9px rgba(255, 90, 60, .85); }
+.fuel.empty { color: var(--coral); text-shadow: 0 0 10px rgba(255, 90, 60, .95); }
+.fuel.stale { opacity: .8; }
 .board-wrap {
   position: absolute; inset: 0; z-index: 17;
   display: flex; align-items: center; justify-content: center;

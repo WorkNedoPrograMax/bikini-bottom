@@ -3,6 +3,8 @@
 // (scripts/check-guards.mjs). Born from the 25 Aug 2026 day: 33 one-at-a-time
 // questions, three usage-limit hits shown as generic burns, nothing visible.
 
+import type { Fuel, Gauge } from "../../shared/ipc";
+
 /** The SDK reports `resetsAt` as a unix timestamp — sometimes seconds, sometimes
  *  ms. Normalise to epoch ms; 0 when absent/unusable. */
 export function normalizeResetsAt(v: unknown): number {
@@ -64,4 +66,108 @@ const LEAD_RE = /^(yes|yeah|yep|no|nope|ok|okay|sure)[,!.\s—–-]*/i;
 export function isAckOnly(options: readonly string[]): boolean {
   if (!options || !options.length) return false;
   return options.every((o) => ACK_RE.test(String(o || "").trim().replace(LEAD_RE, "")));
+}
+
+// ───────────────────────── Reserve light (Job 1, Orca plan) ─────────────────
+// Claude's rate_limit_event stream, folded town-wide. The log says: `allowed`
+// never carries a level, `allowed_warning` always does (lowest ever 0.75), and
+// `rejected` ends the turn. Below ~75% the app is blind — so this is a reserve
+// LIGHT, not a gauge: dark, then amber (<90%), red (≥90%), empty (rejected).
+
+
+/** The bits of a rate_limit_event the fold needs (an SDK message or a log line). */
+export interface FuelEvent {
+  /** "five_hour" | "seven_day" (anything else is ignored). */
+  type: string;
+  /** "allowed" | "allowed_warning" | "rejected". */
+  status: string;
+  /** Share used 0–1 (or 0–100; normalised). Only allowed_warning carries it. */
+  util?: number;
+  /** Unix s or ms. */
+  resetsAt?: unknown;
+  /** Epoch ms of the event (defaults to `now`). */
+  at?: number;
+}
+
+const RED_AT = 0.9;
+const STALE_MS = 10 * 60_000;
+
+function windowKey(type: string): keyof Fuel | null {
+  if (type === "five_hour") return "fiveHour";
+  if (type === "seven_day") return "sevenDay";
+  return null;
+}
+
+/** Pure fold: previous Fuel + one event → next Fuel. Returns the SAME object when
+ *  nothing changed (so callers can skip a snapshot push). */
+export function foldFuel(prev: Fuel, ev: FuelEvent, now: number = Date.now()): Fuel {
+  const key = windowKey(ev.type);
+  if (!key) return prev;
+  const g = prev[key];
+  const at = typeof ev.at === "number" && ev.at > 0 ? ev.at : now;
+  if (g && at < g.at) return prev; // an older event arriving late — ignore
+  const evResets = normalizeResetsAt(ev.resetsAt);
+  const resetsAt = evResets || (g?.resetsAt ?? 0);
+  let next: Gauge | null = null;
+  if (ev.status === "rejected") {
+    next = { util: 1, resetsAt, at, level: "empty" };
+  } else if (ev.status === "allowed_warning") {
+    let util = typeof ev.util === "number" && isFinite(ev.util) ? ev.util : (g?.util ?? null);
+    if (util !== null && util > 1) util = util / 100;
+    if (util !== null) util = Math.max(0, Math.min(1, util));
+    next = { util, resetsAt, at, level: util !== null && util >= RED_AT ? "red" : "amber" };
+  } else if (ev.status === "allowed") {
+    // A fresh window: the old one has passed, OR Claude handed out a later reset
+    // time (on 9 Sep the `allowed` after a `rejected` came 7 min later with a
+    // reset 4 h further out — long before the old reset time had passed).
+    const fresh = !g || (g.resetsAt > 0 && now > g.resetsAt) || (evResets > 0 && evResets > g.resetsAt);
+    if (fresh) next = { util: null, resetsAt, at, level: "dark" };
+    else return prev; // mid-window "allowed" says nothing about the level — keep the reading
+  } else {
+    return prev;
+  }
+  return { ...prev, [key]: next };
+}
+
+/** "1:40 PM" · "1:40 PM tomorrow" · "Mon 3:00 PM" (weekly resets are days away). */
+export function fmtWhen(ms: number, now: number = Date.now()): string {
+  const d = new Date(ms), n = new Date(now);
+  const t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (d.toDateString() === n.toDateString()) return t;
+  const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1);
+  if (d.toDateString() === tomorrow.toDateString()) return `${t} tomorrow`;
+  return `${d.toLocaleDateString([], { weekday: "short" })} ${t}`;
+}
+
+/** The sign's words for one window, or null when dark (or the window has since
+ *  reset on its own). `label` = "Reserve" (5-hour) / "Weekly reserve". */
+export function fuelWord(g: Gauge | null, now: number = Date.now(), label: string = "Reserve"): string | null {
+  if (!g || g.level === "dark") return null;
+  if (g.resetsAt > 0 && now > g.resetsAt) return null; // the window reset while nobody worked
+  const when = g.resetsAt > 0 ? fmtWhen(g.resetsAt, now) : "";
+  let s: string;
+  if (g.level === "empty") s = when ? `Empty · back at ${when}` : "Empty";
+  else {
+    const pct = g.util !== null ? `${Math.round(g.util * 100)}% used` : "running low";
+    s = `${label} · ${pct}` + (when ? ` · resets ${when}` : "");
+  }
+  const age = now - g.at;
+  if (age > STALE_MS) s += ` · as of ${age < 90 * 60_000 ? `${Math.round(age / 60_000)} min` : `${Math.round(age / 3_600_000)} h`} ago`;
+  return s;
+}
+
+/** True when the reading is older than 10 min (nobody has worked since). */
+export function fuelStale(g: Gauge | null, now: number = Date.now()): boolean {
+  return !!g && g.level !== "dark" && now - g.at > STALE_MS;
+}
+
+/** Fire the one-line Telegram heads-up? True on the FIRST amber-or-worse reading
+ *  of the 5-hour tank for a given reset time; `warnedFor` is the reset time we
+ *  already warned about (persisted), so the app stays quiet across restarts. */
+export function fuelWarnDue(prev: Fuel, next: Fuel, warnedFor: number): boolean {
+  const g = next.fiveHour;
+  if (!g || g.level === "dark") return false;
+  if (g.resetsAt === warnedFor) return false;
+  const was = prev.fiveHour;
+  return !was || was.level === "dark" || was.resetsAt !== g.resetsAt;
 }
