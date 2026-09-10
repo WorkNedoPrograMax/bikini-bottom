@@ -913,11 +913,11 @@ async function createWindow(): Promise<void> {
   // to talk to a dead window (that's the "Object has been destroyed" crash).
   win.on("closed", () => { pointer?.close(); win = null; });
   // The pointer's engine is a child view of this window: it must not linger when
-  // the window is minimised or hidden (it comes back with it).
+  // the window is minimised (it comes back with it). NOT on "hide"/"show": on
+  // macOS Electron fires those on OCCLUSION too (another window fully covering
+  // ours), which blanked the engine for no reason.
   win.on("minimize", () => pointer?.hideForWindow());
-  win.on("hide", () => pointer?.hideForWindow());
   win.on("restore", () => pointer?.showForWindow());
-  win.on("show", () => pointer?.showForWindow());
 
   await win.loadFile(path.join(__dirname, "../../src/renderer/index.html"));
 }
@@ -1034,7 +1034,9 @@ app.whenReady().then(async () => {
     const url = pointerUrlFor(openWindowId);
     if (url) pointer.open(openWindowId, url);
     const clicks = (process.env.BIKINI_POINT_CLICKS || "").split(";").map((s) => s.split(",").map(Number)).filter((p) => p.length === 2 && p.every(isFinite)) as [number, number][];
-    if (clicks.length) pointer.debugClicks(clicks, process.env.BIKINI_POINT_PREVIEW ?? null);
+    // …and BIKINI_POINT_SEND=1 presses "Send it" once the preview is up (a driven end-to-end test).
+    if (clicks.length) pointer.debugClicks(clicks, process.env.BIKINI_POINT_PREVIEW ?? null,
+      process.env.BIKINI_POINT_SEND === "1" ? (id, notes) => void handleIntent({ type: "sendPicks", characterId: id, notes }) : null);
   }
   updateSleepBlocker(); // keep the Mac awake for the whole run (Telegram reachability)
   startTelegram(); // phone remote control, if a token+chat are configured

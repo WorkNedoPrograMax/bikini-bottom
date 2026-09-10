@@ -182,12 +182,17 @@ export class PointerManager {
   private onReady: (() => void) | null = null;
   /** Click these spots inside the engine's view once its page is ready; with a
    *  `previewNote`, then open the "what they will read" card with that note on pick 1. */
-  debugClicks(points: [number, number][], previewNote: string | null = null, gapMs = 700): void {
+  debugClicks(points: [number, number][], previewNote: string | null = null, onPreview: ((id: CharacterId, notes: Record<string, string>) => void) | null = null, gapMs = 700): void {
     const go = () => {
       const src = this.source as WebPointerSource | null;
       if (!src || !("debugClick" in src)) return;
       points.forEach(([x, y], i) => setTimeout(() => src.debugClick(x, y), 600 + i * gapMs));
-      if (previewNote !== null) setTimeout(() => { if (this.openFor && this.picks[0]) this.openPreview(this.openFor, { [this.picks[0].id]: previewNote }); }, 600 + points.length * gapMs + 500);
+      if (previewNote !== null) setTimeout(() => {
+        if (!this.openFor || !this.picks[0]) return;
+        const notes = { [this.picks[0].id]: previewNote };
+        this.openPreview(this.openFor, notes);
+        if (onPreview) setTimeout(() => this.openFor && onPreview(this.openFor, notes), 1500); // "Send it", for a driven test
+      }, 600 + points.length * gapMs + 500);
     };
     if (this.readyAt) go(); else this.onReady = go;
   }
