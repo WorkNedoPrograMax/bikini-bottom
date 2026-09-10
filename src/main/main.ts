@@ -1020,7 +1020,7 @@ app.whenReady().then(async () => {
     if (paths.length) terminals.input(p.id, paths.map((q) => `'${q}'`).join(" ") + " "); // type the paths at the cursor
   });
 
-  await createWindow();
+  // Before the window: the renderer's first snapshot must already know about the pointer.
   pointer = new PointerManager({
     win: () => (winAlive() ? win : null),
     onChange: pushSnapshot,
@@ -1028,6 +1028,7 @@ app.whenReady().then(async () => {
     viewFor: (id) => cfg.data.pointerView?.[id] ?? "desktop",
     saveView: (id, view) => cfg.save({ pointerView: { ...(cfg.data.pointerView || {}), [id]: view } }),
   });
+  await createWindow();
   // Dev/screenshot hooks only: BIKINI_POINT=1 opens "Point at it" on the launched
   // window; BIKINI_POINT_CLICKS="x,y;x,y" then clicks those spots in the page.
   if (process.env.BIKINI_POINT === "1" && openWindowId && !firstRun) {

@@ -125,7 +125,9 @@ html, body {
   display: flex; align-items: center; gap: 12px; padding: 10px 16px; color: #fff;
   background: var(--accent, #4fb0a0); border-bottom: 3px solid rgba(0,0,0,.25);
 }
-.work-card header > div { display: flex; flex-direction: column; justify-content: center; line-height: 1.15; }
+/* The name block SHRINKS (name/title get an ellipsis) so the buttons on the right —
+   above all the close cross — never get pushed out of a small window. */
+.work-card header > div { display: flex; flex-direction: column; justify-content: center; line-height: 1.15; flex: 1 4 auto; min-width: 0; }
 /* Real embedded terminal (terminal-mode characters, e.g. squid). Fills the card
    body; xterm's fit addon measures .term-host, so it needs a concrete size. */
 .term-body { background: #052430; padding: 8px 10px 10px; overflow: hidden; }
@@ -135,29 +137,29 @@ html, body {
 .term-host.term-drag { outline: 2px dashed #8fe0cf; outline-offset: -4px; }
 .work-card header .face { font-size: 30px; line-height: 0; flex: none; }
 .work-card header .face img { height: 46px; display: block; filter: drop-shadow(0 2px 3px rgba(0,0,0,.35)); }
-.work-card header .h-name { font-family: "Marker Felt", var(--disp); font-size: 20px; }
+.work-card header .h-name { font-family: "Marker Felt", var(--disp); font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .work-card header .h-sub { font-size: 11px; opacity: .92; }
 .work-card header .h-task {
   margin-top: 3px; font-size: 12px; font-weight: 600; color: #fff;
   background: rgba(0,0,0,.22); border-radius: 8px; padding: 2px 9px;
-  max-width: 46ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: min(46ch, 100%); align-self: flex-start; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .work-card header .h-task-label { opacity: .9; }
 .work-card header .x {
-  margin-left: auto; cursor: pointer; background: rgba(0,0,0,.28);
+  margin-left: auto; cursor: pointer; flex: none; background: rgba(0,0,0,.28);
   border: 2px solid rgba(255,255,255,.7); color: #fff; width: 30px; height: 30px;
   border-radius: 50%; font-size: 14px;
 }
 /* "Come back later" — a small wooden word-button in the header, pushed right
    (the round buttons follow it). */
 .work-card header .later-btn {
-  margin-left: auto; flex: none; align-self: center;
+  margin-left: auto; flex: none; align-self: center; white-space: nowrap;
   padding: 5px 11px; font-size: 13px; border-radius: 10px; box-shadow: 0 2px 0 #6d3f19;
 }
 .work-card header .later-btn ~ .x { margin-left: 0; }
 /* "Point at it" — the wooden word-button before "Come back later"; dark when on. */
 .work-card header .point-btn {
-  margin-left: auto; flex: none; align-self: center;
+  margin-left: auto; flex: none; align-self: center; white-space: nowrap;
   padding: 5px 12px; font-size: 13px; border-radius: 10px; box-shadow: 0 2px 0 #6d3f19;
 }
 .work-card header .point-btn ~ .later-btn { margin-left: 0; }
@@ -313,6 +315,7 @@ html, body {
   flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column;
   align-items: flex-start; gap: 3px; margin-left: 6px; max-width: 300px;
 }
+.header-helpers:not(:empty) { min-width: 96px; } /* the title shrinks first; helper names stay readable */
 .agent-chip {
   max-width: 100%; display: inline-flex; align-items: center; gap: 5px;
   background: rgba(0,0,0,.18); border-radius: 12px; padding: 2px 10px 2px 3px;
