@@ -148,6 +148,13 @@ html, body {
   border: 2px solid rgba(255,255,255,.7); color: #fff; width: 30px; height: 30px;
   border-radius: 50%; font-size: 14px;
 }
+/* "Come back later" — a small wooden word-button in the header, pushed right
+   (the round buttons follow it). */
+.work-card header .later-btn {
+  margin-left: auto; flex: none; align-self: center;
+  padding: 5px 11px; font-size: 13px; border-radius: 10px; box-shadow: 0 2px 0 #6d3f19;
+}
+.work-card header .later-btn ~ .x { margin-left: 0; }
 /* Past-orders shelf, pinned at the top of a Work Window under the name. */
 .past-bar {
   display: flex; align-items: flex-start; gap: 6px;
@@ -434,6 +441,9 @@ html, body {
 .s-burned { color: #3a3a3a; }
 .s-scrapped, .s-sent-back { color: #7a6a55; }
 .menu-paper li .note.needs { color: #6b2a1e; opacity: .95; }
+/* "later" at the end of a board line — small, faint, underlined on hover */
+.menu-paper .later { flex: none; font-size: 11px; font-weight: 400; letter-spacing: 0; color: #7a5c26; opacity: .7; text-decoration: underline dotted; cursor: pointer; }
+.menu-paper .later:hover { opacity: 1; }
 .menu-paper .empty { text-align: center; color: #7a5c26; font-size: 15px; }
 @media (prefers-reduced-motion: reduce) {
   .actor .who, .dot { animation: none !important; }

@@ -51,9 +51,24 @@ export interface PermissionAnswered extends BaseEvent {
   allow: boolean;
 }
 
+/** "Come back later" (Orca plan, Job 4): Maksym pinned a character he has
+ *  already looked at — its red dot comes back until he opens it again (or
+ *  hands it a genuinely new order). Independent of the working/calling state,
+ *  so browsing an old order (askPast flips to "working") never drops a pin. */
+export interface ReminderSet extends BaseEvent {
+  type: "ReminderSet";
+  id: CharacterId;
+}
+
+export interface ReminderCleared extends BaseEvent {
+  type: "ReminderCleared";
+  id: CharacterId;
+}
+
 export type DomainEvent =
   | CharacterRegistered | CharacterStateChanged
-  | JobHandedOut | JobBurned | PermissionAsked | PermissionAnswered;
+  | JobHandedOut | JobBurned | PermissionAsked | PermissionAnswered
+  | ReminderSet | ReminderCleared;
 
 /** Event shape before the writer stamps seq + at. */
 export type NewEvent =
@@ -62,4 +77,6 @@ export type NewEvent =
   | Omit<JobHandedOut, "seq" | "at">
   | Omit<JobBurned, "seq" | "at">
   | Omit<PermissionAsked, "seq" | "at">
-  | Omit<PermissionAnswered, "seq" | "at">;
+  | Omit<PermissionAnswered, "seq" | "at">
+  | Omit<ReminderSet, "seq" | "at">
+  | Omit<ReminderCleared, "seq" | "at">;

@@ -33,6 +33,8 @@ export interface CharacterView {
   noteAt: number;
   /** Why it needs you right now, or null. */
   attention: Attention;
+  /** "Come back later": pinned by Maksym → the red dot stays until he opens it. */
+  reminded: boolean;
 }
 
 /** First Run walkthrough steps (FR-19). Folder is mandatory; notifications/
@@ -281,6 +283,7 @@ export type Intent =
   | { type: "setReadOnly"; characterId: CharacterId; readOnly: boolean }
   | { type: "askPast"; characterId: CharacterId; prompt: string }
   | { type: "resumePast"; characterId: CharacterId; index: number; prompt: string }
+  | { type: "remindLater"; characterId: CharacterId }
   | { type: "toggleMute" };
 
 /** A one-shot sound cue (transient, view-only — like the token stream). */

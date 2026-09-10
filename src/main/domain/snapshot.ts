@@ -32,15 +32,33 @@ export function fold(events: readonly DomainEvent[]): TownSnapshot {
           picture: null, // filled by the Asset Slot resolver in main (AD-7)
           note: null, noteAt: 0, // the chalk line lives in the lane; main fills it
           attention: null,       // main derives it from the lane
+          reminded: false,
         });
         break;
       case "CharacterStateChanged": {
         const c = chars.get(ev.id);
         if (c) {
           c.state = ev.state;
-          // A Character needing Maksym is "unseen" until resolved (FR-4).
-          c.unseen = ev.state === "calling";
+          // A Character needing Maksym is "unseen" until resolved (FR-4) — and a
+          // pinned one ("come back later") stays unseen whatever its state does.
+          c.unseen = ev.state === "calling" || c.reminded;
         }
+        break;
+      }
+      case "ReminderSet": {
+        const c = chars.get(ev.id);
+        if (c) { c.reminded = true; c.unseen = true; }
+        break;
+      }
+      case "ReminderCleared": {
+        const c = chars.get(ev.id);
+        if (c) { c.reminded = false; c.unseen = c.state === "calling"; }
+        break;
+      }
+      case "JobHandedOut": {
+        // A genuinely NEW order clears the pin (the old result is moot now).
+        const c = chars.get(ev.id);
+        if (c) { c.reminded = false; c.unseen = c.state === "calling"; }
         break;
       }
     }

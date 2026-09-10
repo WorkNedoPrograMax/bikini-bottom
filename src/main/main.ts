@@ -275,7 +275,11 @@ function notifyTgDone(id: CharacterId, summary: string): void {
   // Send the FULL final reply, not the 90-char summary (Maksym wants the whole
   // message, not the first few lines). sendLong auto-splits if it's huge.
   const full = lanes.view(id).conversation.slice().reverse().find((m) => m.from === "them" && !m.tool)?.text || summary || "finished the job";
-  void tg.sendLong(`✅ ${tgName(id)} finished:\n\n${full}`);
+  const bridge = tg;
+  // …then a short follow-up with a "remind me" button ("come back later" from the phone).
+  void Promise.resolve(bridge.sendLong(`✅ ${tgName(id)} finished:\n\n${full}`))
+    .then(() => bridge.send("Come back to this later?", [[{ text: "📌 Remind me", data: `remind:${id}` }]]))
+    .catch(() => {});
 }
 
 async function handleTgTap(data: string): Promise<void> {
@@ -300,6 +304,9 @@ async function handleTgTap(data: string): Promise<void> {
     await tg?.send(`▶️ Reopened that order for ${tgName(id)} and asked it to continue.`);
   } else if (action === "orders") {
     await sendTgOrders(id);
+  } else if (action === "remind") {
+    await handleIntent({ type: "remindLater", characterId: id });
+    await tg?.send(`📌 Pinned — ${tgName(id)} keeps the red dot until you open it.`);
   }
 }
 
@@ -350,9 +357,11 @@ async function handleTgText(text: string): Promise<void> {
 
 async function sendTgTown(): Promise<void> {
   if (!tg || !lanes) return;
-  const orders = snapshot().orders;
+  const snap = snapshot();
+  const orders = snap.orders;
   const lines = TG_CHARS.map((id) => {
     let s = "💤 idle";
+    if (snap.characters.find((c) => c.id === id)?.reminded) s = "📌 " + s; // pinned: come back to this
     if (lanes!.isWorking(id)) s = "⏳ working";
     else if (lanes!.hasPendingChoice(id) || lanes!.hasPendingAsk(id)) s = "❓ waiting for you";
     else if (lanes!.limitedUntil(id)) s = `⏳ waiting for Claude's limit (resets ${fmtClock(lanes!.limitedUntil(id))})`;
@@ -368,6 +377,7 @@ async function sendTgTown(): Promise<void> {
     const line = orders.find((o) => o.characterId === id);
     const needsYou = line && line.attention && line.attention !== "done" && line.attention !== "limit";
     const preview = needsYou && line!.preview ? `\n   💬 ${tgEsc(line!.preview)}` : "";
+    // (a pinned character shows 📌 before its status word)
     return `<b>${tgEsc(tgName(id))}</b>: ${s}${title ? `\n   ↳ ${tgEsc(title.slice(0, 60))}` : ""}${note}${preview}`;
   });
   // The reserve light, when lit: one line per lit window.
@@ -638,6 +648,20 @@ async function handleIntent(intent: Intent): Promise<void> {
       if (c && c.state === "calling" && !(lanes?.isWorking(intent.id) ?? false)) {
         await projectLog!.append({ type: "CharacterStateChanged", id: intent.id, state: "idle" });
       }
+      // Opening a pinned ("come back later") character clears the pin.
+      if (c && c.reminded) await projectLog!.append({ type: "ReminderCleared", id: intent.id });
+      pushSnapshot();
+      break;
+    }
+
+    case "remindLater": {
+      // "Come back later": put the red dot back on a character already looked at.
+      // Closes the window so the dot is visible on the street. Cleared by opening
+      // the character again, or by handing it a genuinely new order (the fold).
+      if (!projectLog) break;
+      await projectLog.append({ type: "ReminderSet", id: intent.characterId });
+      openWindowId = null;
+      log("intent", `remind later ${intent.characterId}`);
       pushSnapshot();
       break;
     }
