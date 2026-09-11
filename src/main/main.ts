@@ -271,8 +271,12 @@ function notifyTelegram(id: CharacterId): void {
       // A BATCH of questions (the character gathered them, as asked). Buttons
       // only fit one question, so list them all with numbered options and take
       // one reply line per question (a number or your own words).
+      // HTML when it fits in one message; a very long batch goes as plain text
+      // (sendLong is plain — HTML tags would show up literally).
       const body = qs.map((qq, qi) => `<b>${qi + 1}.</b> ${tgEsc(qq.question)}\n` + qq.options.map((o, oi) => `   ${oi + 1}) ${tgEsc(o.label.slice(0, 80))}`).join("\n")).join("\n\n");
-      void tg.sendLong(`❓ <b>${tgEsc(nm)}</b> has ${qs.length} questions — all at once:\n\n${body}\n\n<i>Reply with one line per question: the option number, or your own words.</i>`);
+      const html = `❓ <b>${tgEsc(nm)}</b> has ${qs.length} questions — all at once:\n\n${body}\n\n<i>Reply with one line per question: the option number, or your own words.</i>`;
+      if (html.length <= 3900) void tg.send(html);
+      else void tg.sendLong(html.replace(/<\/?(b|i)>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"));
       return;
     }
     const rows: TgButton[][] = q.options.map((o, i) => [{ text: o.label.slice(0, 60), data: `ans:${id}:${i}` }]);

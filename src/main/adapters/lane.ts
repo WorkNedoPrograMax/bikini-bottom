@@ -1002,15 +1002,18 @@ export class LaneManager {
     l.working = false;
     l.stats.asks++;
     this.setPhase(l, "waiting");
-    l.pendingChoice = null;
     void this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
     this.clearWatchdog(l);
+    // Store the question BEFORE the cue: the cue is what tells the phone, and
+    // the phone asks "is there a pending question?" — for a year of Bikini it
+    // looked one line too early and sent nothing (2026-09-11).
+    let resolveAnswer!: (answer: string) => void;
+    const answered = new Promise<string>((resolve) => { resolveAnswer = resolve; });
+    l.pendingChoice = { ask, resolve: resolveAnswer };
     this.onCue(id, "ready"); // needs my answer — call Maksym
-    log("lane", `${id} asked a question`, { question: q0?.question?.slice(0, 100) });
-    return new Promise<string>((resolve) => {
-      l.pendingChoice = { ask, resolve };
-      this.onChange();
-    });
+    log("lane", `${id} asked a question`, { question: q0?.question?.slice(0, 100), count: ask.questions.length });
+    this.onChange();
+    return answered;
   }
 
   // Maksym answered. Resume the Character and hand the answer to the waiting tool.
@@ -1324,9 +1327,13 @@ export class LaneManager {
                 await this.log.append({ type: "PermissionAsked", id });
                 await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
                 this.clearWatchdog(l);
+                // Store the ask BEFORE the cue (the phone reads it from the cue).
+                let resolveAsk!: (r: unknown) => void;
+                const answered = new Promise((resolve) => { resolveAsk = resolve as (r: unknown) => void; });
+                l.pending = { question, resolve: resolveAsk };
                 this.onCue(id, "ready"); // needs my OK — call Maksym
                 this.onChange();
-                return new Promise((resolve) => { l.pending = { question, resolve: resolve as (r: unknown) => void }; });
+                return answered;
               }],
             }],
           },
