@@ -12,6 +12,7 @@ import type { EventLog } from "../domain/eventLog";
 import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
 import { clearStrayApiKey } from "./claude";
 import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue, sanitizeStatus, statusAccepted, fallbackNote } from "./guards";
+import { shouldLand, type Landing } from "../config/townProfile";
 import { log } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -334,7 +335,11 @@ export class LaneManager {
     /** Reserve light (Orca plan, Job 1): where to persist the town-wide usage
      *  windows (<userData>/fuel.json) and whom to tell the first time the 5-hour
      *  tank lights up. Both optional — tests and the smoke path run without. */
-    private fuelOpts: { fuelFile?: string; onFuelWarning?: (g: Gauge) => void } = {}
+    private fuelOpts: { fuelFile?: string; onFuelWarning?: (g: Gauge) => void } = {},
+    /** The Ferry: how finishing behaves in THIS town. "none" (the default) means
+     *  Bikini never touches git when a character finishes; "auto" is the Epic 5
+     *  serveJob landing onto the project's main line. */
+    private landing: Landing = "none"
   ) {
     this.sessionsFile = path.join(projectPath, ".bikini", "sessions.json");
     if (fuelOpts.fuelFile) {
@@ -800,10 +805,11 @@ export class LaneManager {
     const adoption = this.adopt?.adoptionFor(id);
     this.integrateChain = this.integrateChain.then(async () => {
       try {
-        if (adoption) {
-          // Adopted lane: Bikini does NOT manage git or PRs. The repo's own
-          // instructions/skills (and the session itself) decide commits, branches,
-          // and PRs. "Finish" here just means the character is done — nothing else.
+        if (!shouldLand(this.landing, !!adoption)) {
+          // Adopted lane, or a town whose landing is "none": Bikini does NOT
+          // manage git or PRs. The repo's own instructions/skills (and the session
+          // itself) decide commits, branches, and PRs. "Finish" here just means
+          // the character is done — nothing else.
           return;
         }
         const res = await serveJob(this.projectPath, id, l.lastPrompt || "your job", strategy);

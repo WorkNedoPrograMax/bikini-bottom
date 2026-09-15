@@ -288,6 +288,34 @@ export interface OrderLine {
   slug: string;
 }
 
+// ───────────── The Ferry: one town per project ─────────────
+/** One line of the town switcher (the wooden sign top-right). */
+export interface TownTab {
+  /** The project folder — the town's identity; sent back in `switchTown`. */
+  path: string;
+  /** The sign name (from the town's profile). */
+  name: string;
+  /** The town on screen right now. */
+  current: boolean;
+  /** Characters cooking there. */
+  cooking: number;
+  /** Characters calling you there with an unseen dot. */
+  needsYou: number;
+  /** The folder is gone — shown greyed, not switchable. */
+  missing?: boolean;
+  /** Who is cooking (for "SpongeBob cooking" when it is one person). */
+  cookingNames?: string[];
+}
+
+/** The "Add a town" card, while it is up. Null when nobody is adding a town.
+ *  (Deliberately NOT First Run — that walkthrough is over.) */
+export interface AddingTown {
+  /** The folder picked, once picked. */
+  path: string | null;
+  /** Preparing that folder (same prep as First Run, AD-9). "ok" → the two-button question. */
+  prep: { status: "idle" | "working" | "ok" | "error"; message: string };
+}
+
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */
 export interface TownSnapshot {
   /** Monotonic sequence of the last event folded into this snapshot. */
@@ -308,6 +336,12 @@ export interface TownSnapshot {
   fuel: Fuel;
   /** The reserve light as drawn, or null when dark (hidden). */
   fuelSign: FuelSign | null;
+  /** Every town (project) the app knows, for the switcher sign. */
+  towns: TownTab[];
+  /** The shown town's sign name ("" before any town is open). */
+  townName: string;
+  /** The "Add a town" card, while it is up. */
+  addingTown: AddingTown | null;
 }
 
 /** Renderer → main. Named intents only — never raw fs/git/SDK calls (AD-4). */
@@ -349,7 +383,12 @@ export type Intent =
   | { type: "previewPicks"; characterId: CharacterId; notes: Record<string, string> }
   | { type: "closePreview" }
   | { type: "sendPicks"; characterId: CharacterId; notes: Record<string, string> }
-  | { type: "toggleMute" };
+  | { type: "toggleMute" }
+  // The Ferry: switch the street to another town, or add one.
+  | { type: "switchTown"; path: string }
+  | { type: "addTown" }
+  | { type: "addTownKind"; landing: "none" | "auto" }
+  | { type: "cancelAddTown" };
 
 /** A one-shot sound cue (transient, view-only — like the token stream). */
 export interface SoundCue {

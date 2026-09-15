@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld("town", {
   },
   // Dev/screenshot hook only: open the Orders Board on launch.
   initialBoard: process.env.BIKINI_BOARD === "1",
+  // Dev/screenshot hook only: open the town switcher on launch.
+  initialTownMenu: process.env.BIKINI_TOWNS === "1",
 });
 
 // Real-terminal bridge for terminal-mode characters (squid). The renderer's

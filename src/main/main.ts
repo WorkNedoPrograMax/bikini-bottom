@@ -16,10 +16,11 @@ import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHe
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
-import { srProjectFor } from "./config/adoptions";
+import { defaultName, loadProfile, seedProfile, serializeProfile, profilePath, laneAdoption, townTabsFor, type TownProfile } from "./config/townProfile";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
-import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus } from "../shared/ipc";
+import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown } from "../shared/ipc";
 import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
 const IDLE_PREP = { status: "idle" as const, message: "" };
@@ -51,8 +52,28 @@ let firstRun: FirstRunView | null = null;
 let muted = false;
 // "Point at it" (Orca plan, Job 5): the engine + tray manager, one lane at a time.
 let pointer: PointerManager | null = null;
-// The S&R adoption table (where each lane's app runs), kept for the pointer's URL.
+// The shown town's adoption table (where each lane's app runs), for the pointer's URL.
 let adoptSupport: AdoptionSupport | null = null;
+
+// ───────────── The Ferry: one town per project ─────────────
+// Every project is its own town with its own event log, lane engine and profile.
+// ALL towns are open (cooking) at once; only one is on the street. The module
+// globals above (lanes / projectLog / terminals / adoptSupport) are "the shown
+// town's objects" — showTown() swaps them, so their 100+ readers stay as they are.
+interface Town { path: string; profile: TownProfile; log: EventLog; lanes: LaneManager; terminals: TerminalManager; adopt: AdoptionSupport | null }
+const towns = new Map<string, Town>();
+/** Towns whose folder could not be opened this launch (path → sign name): kept
+ *  in the dropdown greyed as "folder missing", never dropped from the config. */
+const missingTowns = new Map<string, string>();
+let currentTownPath: string | null = null;
+/** The "Add a town" card, while it is up (NOT First Run — that is over). */
+let addingTown: AddingTown | null = null;
+
+/** A town's sign name, whether it is open, missing, or merely a path. */
+function townNameOf(townPath: string | null): string {
+  if (!townPath) return "";
+  return towns.get(townPath)?.profile.name ?? missingTowns.get(townPath) ?? defaultName(townPath);
+}
 
 async function seedTownIfEmpty(log: EventLog): Promise<void> {
   if (log.all().length > 0) return;
@@ -64,66 +85,111 @@ async function seedTownIfEmpty(log: EventLog): Promise<void> {
   }
 }
 
-/** Open the Project's event log (lives in <project>/.bikini, AD-9) and seed it. */
-async function openProjectLog(projectPath: string): Promise<void> {
-  projectLog = new EventLog(path.join(projectPath, ".bikini"));
-  await projectLog.load();
-  await seedTownIfEmpty(projectLog);
-  // Scout & Runner adoption: a character labels an existing lane (town-label,
-  // git untouched). Finishing pushes the lane's REAL branch + opens a PR — gated
-  // by cfg.srDryRun (logs only) until Maksym flips it live.
-  const sr = srProjectFor(projectPath);
-  let adopt: AdoptionSupport | null = null;
-  if (sr) {
-    const parent = path.dirname(projectPath);
-    adopt = {
-      adoptionFor(id) {
-        const a = sr.adoptions[id];
-        return a ? { worktree: path.join(parent, a.laneDir), branch: a.branch, label: a.label, frontendPort: a.frontendPort, backendPort: a.backendPort } : null;
-      },
-    };
+/** Open one town (project): its profile, event log, lane engine and terminals
+ *  (everything lives in <project>/.bikini, AD-9). Callbacks are bound to THIS
+ *  town's path, so a finish in a town that is not on screen still knows where it
+ *  happened. Throws when the folder is gone — the caller keeps it listed as missing. */
+async function openTown(projectPath: string): Promise<Town> {
+  if (!existsSync(projectPath)) throw new Error("folder missing");
+  // The profile: read <project>/.bikini/town.json, or seed + write it the first
+  // time this build opens the town (Scout & Runner gets its three lanes here —
+  // the table that used to live in code). .bikini is git-ignored: ports stay local.
+  let profile = loadProfile(projectPath, (f) => readFileSync(f, "utf8"));
+  if (!profile) {
+    profile = seedProfile(projectPath);
+    try {
+      mkdirSync(path.dirname(profilePath(projectPath)), { recursive: true });
+      writeFileSync(profilePath(projectPath), serializeProfile(profile), "utf8");
+      log("town", "profile seeded", { projectPath, name: profile.name, lanes: Object.keys(profile.lanes || {}) });
+    } catch (e) { log("town", "profile could not be written — using the seed in memory", { projectPath, error: String(e) }); }
   }
-  adoptSupport = adopt;
-  lanes = new LaneManager(projectPath, projectLog, onLaneChange, fireFinishNotification, emitSoundCue, () => cfg.data.bypassPermissions, adopt,
-    { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning });
-  // Real-terminal characters (squid): the actual `claude` CLI in the lane
-  // worktree. onData/onExit stream straight to the renderer's xterm.
-  terminals = new TerminalManager(
-    (id) => lanes!.worktreeDir(id),
+  const townLog = new EventLog(path.join(projectPath, ".bikini"));
+  await townLog.load();
+  await seedTownIfEmpty(townLog);
+  // Adopted lanes (S&R): a character labels an existing lane; git untouched.
+  const adopt: AdoptionSupport | null = laneAdoption(projectPath, profile);
+  const townLanes = new LaneManager(projectPath, townLog, onLaneChange,
+    (id, summary) => fireFinishNotification(projectPath, id, summary),
+    (id, kind) => emitSoundCue(projectPath, id, kind),
+    () => cfg.data.bypassPermissions, adopt,
+    // One account, one fuel file: two towns sharing it is fine (same numbers).
+    { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning },
+    profile.landing);
+  // Real-terminal characters: the actual `claude` CLI in the lane worktree.
+  // onData/onExit stream straight to the renderer's xterm. (TERMINAL_IDS is empty.)
+  const townTerminals = new TerminalManager(
+    (id) => townLanes.worktreeDir(id),
     (id, data) => { if (winAlive()) win!.webContents.send(CHANNELS.termData, { id, data }); },
     (id, code) => { if (winAlive()) win!.webContents.send(CHANNELS.termExit, { id, code }); },
-    emitSoundCue, // squid keeps his voice: 'start' on launch, 'ready' when a reply settles
-    onTerminalState, // drives the street picture (working / calling) for terminal chars
+    (id, kind) => emitSoundCue(projectPath, id, kind),
+    (id, state) => onTerminalState(projectPath, id, state),
   );
-  log("project", "opened", { projectPath, adoption: sr ? Object.keys(sr.adoptions) : null, terminalChars: [...TERMINAL_IDS] });
+  const town: Town = { path: projectPath, profile, log: townLog, lanes: townLanes, terminals: townTerminals, adopt };
+  towns.set(projectPath, town);
+  missingTowns.delete(projectPath);
+  log("project", "opened", { projectPath, town: profile.name, landing: profile.landing, adoption: adopt ? Object.keys(profile.lanes || {}) : null, terminalChars: [...TERMINAL_IDS] });
 
   // Resume (AD-11, NFR-1): any Character left mid-cook when the app quit is
   // paused — flip its dot on and offer Keep cooking / Scrap.
-  const events = projectLog.all();
+  const events = townLog.all();
   for (const c of fold(events).characters) {
-    // Terminal chars (squid) have no persistent SDK lane — their pty is gone
-    // after a restart, so start them clean at idle (not "paused").
+    // Terminal chars have no persistent SDK lane — their pty is gone after a
+    // restart, so start them clean at idle (not "paused").
     if (TERMINAL_IDS.has(c.id)) {
-      if (c.state !== "idle") await projectLog.append({ type: "CharacterStateChanged", id: c.id, state: "idle" });
+      if (c.state !== "idle") await townLog.append({ type: "CharacterStateChanged", id: c.id, state: "idle" });
       continue;
     }
     if (c.state === "working") {
       const last = [...events].reverse().find((e) => e.type === "JobHandedOut" && e.id === c.id);
-      lanes.markPaused(c.id, last && last.type === "JobHandedOut" ? last.prompt : null);
-      await projectLog.append({ type: "CharacterStateChanged", id: c.id, state: "calling" });
+      townLanes.markPaused(c.id, last && last.type === "JobHandedOut" ? last.prompt : null);
+      await townLog.append({ type: "CharacterStateChanged", id: c.id, state: "calling" });
     }
   }
+  return town;
+}
+
+/** Put a town on the street. The module globals become THAT town's objects, so
+ *  everything that reads `lanes`/`projectLog` means "the shown town". Any open
+ *  window, pointer view or past view closes first. Nothing is stopped: the town
+ *  you leave keeps cooking; its finishes still ring (named) and mark the sign. */
+function showTown(projectPath: string): void {
+  const t = towns.get(projectPath);
+  if (!t) return;
+  if (currentTownPath !== projectPath) {
+    pointer?.close();
+    if (openWindowId && openWindowId !== "krabs" && lanes) lanes.closePast(openWindowId);
+    openWindowId = null;
+    currentTownPath = projectPath;
+    projectLog = t.log; lanes = t.lanes; terminals = t.terminals; adoptSupport = t.adopt;
+    log("town", "shown", { projectPath, name: t.profile.name });
+    if (cfg.data.projectPath !== projectPath) void cfg.save({ projectPath });
+  }
+  pushSnapshot();
+}
+
+/** The switcher's lines, one per known town, from EACH town's own fold. */
+function townTabs(): TownTab[] {
+  const inputs = cfg.data.towns.map(({ path: p }) => {
+    const t = towns.get(p);
+    if (!t) return { path: p, name: townNameOf(p), missing: true, characters: [] };
+    return { path: p, name: t.profile.name, characters: fold(t.log.all()).characters };
+  });
+  return townTabsFor(inputs, currentTownPath);
 }
 
 /** A Lane finished → native macOS notification (FR-7). Clicking it opens that
- *  Character. Skipped if Maksym is already looking at that window. */
-function fireFinishNotification(id: CharacterId, summary: string): void {
-  notifyTgDone(id, summary); // phone always gets the "finished" ping (not gated by focus/desktop-notif prefs)
+ *  Character (switching town first when it happened elsewhere). Skipped if
+ *  Maksym is already looking at that window. The title names the town when it
+ *  is not the one on screen: "SpongeBob finished! · Rock Bottom". */
+function fireFinishNotification(townPath: string, id: CharacterId, summary: string): void {
+  notifyTgDone(townPath, id, summary); // phone always gets the "finished" ping (not gated by focus/desktop-notif prefs)
   if (!cfg.data.notificationsWanted || !Notification.isSupported()) return;
-  if (win?.isFocused() && openWindowId === id) return; // already watching
+  const here = townPath === currentTownPath;
+  if (here && win?.isFocused() && openWindowId === id) return; // already watching
   const name = ROSTER.find((r) => r.id === id)?.name ?? id;
-  const n = new Notification({ title: `${name} finished!`, body: summary });
+  const n = new Notification({ title: `${name} finished!${here ? "" : ` · ${townNameOf(townPath)}`}`, body: summary });
   n.on("click", () => {
+    showTown(townPath); // a town that is not on screen comes to the street first
     openWindowId = id;
     if (winAlive()) { if (win!.isMinimized()) win!.restore(); win!.show(); win!.focus(); }
     void handleIntent({ type: "openCharacter", id });
@@ -200,18 +266,23 @@ const SOUNDS_DIR = path.join(__dirname, "../../sounds");
 
 /** Resolve a Character's sound file (AD-7) and push it to the renderer to
  *  play. Transient/view-only — never persisted. Renderer respects mute. */
-function emitSoundCue(id: CharacterId, kind: "start" | "ready"): void {
+function emitSoundCue(townPath: string, id: CharacterId, kind: "start" | "ready"): void {
   const url = resolveSound(SOUNDS_DIR, id, kind);
-  log("sound", `${id} ${kind}`, { hasFile: !!url });
+  // A cue from a town that is not on screen still plays — a "ready" from the
+  // other town is exactly the thing worth hearing. Mute applies as always.
+  log("sound", `${id} ${kind}`, { hasFile: !!url, town: townNameOf(townPath), onScreen: townPath === currentTownPath });
   if (winAlive()) win!.webContents.send(CHANNELS.sound, { characterId: id, kind, url });
-  if (kind === "ready") notifyTelegram(id); // a character needs attention → ping the phone
-  else if (kind === "start") notifyTgStart(id); // a job kicked off → ping the phone
+  if (kind === "ready") notifyTelegram(townPath, id); // a character needs attention → ping the phone
+  else if (kind === "start") notifyTgStart(townPath, id); // a job kicked off → ping the phone
 }
 
 // Reserve light (Job 1): the FIRST time the 5-hour tank lights up in a window,
 // one line to the phone. Once per window — the lane persists what it warned about.
+let fuelWarnedFor = 0; // the reset time already announced — each town's lane engine would otherwise warn once
 function onFuelWarning(g: Gauge): void {
   if (!tg) return;
+  if (g.resetsAt && g.resetsAt === fuelWarnedFor) return;
+  fuelWarnedFor = g.resetsAt;
   const pct = g.util !== null ? ` (${Math.round(g.util * 100)}% used)` : "";
   const when = g.resetsAt ? ` — resets ${fmtWhen(g.resetsAt)}` : "";
   void tg.send(`⛽ Claude's 5-hour tank is in reserve${pct}${when}. Long orders will slow down; hand the next task out as a NEW order.`);
@@ -228,10 +299,11 @@ function fuelSignFor(fuel: Fuel, now: number = Date.now()): FuelSign | null {
   return null;
 }
 
-function notifyTgStart(id: CharacterId): void {
-  if (!tg || !lanes || id === "krabs") return;
-  const task = lanes.lastPromptFor(id);
-  void tg.sendLong(`▶️ ${tgName(id)} started:\n\n${task || "a new task."}`);
+function notifyTgStart(townPath: string, id: CharacterId): void {
+  const L = lanesOf(townPath);
+  if (!tg || !L || id === "krabs") return;
+  const task = L.lastPromptFor(id);
+  void tg.sendLong(`▶️ ${tgName(id)}${tgTown(townPath)} started:\n\n${task || "a new task."}`);
 }
 
 // ───────────────────────── Telegram remote control ─────────────────────────
@@ -241,10 +313,39 @@ function notifyTgStart(id: CharacterId): void {
 let tg: TelegramBridge | null = null;
 // Free-text expectation: after "/new → pick char" we await a job body; after a
 // question we await a typed answer. Cleared once consumed.
-let tgExpect: { mode: "answer" | "job"; id: CharacterId } | null = null;
+let tgExpect: { mode: "answer" | "job"; id: CharacterId; town: string } | null = null;
 const TG_CHARS: CharacterId[] = ["bob", "squid", "pat"];
 const tgName = (id: CharacterId): string => ROSTER.find((r) => r.id === id)?.name ?? id;
 const tgEsc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// The Ferry on the phone: ONE bot for every town. A ping names its town when
+// that town is not on screen; a tap answers into the town it came from. Button
+// data is capped at 64 bytes, so it carries the town's INDEX in the config list.
+const tgTown = (townPath: string): string => (townPath === currentTownPath ? "" : ` · ${townNameOf(townPath)}`);
+const tgTownIdx = (townPath: string): number => Math.max(0, cfg.data.towns.findIndex((t) => t.path === townPath));
+const tgTownAt = (idx: string | undefined): string => (idx ? cfg.data.towns[Number(idx)]?.path : undefined) ?? currentTownPath ?? "";
+const tgData = (action: string, id: CharacterId, extra: string | number | undefined, townPath: string): string => `${action}:${id}:${extra ?? ""}:${tgTownIdx(townPath)}`;
+const lanesOf = (townPath: string): LaneManager | null => towns.get(townPath)?.lanes ?? null;
+const curTown = (): string => currentTownPath ?? "";
+
+/** Run a lane intent in a town that may NOT be on screen (a Telegram tap on a
+ *  background town's ping). The shown town goes through handleIntent as usual;
+ *  another town's lane engine is driven directly — the street stays where it is. */
+async function runInTown(townPath: string, intent: Intent): Promise<void> {
+  const t = towns.get(townPath);
+  if (!t || townPath === currentTownPath) { await handleIntent(intent); return; }
+  log("intent", `${intent.type} (in ${t.profile.name})`, { ...intent, type: undefined });
+  switch (intent.type) {
+    case "answerQuestion": void t.lanes.answerQuestion(intent.characterId, intent.answers, intent.attachments); break;
+    case "answerPermission": void t.lanes.answerPermission(intent.characterId, intent.allow); break;
+    case "retryJob": void t.lanes.retry(intent.characterId); break;
+    case "scrapJob": void t.lanes.scrap(intent.characterId); break;
+    case "cancelJob": void t.lanes.cancel(intent.characterId); break;
+    case "handOutJob": void t.lanes.startJob(intent.characterId, intent.prompt, intent.attachments); break;
+    case "resumePast": void t.lanes.resumePast(intent.characterId, intent.index, intent.prompt); break;
+    case "remindLater": await t.log.append({ type: "ReminderSet", id: intent.characterId }); pushSnapshot(); break;
+    default: await handleIntent(intent);
+  }
+}
 
 function startTelegram(): void {
   const token = cfg.data.telegramToken, chatId = cfg.data.telegramChatId;
@@ -259,14 +360,15 @@ function startTelegram(): void {
 }
 
 // Fired on the 'ready' cue — work out WHY the character needs Maksym, and ping.
-function notifyTelegram(id: CharacterId): void {
+function notifyTelegram(townPath: string, id: CharacterId): void {
+  const lanes = lanesOf(townPath); // THIS town's engine, shown or not
   if (!tg || !lanes || id === "krabs") return;
-  const nm = tgName(id);
+  const nm = tgName(id) + tgTown(townPath);
   if (lanes.hasPendingChoice(id)) {
     const qs = lanes.view(id).pendingChoice?.questions || [];
     const q = qs[0];
     if (!q) return;
-    tgExpect = { mode: "answer", id };
+    tgExpect = { mode: "answer", id, town: townPath };
     if (qs.length > 1) {
       // A BATCH of questions (the character gathered them, as asked). Buttons
       // only fit one question, so list them all with numbered options and take
@@ -279,58 +381,64 @@ function notifyTelegram(id: CharacterId): void {
       else void tg.sendLong(html.replace(/<\/?(b|i)>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"));
       return;
     }
-    const rows: TgButton[][] = q.options.map((o, i) => [{ text: o.label.slice(0, 60), data: `ans:${id}:${i}` }]);
+    const rows: TgButton[][] = q.options.map((o, i) => [{ text: o.label.slice(0, 60), data: tgData("ans", id, i, townPath) }]);
     void tg.send(`❓ <b>${tgEsc(nm)}</b> asks:\n${tgEsc(q.question)}\n\n<i>Tap an option, or reply with your own answer.</i>`, rows);
   } else if (lanes.hasPendingAsk(id)) {
-    tgExpect = { mode: "answer", id };
-    void tg.send(`🔐 <b>${tgEsc(nm)}</b> needs approval:\n${tgEsc(lanes.view(id).pendingAsk || "…")}`, [[{ text: "✅ Allow", data: `perm:${id}:allow` }, { text: "🚫 Deny", data: `perm:${id}:deny` }]]);
+    tgExpect = { mode: "answer", id, town: townPath };
+    void tg.send(`🔐 <b>${tgEsc(nm)}</b> needs approval:\n${tgEsc(lanes.view(id).pendingAsk || "…")}`, [[{ text: "✅ Allow", data: tgData("perm", id, "allow", townPath) }, { text: "🚫 Deny", data: tgData("perm", id, "deny", townPath) }]]);
   } else if (lanes.limitedUntil(id)) {
     // Usage limit: nothing to decide — it resumes by itself. Just say so honestly.
-    void tg.send(`⏳ <b>${tgEsc(nm)}</b> ran into Claude's usage limit — it resets at ${tgEsc(fmtClock(lanes.limitedUntil(id)))} and ${tgEsc(nm)} will pick up by itself then. Nothing is lost.`, [[{ text: "🗑 Scrap the order", data: `scrap:${id}` }]]);
+    void tg.send(`⏳ <b>${tgEsc(nm)}</b> ran into Claude's usage limit — it resets at ${tgEsc(fmtClock(lanes.limitedUntil(id)))} and ${tgEsc(tgName(id))} will pick up by itself then. Nothing is lost.`, [[{ text: "🗑 Scrap the order", data: tgData("scrap", id, "", townPath) }]]);
   } else if (lanes.isPaused(id)) {
-    void tg.send(`⏸ <b>${tgEsc(nm)}</b> paused at a checkpoint — keep cooking?`, [[{ text: "🍳 Keep cooking", data: `retry:${id}` }, { text: "🗑 Scrap", data: `scrap:${id}` }]]);
+    void tg.send(`⏸ <b>${tgEsc(nm)}</b> paused at a checkpoint — keep cooking?`, [[{ text: "🍳 Keep cooking", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }]]);
   } else if (lanes.isBurned(id)) {
-    void tg.send(`⚠️ <b>${tgEsc(nm)}</b> hit a snag.`, [[{ text: "🔁 Try again", data: `retry:${id}` }, { text: "🗑 Scrap", data: `scrap:${id}` }]]);
+    void tg.send(`⚠️ <b>${tgEsc(nm)}</b> hit a snag.`, [[{ text: "🔁 Try again", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }]]);
   }
 }
 
-function notifyTgDone(id: CharacterId, summary: string): void {
+function notifyTgDone(townPath: string, id: CharacterId, summary: string): void {
+  const lanes = lanesOf(townPath);
   if (!tg || id === "krabs" || !lanes) return;
   // Send the FULL final reply, not the 90-char summary (Maksym wants the whole
   // message, not the first few lines). sendLong auto-splits if it's huge.
   const full = lanes.view(id).conversation.slice().reverse().find((m) => m.from === "them" && !m.tool)?.text || summary || "finished the job";
   const bridge = tg;
   // …then a short follow-up with a "remind me" button ("come back later" from the phone).
-  void Promise.resolve(bridge.sendLong(`✅ ${tgName(id)} finished:\n\n${full}`))
-    .then(() => bridge.send("Come back to this later?", [[{ text: "📌 Remind me", data: `remind:${id}` }]]))
+  void Promise.resolve(bridge.sendLong(`✅ ${tgName(id)}${tgTown(townPath)} finished:\n\n${full}`))
+    .then(() => bridge.send("Come back to this later?", [[{ text: "📌 Remind me", data: tgData("remind", id, "", townPath) }]]))
     .catch(() => {});
 }
 
 async function handleTgTap(data: string): Promise<void> {
-  const [action, id, extra] = data.split(":") as [string, CharacterId, string?];
+  // "action:id:extra:townIdx" — the town index is new (the Ferry); an old button
+  // without one means the town on screen.
+  const [action, id, extra, tIdx] = data.split(":") as [string, CharacterId, string?, string?];
+  const townPath = tgTownAt(tIdx);
+  const L = lanesOf(townPath);
+  const who = tgName(id) + tgTown(townPath);
   if (action === "ans") {
-    const opt = lanes?.view(id).pendingChoice?.questions?.[0]?.options?.[Number(extra)];
-    if (opt) { tgExpect = null; await handleIntent({ type: "answerQuestion", characterId: id, answers: [opt.label] }); await tg?.send(`✅ Told ${tgName(id)}: "${tgEsc(opt.label)}"`); }
+    const opt = L?.view(id).pendingChoice?.questions?.[0]?.options?.[Number(extra)];
+    if (opt) { tgExpect = null; await runInTown(townPath, { type: "answerQuestion", characterId: id, answers: [opt.label] }); await tg?.send(`✅ Told ${who}: "${tgEsc(opt.label)}"`); }
     else await tg?.send("That question isn't waiting anymore.");
   } else if (action === "perm") {
-    tgExpect = null; await handleIntent({ type: "answerPermission", characterId: id, allow: extra === "allow" });
-    await tg?.send(extra === "allow" ? `✅ Allowed — ${tgName(id)} continues.` : `🚫 Denied — told ${tgName(id)}.`);
+    tgExpect = null; await runInTown(townPath, { type: "answerPermission", characterId: id, allow: extra === "allow" });
+    await tg?.send(extra === "allow" ? `✅ Allowed — ${who} continues.` : `🚫 Denied — told ${who}.`);
   } else if (action === "retry") {
-    await handleIntent({ type: "retryJob", characterId: id }); await tg?.send(`🍳 ${tgName(id)} — picking up where it left off.`);
+    await runInTown(townPath, { type: "retryJob", characterId: id }); await tg?.send(`🍳 ${who} — picking up where it left off.`);
   } else if (action === "scrap") {
-    await handleIntent({ type: "scrapJob", characterId: id }); await tg?.send(`🗑 Scrapped ${tgName(id)}'s job.`);
+    await runInTown(townPath, { type: "scrapJob", characterId: id }); await tg?.send(`🗑 Scrapped ${who}'s job.`);
   } else if (action === "cancel") {
-    await handleIntent({ type: "cancelJob", characterId: id }); await tg?.send(`🛑 Cancelled ${tgName(id)}'s job.`);
+    await runInTown(townPath, { type: "cancelJob", characterId: id }); await tg?.send(`🛑 Cancelled ${who}'s job.`);
   } else if (action === "new") {
-    tgExpect = { mode: "job", id }; await tg?.send(`📋 What should ${tgName(id)} do? Reply with the task.`);
+    tgExpect = { mode: "job", id, town: townPath }; await tg?.send(`📋 What should ${who} do? Reply with the task.`);
   } else if (action === "resume") {
-    await handleIntent({ type: "resumePast", characterId: id, index: Number(extra), prompt: "I'm picking this order back up — continue from where we left off." });
-    await tg?.send(`▶️ Reopened that order for ${tgName(id)} and asked it to continue.`);
+    await runInTown(townPath, { type: "resumePast", characterId: id, index: Number(extra), prompt: "I'm picking this order back up — continue from where we left off." });
+    await tg?.send(`▶️ Reopened that order for ${who} and asked it to continue.`);
   } else if (action === "orders") {
-    await sendTgOrders(id);
+    await sendTgOrders(townPath, id);
   } else if (action === "remind") {
-    await handleIntent({ type: "remindLater", characterId: id });
-    await tg?.send(`📌 Pinned — ${tgName(id)} keeps the red dot until you open it.`);
+    await runInTown(townPath, { type: "remindLater", characterId: id });
+    await tg?.send(`📌 Pinned — ${who} keeps the red dot until you open it.`);
   }
 }
 
@@ -340,18 +448,19 @@ async function handleTgCommand(cmd: string, args: string): Promise<void> {
   } else if (cmd === "town" || cmd === "status") {
     await sendTgTown();
   } else if (cmd === "new") {
-    await tg?.send("Who should take this job?", [TG_CHARS.map((id) => ({ text: tgName(id), data: `new:${id}` }))]);
+    // Commands act on the town on screen (the buttons remember which one that was).
+    await tg?.send(`Who should take this job?${currentTownPath && towns.size > 1 ? ` (in ${tgEsc(townNameOf(currentTownPath))})` : ""}`, [TG_CHARS.map((id) => ({ text: tgName(id), data: tgData("new", id, "", curTown()) }))]);
   } else if (cmd === "orders") {
     const id = TG_CHARS.find((c) => c === (args.toLowerCase() as CharacterId));
-    if (id) await sendTgOrders(id);
-    else await tg?.send("Whose past orders?", [TG_CHARS.map((c) => ({ text: tgName(c), data: `orders:${c}` }))]);
+    if (id) await sendTgOrders(curTown(), id);
+    else await tg?.send("Whose past orders?", [TG_CHARS.map((c) => ({ text: tgName(c), data: tgData("orders", c, "", curTown()) }))]);
   } else if (cmd === "cancel") {
     const id = TG_CHARS.find((c) => c === (args.toLowerCase() as CharacterId));
-    if (id) await handleTgTap(`cancel:${id}`);
-    else await tg?.send("Cancel whose job?", [TG_CHARS.map((c) => ({ text: tgName(c), data: `cancel:${c}` }))]);
+    if (id) await handleTgTap(tgData("cancel", id, "", curTown()));
+    else await tg?.send("Cancel whose job?", [TG_CHARS.map((c) => ({ text: tgName(c), data: tgData("cancel", c, "", curTown()) }))]);
   } else if (TG_CHARS.includes(cmd as CharacterId)) {
     if (args) { await handleIntent({ type: "handOutJob", characterId: cmd as CharacterId, prompt: args }); await tg?.send(`📋 Handed ${tgName(cmd as CharacterId)} the job.`); }
-    else { tgExpect = { mode: "job", id: cmd as CharacterId }; await tg?.send(`What should ${tgName(cmd as CharacterId)} do? Reply with the task.`); }
+    else { tgExpect = { mode: "job", id: cmd as CharacterId, town: curTown() }; await tg?.send(`What should ${tgName(cmd as CharacterId)} do? Reply with the task.`); }
   } else {
     await tg?.send("Didn't catch that — try /town, /new, /orders, /cancel.");
   }
@@ -359,11 +468,12 @@ async function handleTgCommand(cmd: string, args: string): Promise<void> {
 
 async function handleTgText(text: string): Promise<void> {
   if (!tgExpect) { await tg?.send("Not sure what that's for. Try /town or /new."); return; }
-  const { mode, id } = tgExpect; tgExpect = null;
+  const { mode, id, town } = tgExpect; tgExpect = null;
+  const who = tgName(id) + tgTown(town);
   if (mode === "answer") {
     // A batch of questions → one reply line per question; a bare number picks
     // that option. A single question → the whole text is the answer.
-    const qs = lanes?.view(id).pendingChoice?.questions || [];
+    const qs = lanesOf(town)?.view(id).pendingChoice?.questions || [];
     let answers = [text];
     if (qs.length > 1) {
       const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
@@ -373,10 +483,10 @@ async function handleTgText(text: string): Promise<void> {
         return (n >= 1 && n <= q.options.length) ? q.options[n - 1].label : line;
       });
     }
-    await handleIntent({ type: "answerQuestion", characterId: id, answers });
-    await tg?.send(`✅ Told ${tgName(id)}: "${tgEsc(answers.join(" · "))}"`);
+    await runInTown(town, { type: "answerQuestion", characterId: id, answers });
+    await tg?.send(`✅ Told ${who}: "${tgEsc(answers.join(" · "))}"`);
   }
-  else { await handleIntent({ type: "handOutJob", characterId: id, prompt: text }); await tg?.send(`📋 Handed ${tgName(id)} the job.`); }
+  else { await runInTown(town, { type: "handOutJob", characterId: id, prompt: text }); await tg?.send(`📋 Handed ${who} the job.`); }
 }
 
 async function sendTgTown(): Promise<void> {
@@ -407,24 +517,33 @@ async function sendTgTown(): Promise<void> {
   // The reserve light, when lit: one line per lit window.
   const fuel = lanes.fuel();
   for (const w of [fuelWord(fuel.fiveHour, Date.now(), "Reserve"), fuelWord(fuel.sevenDay, Date.now(), "Weekly reserve")]) if (w) lines.push(`⛽ ${tgEsc(w)}`);
-  await tg.send("🏙 <b>Town status</b>\n" + lines.join("\n"));
+  // The other towns, one line each — the ferry's view from the phone.
+  const others = snap.towns.filter((t) => !t.current);
+  if (others.length) {
+    lines.push("");
+    for (const t of others) lines.push(`🛳 <b>${tgEsc(t.name)}</b>: ${t.missing ? "folder missing" : `${t.cooking} cooking, ${t.needsYou} need you`}`);
+  }
+  const title = towns.size > 1 ? `🏙 <b>Town status · ${tgEsc(townNameOf(currentTownPath))}</b>` : "🏙 <b>Town status</b>";
+  await tg.send(title + "\n" + lines.join("\n"));
 }
 
-async function sendTgOrders(id: CharacterId): Promise<void> {
+async function sendTgOrders(townPath: string, id: CharacterId): Promise<void> {
+  const lanes = lanesOf(townPath);
   if (!tg || !lanes) return;
   const past = lanes.view(id).pastSessions;
-  if (!past.length) { await tg.send(`${tgName(id)} has no past orders yet.`); return; }
-  const rows: TgButton[][] = past.slice().reverse().slice(0, 12).map((p) => [{ text: p.title.slice(0, 40), data: `resume:${id}:${p.index}` }]);
-  await tg.send(`📜 <b>${tgEsc(tgName(id))}</b> — past orders (tap to reopen & continue):`, rows);
+  if (!past.length) { await tg.send(`${tgName(id)}${tgTown(townPath)} has no past orders yet.`); return; }
+  const rows: TgButton[][] = past.slice().reverse().slice(0, 12).map((p) => [{ text: p.title.slice(0, 40), data: tgData("resume", id, p.index, townPath) }]);
+  await tg.send(`📜 <b>${tgEsc(tgName(id) + tgTown(townPath))}</b> — past orders (tap to reopen & continue):`, rows);
 }
 
 // A terminal character's picture is driven here (SDK chars use the lane engine).
 // The TerminalManager reports 'working' when busy and 'calling' when a reply
 // settles; we persist it as a state event so the street icon updates, then reuse
 // markSeenIfWatching so 'calling' clears to idle if you're already watching it.
-async function onTerminalState(id: CharacterId, state: CharacterState): Promise<void> {
-  if (!projectLog) return;
-  await projectLog.append({ type: "CharacterStateChanged", id, state });
+async function onTerminalState(townPath: string, id: CharacterId, state: CharacterState): Promise<void> {
+  const t = towns.get(townPath);
+  if (!t) return;
+  await t.log.append({ type: "CharacterStateChanged", id, state });
   onLaneChange();
 }
 
@@ -498,6 +617,11 @@ function snapshot(): TownSnapshot {
   base.fuel = lanes?.fuel() ?? EMPTY_FUEL;
   base.fuelSign = (base as any).__fixtureFuelSign !== undefined ? (base as any).__fixtureFuelSign : fuelSignFor(base.fuel);
   delete (base as any).__fixtureOrders; delete (base as any).__fixtureFuelSign;
+  // The Ferry: every town for the sign, the shown town's name, the add-a-town card.
+  const fx = loadFixture();
+  base.towns = fx?.towns ?? townTabs();
+  base.townName = fx?.townName ?? base.towns.find((t) => t.current)?.name ?? townNameOf(currentTownPath);
+  base.addingTown = fx?.addingTown ?? addingTown;
   return base;
 }
 
@@ -506,7 +630,7 @@ function snapshot(): TownSnapshot {
 // character with a chalk line, a full Orders board) can be photographed with
 // `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
 // orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
-type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView> };
+type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown };
 let fixture: Fixture | null | undefined;
 function loadFixture(): Fixture | null {
   if (fixture === undefined) {
@@ -671,17 +795,84 @@ async function handleIntent(intent: Intent): Promise<void> {
 
     case "firstRunOpenTown": {
       if (!firstRun || firstRun.step !== "ready" || !cfg.data.projectPath) break;
-      await cfg.save({ firstRunComplete: true });
-      await openProjectLog(cfg.data.projectPath);
+      const first = cfg.data.projectPath;
+      await cfg.save({ firstRunComplete: true, towns: cfg.data.towns.some((t) => t.path === first) ? cfg.data.towns : [...cfg.data.towns, { path: first }] });
+      try { await openTown(first); }
+      catch (e) { log("town", "the first town could not be opened", { path: first, error: String(e) }); break; }
       firstRun = null; // town opens; overlay lifts
+      showTown(first);
+      break;
+    }
+
+    // ── The Ferry: switch towns, add one ──
+    case "switchTown": {
+      if (towns.has(intent.path)) { showTown(intent.path); break; }
+      // A town whose folder was missing at launch may be back (a drive plugged in).
+      if (cfg.data.towns.some((t) => t.path === intent.path)) {
+        try { await openTown(intent.path); showTown(intent.path); }
+        catch (e) { log("town", "still missing", { path: intent.path, error: String(e) }); pushSnapshot(); }
+      }
+      break;
+    }
+
+    case "addTown": {
+      if (firstRun) break;
+      const picked = await dialog.showOpenDialog(win!, {
+        title: "Which folder is the new town's project?",
+        properties: ["openDirectory", "createDirectory"],
+        buttonLabel: "Use this folder",
+      });
+      if (picked.canceled || picked.filePaths.length === 0) break;
+      const folder = picked.filePaths[0];
+      if (towns.has(folder)) { addingTown = null; showTown(folder); break; } // already a town → just go there
+      addingTown = { path: folder, prep: { status: "working", message: "Setting up my kitchen…" } };
+      pushSnapshot();
+      const result = await prepareProject(folder); // safe, idempotent, git-ignores .bikini (AD-9)
+      if (!addingTown || addingTown.path !== folder) break; // "Never mind" while preparing
+      addingTown = { path: folder, prep: { status: result.ok ? "ok" : "error", message: result.message } };
       pushSnapshot();
       break;
     }
 
+    case "addTownKind": {
+      // The one question, answered: team repo (landing none) or my own (auto).
+      if (!addingTown || !addingTown.path || addingTown.prep.status !== "ok") break;
+      const folder = addingTown.path;
+      const landing = intent.landing === "auto" ? "auto" : "none";
+      // A folder Bikini knew before keeps its profile; the answer wins on landing.
+      const existing = loadProfile(folder, (f) => readFileSync(f, "utf8"));
+      const profile: TownProfile = existing ? { ...existing, landing } : seedProfile(folder, landing);
+      try {
+        mkdirSync(path.dirname(profilePath(folder)), { recursive: true });
+        writeFileSync(profilePath(folder), serializeProfile(profile), "utf8");
+      } catch (e) {
+        log("town", "profile could not be written", { folder, error: String(e) });
+        addingTown = { path: folder, prep: { status: "error", message: "I couldn't write the town's profile in that folder. Try another one." } };
+        pushSnapshot();
+        break;
+      }
+      if (!cfg.data.towns.some((t) => t.path === folder)) await cfg.save({ towns: [...cfg.data.towns, { path: folder }] });
+      try { await openTown(folder); }
+      catch (e) {
+        log("town", "could not open the new town", { folder, error: String(e) });
+        addingTown = { path: folder, prep: { status: "error", message: "I couldn't open that folder as a town. Try another one." } };
+        pushSnapshot();
+        break;
+      }
+      addingTown = null;
+      showTown(folder);
+      break;
+    }
+
+    case "cancelAddTown":
+      addingTown = null;
+      pushSnapshot();
+      break;
+
     case "openCharacter": {
       openWindowId = intent.id;
       // Mr. Krabs greets you when you step into the Krusty Krab.
-      if (intent.id === "krabs") emitSoundCue("krabs", "start");
+      if (intent.id === "krabs") emitSoundCue(curTown(), "krabs", "start");
       // Opening a finished (Calling, not working) Character means the result is
       // now seen → clears the dot back to Idle (FR-4; AD-12 refinement later).
       const c = (projectLog ? fold(projectLog.all()).characters : []).find((x) => x.id === intent.id);
@@ -988,8 +1179,15 @@ app.whenReady().then(async () => {
   log("app", "config loaded", { projectPath: cfg.data.projectPath, firstRunComplete: cfg.data.firstRunComplete, bypass: cfg.data.bypassPermissions });
 
   if (cfg.data.firstRunComplete && cfg.data.projectPath) {
-    // Returning user: open straight into the town.
-    await openProjectLog(cfg.data.projectPath);
+    // Returning user: open EVERY town (each keeps cooking whether shown or not),
+    // then put the last-shown one on the street. A town whose folder is gone is
+    // logged, skipped, and stays in the dropdown greyed as "folder missing".
+    for (const t of cfg.data.towns) {
+      try { await openTown(t.path); }
+      catch (e) { missingTowns.set(t.path, defaultName(t.path)); log("town", "folder missing — kept in the list, greyed", { path: t.path, error: String(e) }); }
+    }
+    const show = towns.has(cfg.data.projectPath) ? cfg.data.projectPath : towns.keys().next().value;
+    if (show) showTown(show); else log("town", "no town could be opened — the street stays empty");
     firstRun = null;
   } else {
     // First Run — resume at the saved step. If a folder was chosen but prep
@@ -1053,10 +1251,12 @@ app.whenReady().then(async () => {
 // working, ask first: keep them cooking in the background (hide), or stop + quit.
 app.on("before-quit", (e) => {
   if (reallyQuit || SMOKE || process.env.BIKINI_CAPTURE) return;
-  const working = lanes ? lanes.workingCount() : 0;
+  // Every town counts — a character cooking in a town that is not on screen is still cooking.
+  const all = [...towns.values()];
+  const working = all.reduce((n, t) => n + t.lanes.workingCount(), 0);
   if (working === 0) { reallyQuit = true; return; } // nothing cooking → quit freely
   e.preventDefault();
-  const names = lanes!.workingNames().map((id) => ROSTER.find((r) => r.id === id)?.name || id);
+  const names = all.flatMap((t) => t.lanes.workingNames().map((id) => (ROSTER.find((r) => r.id === id)?.name || id) + (all.length > 1 ? ` (${t.profile.name})` : "")));
   const who = names.join(" and ");
   const opts = {
     type: "question" as const,
@@ -1073,7 +1273,7 @@ app.on("before-quit", (e) => {
 
 // Real terminals are long-lived warm processes — they must survive a window
 // hide/close (the whole point). Only tear them down on a genuine quit.
-app.on("will-quit", () => { terminals?.killAll(); });
+app.on("will-quit", () => { for (const t of towns.values()) t.terminals.killAll(); });
 
 // Graceful shutdown on a termination signal (this is how a restart reaches us).
 // Interrupt each terminal's Claude first and pause, so it can reach a checkpoint
@@ -1084,11 +1284,12 @@ async function gracefulSignalExit(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   try {
-    const busy = terminals?.anyBusy() ? " (a terminal was busy)" : "";
+    const all = [...towns.values()];
+    const busy = all.some((t) => t.terminals.anyBusy()) ? " (a terminal was busy)" : "";
     log("app", `signal shutdown — interrupting terminals then exiting${busy}`);
-    terminals?.interruptAll();
+    for (const t of all) t.terminals.interruptAll();
     await new Promise((r) => setTimeout(r, 2500)); // let Claude settle/save its turn
-    terminals?.killAll();
+    for (const t of all) t.terminals.killAll();
   } catch { /* best effort */ }
   app.exit(0);
 }

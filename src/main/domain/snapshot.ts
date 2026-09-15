@@ -9,7 +9,7 @@ export const BACKGROUND = "conch-day.png";
 
 /** The town before any Character exists (First Run shows over this). */
 export function emptyTown(): TownSnapshot {
-  return { seq: 0, background: BACKGROUND, characters: [], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null };
+  return { seq: 0, background: BACKGROUND, characters: [], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null, towns: [], townName: "", addingTown: null };
 }
 
 export function fold(events: readonly DomainEvent[]): TownSnapshot {
@@ -64,5 +64,5 @@ export function fold(events: readonly DomainEvent[]): TownSnapshot {
     }
   }
 
-  return { seq, background: BACKGROUND, characters: [...chars.values()], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null };
+  return { seq, background: BACKGROUND, characters: [...chars.values()], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null, towns: [], townName: "", addingTown: null };
 }

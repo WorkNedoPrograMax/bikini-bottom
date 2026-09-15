@@ -8,7 +8,11 @@ import path from "node:path";
 import type { FirstRunStep, CharacterId } from "../../shared/ipc";
 
 export interface AppConfigData {
+  /** The town on screen (the Ferry): one of `towns`. Was "the single project". */
   projectPath: string | null;
+  /** Every town (project folder) the app knows. Empty on an old config — load()
+   *  migrates the lone projectPath into it. */
+  towns: { path: string }[];
   firstRunComplete: boolean;
   /** Where the walkthrough left off, so quitting mid-First-Run resumes. */
   firstRunStep: FirstRunStep;
@@ -30,6 +34,7 @@ export interface AppConfigData {
 
 const DEFAULTS: AppConfigData = {
   projectPath: null,
+  towns: [],
   firstRunComplete: false,
   firstRunStep: "welcome",
   notificationsWanted: false,
@@ -40,6 +45,17 @@ const DEFAULTS: AppConfigData = {
   telegramChatId: null,
   pointerView: {},
 };
+
+/** A config from before the Ferry knew one project; now it is the first town.
+ *  Silent: saved along with the next save(). Also drops malformed entries. */
+export function migrateTowns(data: { projectPath: string | null; towns?: unknown }): { path: string }[] {
+  const towns = Array.isArray(data.towns)
+    ? (data.towns as unknown[]).filter((t): t is { path: string } => !!t && typeof t === "object" && typeof (t as { path?: unknown }).path === "string")
+        .map((t) => ({ path: t.path }))
+    : [];
+  if (towns.length === 0 && data.projectPath) return [{ path: data.projectPath }];
+  return towns;
+}
 
 export class AppConfig {
   private readonly file: string;
@@ -56,6 +72,7 @@ export class AppConfig {
     } catch {
       this.data = { ...DEFAULTS };
     }
+    this.data.towns = migrateTowns(this.data);
   }
 
   async save(patch: Partial<AppConfigData>): Promise<void> {

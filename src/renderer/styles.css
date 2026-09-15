@@ -477,13 +477,50 @@ html, body {
   box-shadow: 0 4px 0 #6d3f19;
 }
 .topbtn:hover { filter: brightness(1.06); }
-#ordersBtn { right: 14px; }
 #muteBtn { left: 14px; }
+/* The top-right row (the Ferry): reserve light · Orders · the town sign. A flex
+   row, so the sign can be as wide as its town's name without overlapping Orders. */
+.topright { position: absolute; top: 14px; right: 14px; z-index: 8; display: flex; gap: 8px; align-items: flex-start; }
+.topright .topbtn, .topright .fuel { position: static; top: auto; right: auto; }
+/* The town sign: darker wood, the town's name in marker, a red dot when a town
+   you are NOT looking at needs you. */
+.topbtn.sign { position: relative; background: #8a5a2c; border-color: #5d3a15; box-shadow: 0 4px 0 #3e2510; font-family: "Marker Felt", var(--disp); font-size: 15px; padding: 6px 12px 7px; max-width: 34ch; white-space: nowrap; overflow: visible; text-overflow: ellipsis; }
+.topbtn.sign .sign-dot {
+  position: absolute; top: -7px; right: -7px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--coral); border: 2px solid #fff6e6; box-shadow: 0 0 8px rgba(255,90,60,.9);
+  animation: ping 1.4s ease-in-out infinite;
+}
+/* The switcher: a small paper list under the sign. Closed by Esc, the scrim, or picking. */
+.town-scrim { position: absolute; inset: 0; z-index: 9; }
+.town-menu {
+  position: absolute; top: 60px; right: 14px; z-index: 10; width: min(92vw, 310px);
+  background: linear-gradient(178deg, #f3dfa2, #eed490 60%, #e6c67a);
+  border-radius: 6px 9px 6px 8px; padding: 10px 8px 8px; color: #241d0e; line-height: 1.25;
+  font-family: "Marker Felt", "Chalkboard SE", var(--disp);
+  box-shadow: 0 16px 40px rgba(0,0,0,.55), inset 0 0 40px rgba(150,110,40,.25); transform: rotate(.6deg);
+}
+.town-menu .tm-title { font-size: 12px; color: #7a5c26; text-align: center; margin: 0 0 6px; letter-spacing: .6px; text-transform: uppercase; }
+.town-menu button { display: flex; width: 100%; align-items: center; gap: 8px; text-align: left; background: none; border: 0; border-radius: 8px; padding: 8px 10px; font: inherit; color: inherit; cursor: pointer; }
+.town-menu button:hover { background: rgba(120,80,20,.12); }
+.town-menu button.here { background: rgba(120,80,20,.18); cursor: default; }
+.town-menu button.missing { opacity: .55; cursor: default; }
+.town-menu .tm-name { flex: 1; min-width: 0; font-size: 17px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.town-menu .tm-word { flex: none; font-size: 12px; color: #7a5c26; white-space: nowrap; }
+.town-menu .tm-word.needs { color: #8c1e12; font-weight: 700; }
+.town-menu .tm-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--coral); box-shadow: 0 0 6px rgba(255,90,60,.8); }
+.town-menu .tm-sep { border-top: 2px dotted #b28a45; margin: 6px 8px; }
+.town-menu button.add .tm-name { font-weight: 400; color: #6b4a12; }
+/* The "Add a town" card: the one question, two wooden buttons, a "Never mind". */
+.krabs-card .kind { display: flex; flex-direction: column; gap: 10px; }
+.krabs-card .kind .wood-btn { align-self: stretch; text-align: left; display: flex; flex-direction: column; gap: 3px; }
+.krabs-card .kind .wood-btn small { font-family: var(--body); font-size: 12px; opacity: .92; line-height: 1.35; }
+.krabs-card .link { align-self: flex-start; background: none; border: 0; padding: 0; color: #6b4a12; text-decoration: underline dotted; cursor: pointer; font: inherit; font-size: 13px; }
+.krabs-card .link:hover { color: #241d0e; }
 /* The reserve light — a small dark-wood sign beside Orders. Dark (hidden) most of
    the day; its lettering glows amber when Claude's 5-hour tank is in its last
    quarter, red in the last 10%, coral once it's empty. */
 .fuel {
-  position: absolute; z-index: 8; top: 14px; right: 134px;
+  position: absolute; z-index: 8; top: 14px; right: 134px; /* (static inside .topright) */
   background: #4a2e14; color: #f3dfa2; border: 3px solid #7d4a1e; border-radius: 12px;
   font-family: var(--disp); font-size: 13px; line-height: 1.2; padding: 8px 12px;
   box-shadow: 0 4px 0 #6d3f19; max-width: 44ch;

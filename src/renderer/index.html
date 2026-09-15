@@ -12,13 +12,19 @@
   <div class="scene" id="scene">
     <img class="bg" id="bg" alt="Conch Street" />
     <button class="topbtn" id="muteBtn" title="mute / unmute sounds" hidden>🔊</button>
-    <button class="topbtn" id="ordersBtn" title="Orders — press M" hidden>📋 Orders</button>
-    <div class="fuel" id="fuel" hidden><!-- the reserve light: Claude's usage window, lit only when low --></div>
+    <div class="topright" id="topright"><!-- the top-right row: reserve light, Orders, the town sign -->
+      <div class="fuel" id="fuel" hidden><!-- the reserve light: Claude's usage window, lit only when low --></div>
+      <button class="topbtn" id="ordersBtn" title="Orders — press M" hidden>📋 Orders</button>
+      <button class="topbtn sign" id="townBtn" title="Your towns — switch project or add one" hidden></button>
+    </div>
+    <div class="town-scrim" id="townScrim" hidden></div>
+    <div class="town-menu" id="townMenu" hidden><!-- the switcher list, from snapshot.towns --></div>
     <div class="street" id="street"><!-- characters rendered from the snapshot --></div>
     <p class="cap" id="cap">Opening the town…</p>
     <div class="board-wrap" id="board" hidden><!-- Galley Grub menu, from snapshot.orders --></div>
     <div class="dim" id="dim" hidden></div>
     <div class="firstrun" id="firstrun" hidden><!-- walkthrough, rendered from snapshot.firstRun --></div>
+    <div class="firstrun" id="addtown" hidden><!-- the "Add a town" card, from snapshot.addingTown --></div>
     <div class="window" id="window" hidden><!-- Home Base / Work Window, from snapshot.openWindow --></div>
   </div>
   <script src="vendor/xterm.js"></script>
