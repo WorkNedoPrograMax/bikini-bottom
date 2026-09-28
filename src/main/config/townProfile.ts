@@ -20,6 +20,20 @@ export interface LaneSpec {
 
 export type Landing = "none" | "auto";
 
+/** The Phone Booth: the ONE test phone this town's characters share in turns.
+ *  Absent = no booth (Scout & Runner never gets one). */
+export interface DeviceSpec {
+  kind: "ios-simulator" | "android-emulator";
+  /** simctl UDID, or the AVD name. */
+  id: string;
+  /** What the street and the character call it, e.g. "iPhone 16". */
+  name: string;
+  /** Seconds the holder keeps the phone between two phone commands (default 60). */
+  graceSec?: number;
+  /** Minutes after which the phone is handed over regardless (default 30). */
+  maxHoldMin?: number;
+}
+
 export interface TownProfile {
   /** Shown on the sign. */
   name: string;
@@ -30,6 +44,8 @@ export interface TownProfile {
   lanes?: Partial<Record<CharacterId, LaneSpec>>;
   /** Optional extra sentence for the system prompt (future projects with servers). */
   servers?: string;
+  /** The test phone (the booth), when this town has one. */
+  device?: DeviceSpec;
 }
 
 /** Where a project's profile lives. */
@@ -87,6 +103,21 @@ export function normalizeProfile(raw: unknown, projectPath: string): TownProfile
     if (Object.keys(lanes).length) out.lanes = lanes;
   }
   if (typeof r.servers === "string" && r.servers.trim()) out.servers = r.servers.trim();
+  const dev = normalizeDevice(r.device);
+  if (dev) out.device = dev;
+  return out;
+}
+
+/** A well-formed phone, or null when the field is missing or malformed (a
+ *  malformed phone is dropped rather than half-kept: no booth beats a wrong one). */
+export function normalizeDevice(raw: unknown): DeviceSpec | null {
+  if (!raw || typeof raw !== "object") return null;
+  const d = raw as Record<string, unknown>;
+  if (d.kind !== "ios-simulator" && d.kind !== "android-emulator") return null;
+  if (typeof d.id !== "string" || !d.id.trim() || typeof d.name !== "string" || !d.name.trim()) return null;
+  const out: DeviceSpec = { kind: d.kind, id: d.id.trim(), name: d.name.trim() };
+  if (typeof d.graceSec === "number" && isFinite(d.graceSec) && d.graceSec > 0) out.graceSec = d.graceSec;
+  if (typeof d.maxHoldMin === "number" && isFinite(d.maxHoldMin) && d.maxHoldMin > 0) out.maxHoldMin = d.maxHoldMin;
   return out;
 }
 

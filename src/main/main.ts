@@ -16,11 +16,12 @@ import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHe
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
-import { defaultName, loadProfile, seedProfile, serializeProfile, profilePath, laneAdoption, townTabsFor, type TownProfile } from "./config/townProfile";
+import { defaultName, loadProfile, seedProfile, serializeProfile, profilePath, laneAdoption, townTabsFor, type TownProfile, type DeviceSpec } from "./config/townProfile";
+import { parseSimctlDevices } from "./domain/booth";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
-import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown } from "../shared/ipc";
+import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView } from "../shared/ipc";
 import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
 const IDLE_PREP = { status: "idle" as const, message: "" };
@@ -114,7 +115,10 @@ async function openTown(projectPath: string): Promise<Town> {
     () => cfg.data.bypassPermissions, adopt,
     // One account, one fuel file: two towns sharing it is fine (same numbers).
     { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning },
-    profile.landing);
+    profile.landing, profile.device ?? null);
+  // The Phone Booth: wake the town's test phone so the first tester never waits
+  // for a cold start. Best effort, never blocks the town, never shuts anything down.
+  if (profile.device) void bootPhone(profile.device, townLanes);
   // Real-terminal characters: the actual `claude` CLI in the lane worktree.
   // onData/onExit stream straight to the renderer's xterm. (TERMINAL_IDS is empty.)
   const townTerminals = new TerminalManager(
@@ -146,6 +150,32 @@ async function openTown(projectPath: string): Promise<Town> {
     }
   }
   return town;
+}
+
+/** Boot the town's test phone (iOS: `simctl boot` + bring the Simulator up;
+ *  Android: only check `adb devices` and say on the street if it is off). */
+async function bootPhone(dev: DeviceSpec, townLanes: LaneManager): Promise<void> {
+  const run = (cmd: string, args: string[]): Promise<{ ok: boolean; out: string }> =>
+    new Promise((resolve) => execFile(cmd, args, { timeout: 60_000 }, (err, stdout, stderr) => resolve({ ok: !err, out: String(stdout || "") + String(stderr || "") })));
+  if (dev.kind === "ios-simulator") {
+    const boot = await run("xcrun", ["simctl", "boot", dev.id]);
+    const already = /current state: Booted/i.test(boot.out);
+    if (boot.ok || already) {
+      log("booth", already ? "phone already booted" : "phone booted", { id: dev.id, name: dev.name });
+      const open = await run("open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", dev.id]);
+      log("booth", open.ok ? "Simulator brought up" : "Simulator could not be brought up", { id: dev.id, out: open.out.slice(0, 160) });
+      townLanes.setPhoneWarning(null);
+    } else {
+      log("booth", "phone could not be booted", { id: dev.id, name: dev.name, out: boot.out.slice(0, 200) });
+      townLanes.setPhoneWarning(`The test phone did not start — check the ${dev.name} in Simulator`);
+    }
+  } else {
+    // Android: auto-boot is a later job. Check it is running and say so if not.
+    const adb = await run("adb", ["devices"]);
+    const running = adb.ok && /^emulator-\d+\s+device/m.test(adb.out);
+    log("booth", running ? "emulator running" : "emulator not running", { name: dev.name, out: adb.out.slice(0, 160) });
+    townLanes.setPhoneWarning(running ? null : `The test phone is off — start the ${dev.name} emulator`);
+  }
 }
 
 /** Put a town on the street. The module globals become THAT town's objects, so
@@ -213,9 +243,9 @@ function buildWindow(chars: TownSnapshot["characters"]): WindowView | null {
         id: x.id, name: x.name,
         // Terminal chars (squid) are always pickable — no SDK "working" state.
         available: TERMINAL_IDS.has(x.id) || (x.state === "idle" && !(lanes?.isWorking(x.id) ?? false)),
-        stateWord: STATE_WORD[x.state],
+        stateWord: x.booth === "holding" ? "on the phone" : x.booth === "queued" ? "waiting for the phone" : STATE_WORD[x.state],
       }));
-    return { characterId: c.id, name: c.name, role: c.role, accent: c.accent, isHomeBase: true, terminal: false, crew, conversation: [], working: false, pendingAsk: null, pendingChoice: null, burned: false, paused: false, served: false, collision: false, agents: 0, agentNames: [], agentIcon: null, activity: null, taskTitle: null, todos: [], taskStartedAt: 0, taskTokens: 0, beatAt: 0, limitedUntil: 0, jobStats: EMPTY_JOB_STATS, pastSessions: [], viewing: null, pointer: null, picks: [] };
+    return { characterId: c.id, name: c.name, role: c.role, accent: c.accent, isHomeBase: true, terminal: false, crew, conversation: [], working: false, pendingAsk: null, pendingChoice: null, burned: false, paused: false, served: false, collision: false, agents: 0, agentNames: [], agentIcon: null, activity: null, taskTitle: null, todos: [], taskStartedAt: 0, taskTokens: 0, beatAt: 0, limitedUntil: 0, jobStats: EMPTY_JOB_STATS, pastSessions: [], viewing: null, pointer: null, picks: [], booth: null };
   }
   const isTerm = TERMINAL_IDS.has(c.id);
   const v = lanes?.view(c.id);
@@ -247,8 +277,26 @@ function buildWindow(chars: TownSnapshot["characters"]): WindowView | null {
     // Point at it: only lanes with a running app (S&R adoptions) get the button.
     pointer: pointer?.view(c.id, pointerUrlFor(c.id)) ?? null,
     picks: pointer?.cards(c.id) ?? [],
+    booth: boothLineFor(c.id, chars),
     ...(loadFixture()?.window || {}), // dev/screenshot overlay only (BIKINI_FIXTURE)
   };
+}
+
+/** The Work Window's booth line: who has the phone and for how long, or null. */
+function boothLineFor(id: CharacterId, chars: TownSnapshot["characters"]): WindowView["booth"] {
+  const role = lanes?.view(id).booth ?? null;
+  const b = boothView();
+  if (!role || !b) return null;
+  const holderName = chars.find((x) => x.id === b.holder)?.name ?? ROSTER.find((r) => r.id === b.holder)?.name ?? "someone";
+  const minutes = b.since ? Math.max(0, Math.round((Date.now() - b.since) / 60_000)) : 0;
+  return { role, holder: holderName, minutes };
+}
+
+/** The shown town's booth (fixture first, for photographs), or null. */
+function boothView(): BoothView | null {
+  const fx = loadFixture();
+  if (fx && fx.booth !== undefined) return fx.booth;
+  return lanes?.boothView() ?? null;
 }
 
 /** Where this lane's own app is running (the adoption's frontend port), or null.
@@ -496,7 +544,10 @@ async function sendTgTown(): Promise<void> {
   const lines = TG_CHARS.map((id) => {
     let s = "💤 idle";
     if (snap.characters.find((c) => c.id === id)?.reminded) s = "📌 " + s; // pinned: come back to this
-    if (lanes!.isWorking(id)) s = "⏳ working";
+    const booth = lanes!.view(id).booth; // the phone booth, before the working word
+    if (booth === "holding") s = "📱 on the phone";
+    else if (booth === "queued") s = "⏳ waiting for the phone";
+    else if (lanes!.isWorking(id)) s = "⏳ working";
     else if (lanes!.hasPendingChoice(id) || lanes!.hasPendingAsk(id)) s = "❓ waiting for you";
     else if (lanes!.limitedUntil(id)) s = `⏳ waiting for Claude's limit (resets ${fmtClock(lanes!.limitedUntil(id))})`;
     else if (lanes!.isPaused(id)) s = "⏸ paused — keep cooking?";
@@ -579,7 +630,9 @@ function buildOrders(chars: TownSnapshot["characters"]): TownSnapshot["orders"] 
     const v = lanes.view(c.id);
     const attention = attentionFor(c.id, c.state);
     let status: OrderStatus;
-    if (lanes.isWorking(c.id)) status = "COOKING";
+    if (v.booth === "holding") status = "ON THE PHONE";
+    else if (v.booth === "queued") status = "WAITING FOR PHONE";
+    else if (lanes.isWorking(c.id)) status = "COOKING";
     else if (attention && attention !== "done") status = ORDER_WORD[attention];
     else if (v.sentBack) status = "SENT BACK";
     else status = "SERVED";
@@ -601,7 +654,7 @@ function buildOrders(chars: TownSnapshot["characters"]): TownSnapshot["orders"] 
 function snapshot(): TownSnapshot {
   const base = projectLog ? fold(projectLog.all()) : emptyTown();
   // The chalk line lives in the lane (not the event log) — fill it in here.
-  if (lanes) for (const c of base.characters) { if (!c.isHomeBase) { const v = lanes.view(c.id); c.note = v.note; c.noteAt = v.noteAt; c.attention = attentionFor(c.id, c.state); } }
+  if (lanes) for (const c of base.characters) { if (!c.isHomeBase) { const v = lanes.view(c.id); c.note = v.note; c.noteAt = v.noteAt; c.attention = attentionFor(c.id, c.state); c.booth = v.booth; } }
   applyFixture(base); // dev/screenshot hook only (BIKINI_FIXTURE) — a no-op in normal runs
   // Resolve every visual through the Asset Slot resolver (AD-7).
   for (const c of base.characters) c.picture = resolvePicture(ASSETS_DIR, c.id, c.state);
@@ -622,6 +675,8 @@ function snapshot(): TownSnapshot {
   base.towns = fx?.towns ?? townTabs();
   base.townName = fx?.townName ?? base.towns.find((t) => t.current)?.name ?? townNameOf(currentTownPath);
   base.addingTown = fx?.addingTown ?? addingTown;
+  // The Phone Booth prop (runtime state from the lane engine, never the event log).
+  base.booth = boothView();
   return base;
 }
 
@@ -630,7 +685,7 @@ function snapshot(): TownSnapshot {
 // character with a chalk line, a full Orders board) can be photographed with
 // `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
 // orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
-type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown };
+type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null };
 let fixture: Fixture | null | undefined;
 function loadFixture(): Fixture | null {
   if (fixture === undefined) {
@@ -711,6 +766,50 @@ async function runClaudeCheck(): Promise<void> {
     claude: { status: res.connected ? "ok" : "warn", message: res.message },
   };
   pushSnapshot();
+}
+
+/** The last step of "Add a town": write the profile once (landing + phone), list
+ *  the town, open it and put it on the street. Errors go back onto the card. */
+async function finishAddTown(folder: string, landing: "none" | "auto", device: DeviceSpec | null): Promise<void> {
+  // A folder Bikini knew before keeps its profile; the answers win on landing + phone.
+  const existing = loadProfile(folder, (f) => readFileSync(f, "utf8"));
+  const profile: TownProfile = existing ? { ...existing, landing } : seedProfile(folder, landing);
+  if (device) profile.device = device; else delete profile.device;
+  try {
+    mkdirSync(path.dirname(profilePath(folder)), { recursive: true });
+    writeFileSync(profilePath(folder), serializeProfile(profile), "utf8");
+  } catch (e) {
+    log("town", "profile could not be written", { folder, error: String(e) });
+    addingTown = { path: folder, prep: { status: "error", message: "I couldn't write the town's profile in that folder. Try another one." } };
+    pushSnapshot();
+    return;
+  }
+  if (!cfg.data.towns.some((t) => t.path === folder)) await cfg.save({ towns: [...cfg.data.towns, { path: folder }] });
+  try { await openTown(folder); }
+  catch (e) {
+    log("town", "could not open the new town", { folder, error: String(e) });
+    addingTown = { path: folder, prep: { status: "error", message: "I couldn't open that folder as a town. Try another one." } };
+    pushSnapshot();
+    return;
+  }
+  addingTown = null;
+  showTown(folder);
+}
+
+/** Does this folder look like a Flutter (+ Maestro) project? */
+function isFlutterProject(folder: string): boolean {
+  return existsSync(path.join(folder, "pubspec.yaml")) || existsSync(path.join(folder, ".maestro"));
+}
+
+/** The simulators on this Mac for the phone picker (booted first). Empty when
+ *  `xcrun` is missing or says nothing — the card then only offers "No phone". */
+function listSimulators(): Promise<AddingTown["devices"]> {
+  return new Promise((resolve) => {
+    execFile("xcrun", ["simctl", "list", "devices", "available", "-j"], { timeout: 20_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      if (err) { log("booth", "simctl list failed — no simulators offered", { error: String(err).slice(0, 120) }); resolve([]); return; }
+      resolve(parseSimctlDevices(String(stdout)));
+    });
+  });
 }
 
 async function handleIntent(intent: Intent): Promise<void> {
@@ -830,6 +929,13 @@ async function handleIntent(intent: Intent): Promise<void> {
       const result = await prepareProject(folder); // safe, idempotent, git-ignores .bikini (AD-9)
       if (!addingTown || addingTown.path !== folder) break; // "Never mind" while preparing
       addingTown = { path: folder, prep: { status: result.ok ? "ok" : "error", message: result.message } };
+      // A Flutter project (pubspec.yaml or a .maestro/ folder) gets the phone
+      // question after the landing one: list the simulators on this Mac now.
+      if (result.ok && isFlutterProject(folder)) {
+        const devices = await listSimulators();
+        if (!addingTown || addingTown.path !== folder) break;
+        addingTown = { ...addingTown, devices };
+      }
       pushSnapshot();
       break;
     }
@@ -837,30 +943,20 @@ async function handleIntent(intent: Intent): Promise<void> {
     case "addTownKind": {
       // The one question, answered: team repo (landing none) or my own (auto).
       if (!addingTown || !addingTown.path || addingTown.prep.status !== "ok") break;
-      const folder = addingTown.path;
       const landing = intent.landing === "auto" ? "auto" : "none";
-      // A folder Bikini knew before keeps its profile; the answer wins on landing.
-      const existing = loadProfile(folder, (f) => readFileSync(f, "utf8"));
-      const profile: TownProfile = existing ? { ...existing, landing } : seedProfile(folder, landing);
-      try {
-        mkdirSync(path.dirname(profilePath(folder)), { recursive: true });
-        writeFileSync(profilePath(folder), serializeProfile(profile), "utf8");
-      } catch (e) {
-        log("town", "profile could not be written", { folder, error: String(e) });
-        addingTown = { path: folder, prep: { status: "error", message: "I couldn't write the town's profile in that folder. Try another one." } };
-        pushSnapshot();
-        break;
-      }
-      if (!cfg.data.towns.some((t) => t.path === folder)) await cfg.save({ towns: [...cfg.data.towns, { path: folder }] });
-      try { await openTown(folder); }
-      catch (e) {
-        log("town", "could not open the new town", { folder, error: String(e) });
-        addingTown = { path: folder, prep: { status: "error", message: "I couldn't open that folder as a town. Try another one." } };
-        pushSnapshot();
-        break;
-      }
-      addingTown = null;
-      showTown(folder);
+      // A Flutter town has one more question (the phone): hold this answer and
+      // show the picker; the profile is written ONCE, with both answers.
+      if (addingTown.devices) { addingTown = { ...addingTown, landing }; pushSnapshot(); break; }
+      await finishAddTown(addingTown.path, landing, null);
+      break;
+    }
+
+    case "addTownPhone": {
+      // The phone question, answered (a simulator, or "no phone for this town").
+      if (!addingTown || !addingTown.path || addingTown.prep.status !== "ok" || !addingTown.landing) break;
+      const picked = intent.deviceId ? (addingTown.devices || []).find((d) => d.id === intent.deviceId) : null;
+      const device: DeviceSpec | null = picked ? { kind: "ios-simulator", id: picked.id, name: picked.name } : null;
+      await finishAddTown(addingTown.path, addingTown.landing, device);
       break;
     }
 

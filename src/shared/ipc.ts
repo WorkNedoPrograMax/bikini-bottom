@@ -35,7 +35,13 @@ export interface CharacterView {
   attention: Attention;
   /** "Come back later": pinned by Maksym → the red dot stays until he opens it. */
   reminded: boolean;
+  /** The Phone Booth: on the phone, waiting outside its door, or neither. Not a
+   *  "needs you" — `attention` stays null for it (a queue, not a snag). */
+  booth: BoothRole | null;
 }
+
+/** A character's place at the town's one test phone. */
+export type BoothRole = "holding" | "queued";
 
 /** First Run walkthrough steps (FR-19). Folder is mandatory; notifications/
  *  assets (1.4) land before "ready" in a later story. */
@@ -210,6 +216,10 @@ export interface WindowView {
   /** Terminal-mode only: the character's past Claude sessions (its "Past orders"),
    *  newest first. Clicking one resumes it in the terminal via `claude --resume`. */
   termSessions?: { sessionId: string; title: string }[];
+  /** The Phone Booth line under the name: "On the phone (4 min)" or "Waiting for
+   *  the phone — Patrick is testing (4 min)". `holder` is the name of whoever has
+   *  the phone; `minutes` how long they have had it. Null when not at the booth. */
+  booth: { role: BoothRole; holder: string; minutes: number } | null;
 }
 
 /** What one job has cost so far — the numbers that were invisible on 25 Aug 2026
@@ -265,7 +275,7 @@ export interface FuelSign {
 /** An Orders Board status (FR-10). Kitchen vocabulary that tells the cases apart:
  *  ASKING YOU (a question) · NEEDS A YES (a permission) · ON HOLD (Claude's usage
  *  limit) · CHECK-IN (paused at a checkpoint) · MIXED UP (a landing collision). */
-export type OrderStatus = "WAITING" | "ASKING YOU" | "NEEDS A YES" | "ON HOLD" | "CHECK-IN" | "MIXED UP" | "COOKING" | "SERVED" | "BURNED" | "SCRAPPED" | "SENT BACK";
+export type OrderStatus = "WAITING" | "ASKING YOU" | "NEEDS A YES" | "ON HOLD" | "CHECK-IN" | "MIXED UP" | "COOKING" | "ON THE PHONE" | "WAITING FOR PHONE" | "SERVED" | "BURNED" | "SCRAPPED" | "SENT BACK";
 
 /** One line on the Galley Grub Orders Board. */
 export interface OrderLine {
@@ -314,6 +324,27 @@ export interface AddingTown {
   path: string | null;
   /** Preparing that folder (same prep as First Run, AD-9). "ok" → the two-button question. */
   prep: { status: "idle" | "working" | "ok" | "error"; message: string };
+  /** The landing answer, HELD while the phone question is still up (Flutter towns
+   *  only). Absent until answered; the profile is written once, with both answers. */
+  landing?: "none" | "auto";
+  /** The simulators on this Mac (booted first), when the folder looks like a
+   *  Flutter project — the phone picker card shows one wooden button per line.
+   *  Absent for every other folder: no phone question, exactly as before. */
+  devices?: { id: string; name: string; os: string; booted: boolean }[];
+}
+
+/** The Phone Booth as the street draws it: null when the town has no phone. */
+export interface BoothView {
+  /** The phone's name from the town's profile, e.g. "iPhone 16". */
+  name: string;
+  /** Who is inside, or null when the booth is empty. */
+  holder: CharacterId | null;
+  /** Epoch ms the holder stepped in (0 when empty). */
+  since: number;
+  /** Who is waiting outside the door, in arrival order. */
+  queue: CharacterId[];
+  /** The phone is off (Android: emulator not running) — one line for the street, or null. */
+  warning: string | null;
 }
 
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */
@@ -342,6 +373,8 @@ export interface TownSnapshot {
   townName: string;
   /** The "Add a town" card, while it is up. */
   addingTown: AddingTown | null;
+  /** The Phone Booth prop, or null when this town has no test phone. */
+  booth: BoothView | null;
 }
 
 /** Renderer → main. Named intents only — never raw fs/git/SDK calls (AD-4). */
@@ -388,6 +421,8 @@ export type Intent =
   | { type: "switchTown"; path: string }
   | { type: "addTown" }
   | { type: "addTownKind"; landing: "none" | "auto" }
+  // The phone question (Flutter towns only): a simulator's id, or null for "no phone".
+  | { type: "addTownPhone"; deviceId: string | null }
   | { type: "cancelAddTown" };
 
 /** A one-shot sound cue (transient, view-only — like the token stream). */

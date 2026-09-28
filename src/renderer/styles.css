@@ -59,6 +59,61 @@ html, body {
 .actor.unseen .dot { display: block; }
 @keyframes ping { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.25); opacity: .8; } }
 
+/* --- The Phone Booth: a wooden telephone booth on the street (wooden-sign
+   style: the same woods as the town sign). Stands between Patrick and Squidward;
+   the door names whoever is inside. Hidden when the town has no phone. --- */
+.booth {
+  position: absolute; left: 31%; top: 76%; transform: translate(-50%, -50%);
+  z-index: 5; width: clamp(72px, 7.4vw, 106px); text-align: center; line-height: 1;
+  filter: drop-shadow(0 4px 5px rgba(0,0,0,.45)); cursor: default;
+}
+.booth-roof {
+  margin: 0 auto; width: 112%; margin-left: -6%; padding: 4px 0 5px;
+  background: #8a5a2c; border: 3px solid #5d3a15; border-radius: 8px 8px 3px 3px;
+  font-family: "Marker Felt", var(--disp); font-size: clamp(10px, 1vw, 13px); letter-spacing: 1.5px;
+  color: #f3dfa2; text-shadow: 0 1px 2px rgba(0,0,0,.5); box-shadow: 0 3px 0 #3e2510;
+}
+.booth-body {
+  margin-top: 3px; height: clamp(84px, 9.4vw, 136px); padding: 7px 6px 10px;
+  background: linear-gradient(90deg, #a9713a, #c98a4e 45%, #a9713a); border: 3px solid #5d3a15;
+  border-radius: 4px 4px 6px 6px; box-shadow: inset 0 0 0 2px #7d4a1e, 0 4px 0 #3e2510;
+  display: flex; flex-direction: column;
+}
+.booth-glass {
+  flex: 1; border: 2px solid #5d3a15; border-radius: 4px;
+  background: linear-gradient(160deg, rgba(205,239,247,.85), rgba(150,205,225,.7) 55%, rgba(120,185,210,.75));
+  display: flex; align-items: center; justify-content: center; padding: 4px;
+  box-shadow: inset 0 0 12px rgba(255,255,255,.55);
+}
+/* the door: the holder's name on one line, the minutes under it — never wrapped */
+.booth-door {
+  font-family: "Marker Felt", var(--disp); font-size: clamp(10px, 1vw, 12.5px); line-height: 1.25;
+  color: #241d0e; background: rgba(243,223,162,.92); border: 2px solid #5d3a15; border-radius: 6px;
+  padding: 3px 4px; max-width: 100%; display: none; flex-direction: column; gap: 1px;
+}
+.booth-door b, .booth-door span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.booth-door b { font-weight: 700; }
+.booth-door span { font-size: .9em; color: #5a3f12; }
+.booth.busy .booth-door { display: flex; }
+/* a faint phone sitting inside the empty booth: a small dark handset shape */
+.booth-glass::before {
+  content: ""; width: 34%; height: 10%; border-radius: 4px; background: #3a2c14; opacity: .55;
+  position: relative; top: -2px;
+}
+.booth.busy .booth-glass::before { display: none; }
+.booth-warn {
+  margin-top: 6px; font-family: var(--disp); font-size: clamp(10px, 1vw, 12px); line-height: 1.25;
+  color: #ffcf5a; text-shadow: 0 1px 5px rgba(0,0,0,.9); width: 18ch; margin-left: calc(50% - 9ch);
+}
+.booth.off .booth-glass { background: linear-gradient(160deg, rgba(90,90,90,.7), rgba(50,50,50,.75)); }
+/* the phone picker's buttons (one per simulator) */
+.krabs-card .kind.phones { max-height: 46vh; overflow-y: auto; padding-right: 4px; }
+.krabs-card .kind .wood-btn.none { background: #8a5a2c; }
+/* the Work Window's booth line under the name */
+.work-card header .h-sub.phone-line { font-weight: 700; opacity: 1; }
+/* Orders board: the phone words read like cooking (a queue, not a snag) */
+.s-on-the-phone, .s-waiting-for-phone { color: #6b4a12; }
+
 .cap {
   position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
   color: #cdeff7; font-size: 13px; text-align: center; max-width: 70ch;

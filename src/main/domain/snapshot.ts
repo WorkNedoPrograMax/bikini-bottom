@@ -9,7 +9,7 @@ export const BACKGROUND = "conch-day.png";
 
 /** The town before any Character exists (First Run shows over this). */
 export function emptyTown(): TownSnapshot {
-  return { seq: 0, background: BACKGROUND, characters: [], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null, towns: [], townName: "", addingTown: null };
+  return { seq: 0, background: BACKGROUND, characters: [], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null, towns: [], townName: "", addingTown: null, booth: null };
 }
 
 export function fold(events: readonly DomainEvent[]): TownSnapshot {
@@ -33,6 +33,7 @@ export function fold(events: readonly DomainEvent[]): TownSnapshot {
           note: null, noteAt: 0, // the chalk line lives in the lane; main fills it
           attention: null,       // main derives it from the lane
           reminded: false,
+          booth: null,           // the phone booth lives in the lane; main fills it
         });
         break;
       case "CharacterStateChanged": {
@@ -64,5 +65,5 @@ export function fold(events: readonly DomainEvent[]): TownSnapshot {
     }
   }
 
-  return { seq, background: BACKGROUND, characters: [...chars.values()], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null, towns: [], townName: "", addingTown: null };
+  return { seq, background: BACKGROUND, characters: [...chars.values()], firstRun: null, openWindow: null, orders: [], muted: false, faces: {}, fuel: EMPTY_FUEL, fuelSign: null, towns: [], townName: "", addingTown: null, booth: null };
 }

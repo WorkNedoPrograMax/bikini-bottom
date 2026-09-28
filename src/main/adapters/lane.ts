@@ -12,7 +12,8 @@ import type { EventLog } from "../domain/eventLog";
 import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
 import { clearStrayApiKey } from "./claude";
 import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue, sanitizeStatus, statusAccepted, fallbackNote } from "./guards";
-import { shouldLand, type Landing } from "../config/townProfile";
+import { shouldLand, type Landing, type DeviceSpec } from "../config/townProfile";
+import { Booth, boothStep, phoneMatch, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN } from "../domain/booth";
 import { log } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -176,6 +177,13 @@ const DENY_READONLY = {
   },
 } as const;
 const READ_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "NotebookRead"];
+// The Phone Booth's two refusals: a command only the town may run on the phone,
+// and a queued phone command whose job ended before its turn came.
+const DENY_PHONE = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: FORBIDDEN_REASON } } as const;
+const DENY_LEFT = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: LEFT_REASON } } as const;
+// The booth's clock: settle the door every few seconds while anyone is at it
+// (the limitSweep pattern — self-clearing, unref'd, never persisted).
+const BOOTH_TICK_MS = 5_000;
 
 /** A past conversation for a Character, kept so it can be reopened. */
 interface ArchivedSession {
@@ -266,6 +274,9 @@ interface Lane {
   // is, posted via `post_status`. Shown under its name on the street.
   note: string | null;
   noteAt: number;               // epoch ms of the last accepted line (cooldown anchor)
+  // The Phone Booth: on the phone, waiting outside its door, or neither. Runtime
+  // only — never persisted; a relaunch starts with an empty booth.
+  booth: "holding" | "queued" | null;
 }
 
 /** Adoption support (Scout & Runner): a character labels an existing lane.
@@ -314,6 +325,8 @@ export interface LaneView {
   pastSessions: { index: number; title: string }[];
   /** A past session being browsed, or null when on the current conversation. */
   viewing: { index: number; readOnly: boolean; messages: ChatMessage[]; asking: boolean } | null;
+  /** The Phone Booth: holding the phone, queued for it, or neither. */
+  booth: "holding" | "queued" | null;
 }
 
 export class LaneManager {
@@ -339,9 +352,13 @@ export class LaneManager {
     /** The Ferry: how finishing behaves in THIS town. "none" (the default) means
      *  Bikini never touches git when a character finishes; "auto" is the Epic 5
      *  serveJob landing onto the project's main line. */
-    private landing: Landing = "none"
+    private landing: Landing = "none",
+    /** The Phone Booth: this town's one test phone (from its profile), or null
+     *  when the town has none — then no command ever waits and nothing is refused. */
+    private device: DeviceSpec | null = null
   ) {
     this.sessionsFile = path.join(projectPath, ".bikini", "sessions.json");
+    this.booth = new Booth({ graceSec: device?.graceSec, maxHoldMin: device?.maxHoldMin });
     if (fuelOpts.fuelFile) {
       try {
         const raw = JSON.parse(readFileSync(fuelOpts.fuelFile, "utf8"));
@@ -362,6 +379,53 @@ export class LaneManager {
 
   private sessionsFile: string;
   private loaded: Record<string, PersistedLane> = {};
+
+  // ───────────── The Phone Booth ─────────────
+  // One door per town. The pure queue lives in domain/booth.ts; this is the
+  // wiring: who is at the door (per lane), the clock, and the release points.
+  private booth: Booth;
+  private boothTicker: ReturnType<typeof setInterval> | null = null;
+  /** "The test phone is off — start the Pixel 7 emulator", or null. */
+  private phoneWarning: string | null = null;
+  /** The booth as the street draws it, or null when the town has no phone. */
+  boothView(): { name: string; holder: CharacterId | null; since: number; queue: CharacterId[]; warning: string | null } | null {
+    if (!this.device) return null;
+    const v = this.booth.view();
+    return { name: this.device.name, holder: v.holder as CharacterId | null, since: v.since, queue: v.queue as CharacterId[], warning: this.phoneWarning };
+  }
+  /** The town found the phone off (Android: emulator not running) — say so on the street. */
+  setPhoneWarning(text: string | null): void { this.phoneWarning = text; this.onChange(); }
+  /** Hang up and/or step out of the queue — the one exit for every way a job can
+   *  end. Safe to call when the lane was never at the booth. */
+  private leaveBooth(id: CharacterId): void {
+    const l = this.lane(id);
+    this.booth.release(id);
+    this.booth.abandon(id);
+    if (l.booth !== null) { l.booth = null; this.onChange(); }
+  }
+  /** Start the door's clock on the first claim; it clears itself once the booth
+   *  is empty (the limitSweep pattern). Each tick: settle, and on a release drop
+   *  that lane's place — chalking the max-hold case so Maksym can look. */
+  private armBoothTicker(): void {
+    if (this.boothTicker) return;
+    this.boothTicker = setInterval(() => {
+      const rel = this.booth.settle(Date.now());
+      if (rel) {
+        const l = this.lanes.get(rel.id as CharacterId);
+        if (l) {
+          l.booth = null;
+          if (rel.reason === "maxHold") {
+            l.note = `Handed the phone over after ${this.device?.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min`; l.noteAt = Date.now();
+            this.persist();
+          }
+        }
+        log("booth", `${rel.id} released the phone (${rel.reason})`, { queue: this.booth.view().queue });
+      }
+      if (this.booth.isEmpty() && this.boothTicker) { clearInterval(this.boothTicker); this.boothTicker = null; }
+      this.onChange(); // the door's minutes tick on the street and in the Work Window
+    }, BOOTH_TICK_MS);
+    this.boothTicker.unref?.();
+  }
 
   // Reserve light: Claude's usage windows are per ACCOUNT, not per character, so
   // every lane's rate_limit_event folds into this one town-wide reading.
@@ -422,6 +486,7 @@ export class LaneManager {
         lastAskAnsweredAt: 0, nudged: false,
         limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null,
         note: cur?.note ?? null, noteAt: cur?.noteAt ?? 0,
+        booth: null,
       }).get(id)!;
       // Closed the app while waiting out a usage limit? Keep waiting — and keep
       // the promise to pick up by ourselves when it resets.
@@ -498,6 +563,7 @@ export class LaneManager {
       viewing: l.viewing != null && l.archive[l.viewing]
         ? { index: l.viewing, readOnly: l.viewReadOnly, messages: l.archive[l.viewing].messages, asking: l.askingPast }
         : null,
+      booth: l.booth,
     };
   }
 
@@ -599,6 +665,7 @@ export class LaneManager {
     l.paused = true; l.burned = false; l.working = false; l.activity = null; l.agents.clear();
     this.clearWatchdog(l);
     this.setPhase(l, "waiting");
+    this.leaveBooth(id); // a limit hold hands the phone over
     l.conversation.push({ from: "them", text: `⏳ Claude's usage limit is used up for now — it resets at ${fmtClock(resetsAt)}. I'm holding my place and will pick up again by myself right after; nothing is lost. (Scrap it if you'd rather drop this order.)` });
     log("limit", `${id} paused — usage limit`, { resetsAt: new Date(resetsAt).toISOString(), hits: l.stats.limitHits, seen: seen.text.slice(0, 80) });
     await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
@@ -669,6 +736,10 @@ export class LaneManager {
     if (!l.pump || l.pump.closed()) {
       // No live session → open one. Resume the prior session unless this is a
       // brand-new job (fresh), so context carries across follow-ups and restarts.
+      // Whatever the previous session held or waited for at the booth is dropped
+      // HERE, before the replacement exists — so a superseded session's shutdown
+      // (its catch/finally) can never take the phone away from its successor.
+      this.leaveBooth(id);
       const resume = !fresh && !!l.sessionId;
       l.pump = makePump();
       l.sessionLoop = this.runSession(id, l.pump, resume);
@@ -771,6 +842,7 @@ export class LaneManager {
     l.burned = false; l.paused = false; l.working = false;
     this.clearWatchdog(l);
     this.setPhase(l, "waiting");
+    this.leaveBooth(id); // scrapped → off the phone, out of the queue
     l.note = null; l.noteAt = 0; // nothing to report about a scrapped order
     l.conversation.push({ from: "them", text: "Scrapped. That order's off the books." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
@@ -792,6 +864,7 @@ export class LaneManager {
     l.working = false;
     this.clearWatchdog(l);
     this.setPhase(l, "waiting");
+    this.leaveBooth(id); // cancelled → off the phone, out of the queue
     l.conversation.push({ from: "them", text: "Okay — I stopped. Nothing was left half-done." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -1096,6 +1169,7 @@ export class LaneManager {
     this.endSession(l); // stop the live session — nothing keeps writing after a burn
     l.working = false; this.clearWatchdog(l);
     this.setPhase(l, "waiting");
+    this.leaveBooth(id); // burned → the phone is free again
     l.conversation.push({ from: "them", text: `Uh oh — I burned this one: ${reason}. Nothing broke; your project is untouched. Try again, or scrap it?` });
     await this.log.append({ type: "JobBurned", id, reason });
     await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
@@ -1153,6 +1227,7 @@ export class LaneManager {
     l.working = false;
     l.agents.clear();
     this.setPhase(l, "waiting");
+    this.leaveBooth(id); // the job ended → hang up
     l.idleAt = Date.now(); // remember when we chimed → suppress straggler re-chimes
     await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
     this.onCue(id, "ready"); // truly finished — call Maksym
@@ -1278,6 +1353,12 @@ export class LaneManager {
     const serverNote = adoption?.frontendPort
       ? ` This lane's app is ALREADY running in Docker and stays up: frontend at http://localhost:${adoption.frontendPort}, backend at http://localhost:${adoption.backendPort} (the API is served under /api, proxied by the frontend). Use these running services directly to run, test, or verify. Do NOT start, restart, kill, or bootstrap any server (never run \`npm run dev\`, \`vite\`, \`docker compose up\`, or similar) — they are already up. If something looks down, tell Maksym rather than starting your own.`
       : "";
+    // The Phone Booth: one test phone, shared in turns; the door is enforced by
+    // the PreToolUse hook below, this just tells the character the rules.
+    const dev = this.device;
+    const phoneNote = dev
+      ? ` This town has ONE test phone, the ${dev.name} (${dev.kind}, id ${dev.id}). Every command that installs, runs, or drives the app on a device must target exactly this phone (\`-d ${dev.id}\`, \`--device ${dev.id}\`, \`device_id: "${dev.id}"\`). Build, analyse, run unit tests, and edit freely and in parallel — nothing waits for that. Your lane is a fresh checkout: run \`flutter pub get\` (and \`pod install\` if iOS needs it) once before your first build. Phone commands may pause before they start: that means another character is on the phone and you are next; do NOT retry, do NOT boot or use any other simulator, never shut down, erase, or reinstall the simulator itself. Run real commands (\`maestro test …\`, \`flutter run …\`) rather than package scripts that hide them, so the town can see them. Group your phone work (build first, then install and run all flows back to back) so you hold the phone briefly.`
+      : "";
 
     try {
       const q = query({
@@ -1296,7 +1377,8 @@ export class LaneManager {
               + " HOW to ask — Maksym is one person running several of you at once, and every question stops him and rings his phone. So: (1) BATCH. Finish the step you're on, gather EVERY open question, and ask them together in ONE `ask_maksym` call using the `questions` array — never one question now and another ten minutes later. Natural batching points: after planning, after a design walkthrough, before opening a PR. (2) Progress is NOT a question. 'Fixed it', 'Deployed to staging', 'Done — take a look' go in your normal reply; never route them through `ask_maksym`. (3) Prefer deciding small things yourself and saying what you chose. The tool enforces (1) and (2): a lone follow-up question right after his last answer, or a question whose options are all acknowledgments, is bounced back to you — that means keep working and batch, not stop."
               + " KEEP MAKSYM POSTED: after every meaningful step or phase change, call `post_status` with ONE plain sentence about where you are (what just happened → what's next) — it never waits, and it is NOT a substitute for `ask_maksym`: anything you need him to decide still goes through `ask_maksym`."
               + " POINTED-AT ELEMENTS: when a message says Maksym 'pointed at' things (a numbered list, pictures, and a pointed-elements.json with the exact details), treat them as the design brief — find each element in this lane's source, make the change, and say which file you touched."
-              + serverNote,
+              + serverNote
+              + phoneNote,
           },
           // Load the repo's full setup (CLAUDE.md, skills, /commands, rules,
           // agents, connectors) so the character is as smart as the terminal.
@@ -1317,31 +1399,72 @@ export class LaneManager {
           // verified by tests. This keeps the gate readable.
           hooks: {
             PreToolUse: [{
+              // A hook without an explicit timeout is capped at 600 s by the CLI
+              // and the tool is BLOCKED when it expires. A wait at the booth can be
+              // two full holds plus its own, so: 3 × maxHoldMin. This also lifts
+              // the silent 10-minute cap the ask-Maksym wait below used to have.
+              timeout: 3 * (dev?.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN) * 60,
               hooks: [async (input: any): Promise<any> => {
                 const toolName = input.tool_name as string;
                 const ti = (input.tool_input || {}) as Record<string, unknown>;
                 // Our own "ask Maksym" tool is never a permission risk — always allow
                 // it so the question reaches him (even when asking-mode is on).
                 if (toolName.startsWith("mcp__bikini__")) return ALLOW;
-                if (this.getBypass()) return ALLOW; // bypass — never ask (Maksym's pref)
-                if (this.isSafe(toolName, ti, cwd)) return ALLOW;
-                // Risky → pause and ask (FR-12). Character goes Calling until answered.
-                const question = this.describe(toolName, ti);
-                l.conversation.push({ from: "them", text: question, tool: true });
-                l.working = false;
-                this.setPhase(l, "waiting");
-                await this.log.append({ type: "PermissionAsked", id });
-                await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
-                this.clearWatchdog(l);
-                // Store the ask BEFORE the cue (the phone reads it from the cue).
-                let resolveAsk!: (r: unknown) => void;
-                const answered = new Promise((resolve) => { resolveAsk = resolve as (r: unknown) => void; });
-                l.pending = { question, resolve: resolveAsk };
-                this.onCue(id, "ready"); // needs my OK — call Maksym
-                this.onChange();
-                return answered;
+                // The Phone Booth comes BEFORE the bypass allow: bypass mode still
+                // refuses what only the town may do to the phone, and still queues.
+                const step = boothStep(toolName, ti, dev, this.getBypass());
+                if (step === "forbidden") {
+                  log("booth", `${id} refused a phone command`, { tool: toolName, command: String(ti.command ?? "").slice(0, 120) });
+                  l.conversation.push({ from: "them", text: "The town stopped me touching the test phone itself (shut down / wipe / boot another) — carrying on without it.", tool: true });
+                  this.onChange();
+                  return DENY_PHONE;
+                }
+                const phone = step === "phone";
+                if (phone && l.booth !== "holding") {
+                  // Walk to the booth. The stall watchdog is off while we wait (a
+                  // long queue is not "stuck") and back on once we step in.
+                  l.booth = "queued"; l.activity = "waiting for the phone…";
+                  this.clearWatchdog(l);
+                  log("booth", `${id} wants the phone`, { holder: this.booth.view().holder, queue: this.booth.view().queue });
+                  this.onChange();
+                  const r = await this.booth.claim(id);
+                  this.armBoothTicker();
+                  if (r === "left") { l.booth = null; return DENY_LEFT; }
+                  l.booth = "holding"; l.activity = "on the phone…";
+                  this.armWatchdog(id);
+                  log("booth", `${id} has the phone`);
+                  this.onChange();
+                }
+                const decision = await (async (): Promise<unknown> => {
+                  if (step === "allow" || this.getBypass()) return ALLOW; // bypass — never ask (Maksym's pref); a queued phone command included
+                  if (this.isSafe(toolName, ti, cwd)) return ALLOW;
+                  // Risky → pause and ask (FR-12). Character goes Calling until answered.
+                  // (A character keeps the phone while it asks — the grace clock decides.)
+                  const question = this.describe(toolName, ti);
+                  l.conversation.push({ from: "them", text: question, tool: true });
+                  l.working = false;
+                  this.setPhase(l, "waiting");
+                  await this.log.append({ type: "PermissionAsked", id });
+                  await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
+                  this.clearWatchdog(l);
+                  // Store the ask BEFORE the cue (the phone reads it from the cue).
+                  let resolveAsk!: (r: unknown) => void;
+                  const answered = new Promise((resolve) => { resolveAsk = resolve as (r: unknown) => void; });
+                  l.pending = { question, resolve: resolveAsk };
+                  this.onCue(id, "ready"); // needs my OK — call Maksym
+                  this.onChange();
+                  return answered;
+                })();
+                // A phone command that is really going to run: the grace clock
+                // waits for it to finish (PostToolUse below) before counting.
+                if (phone && decision === ALLOW) this.booth.begin(id);
+                return decision;
               }],
             }],
+            // A phone command finished (well or badly): the holder's grace clock
+            // starts. Never release here — the next command may be seconds away.
+            PostToolUse: [{ hooks: [async (input: any): Promise<any> => { if (dev && phoneMatch(input.tool_name, input.tool_input, dev.id) === "phone") this.booth.touch(id); return {}; }] }],
+            PostToolUseFailure: [{ hooks: [async (input: any): Promise<any> => { if (dev && phoneMatch(input.tool_name, input.tool_input, dev.id) === "phone") this.booth.touch(id); return {}; }] }],
           },
         },
       });
@@ -1551,6 +1674,7 @@ export class LaneManager {
             // is the whole point of the cap: bound unattended runs, lose nothing.
             if (sub === "error_max_turns") {
               l.paused = true; l.working = false; this.clearWatchdog(l); this.setPhase(l, "waiting");
+              this.leaveBooth(id); // a check-in pause hands the phone over
               l.conversation.push({ from: "them", text: "That's a big job — I've taken a lot of steps, so I paused to check in before spending more (so I don't run up your bill while you're away). Nothing's lost. Want me to keep cooking? I'll pick up right where I left off." });
               await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
               this.onCue(id, "ready"); // needs a decision — call Maksym
@@ -1624,7 +1748,10 @@ export class LaneManager {
       await this.burn(id, reasonFromError(e && (e.message || String(e)) || "unknown"));
     } finally {
       // Session is over; a later message will open a fresh one (resuming context).
-      if (l.pump === pump) { l.pump = null; l.sdkQuery = null; l.working = false; }
+      // The booth backstop: whatever THIS session held or waited for is dropped.
+      // (Only when this loop is still the lane's current one — a superseded loop
+      // was already taken off the booth by send() before its successor existed.)
+      if (l.pump === pump) { l.pump = null; l.sdkQuery = null; l.working = false; this.leaveBooth(id); }
     }
   }
 }
