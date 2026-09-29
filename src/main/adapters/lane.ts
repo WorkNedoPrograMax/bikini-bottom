@@ -36,6 +36,20 @@ process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = process.env.CLAUDE_CODE_STREAM_CL
 // on and our PreToolUse hook is the gate regardless.)
 const SETTING_SOURCES: ("user" | "project" | "local")[] = ["user", "project", "local"];
 
+// Tools a character never gets. Loading the user's setup (above) also pulls in
+// every claude.ai connector on the account — Linear, Mixpanel, Slack, Drive,
+// Gmail, … 60+ servers, several hundred tool schemas — and their schemas ride on
+// EVERY model call. Measured 2026-09-29 in the highcap town: 155k tokens on the
+// first call, 445k on the second once the slow connectors had joined (a 2 KB
+// tool result was the only real addition). A server-level spec removes the
+// server's tools from the model's context entirely; the wildcard also covers
+// connectors that connect late. Plugin servers (dart, maestro, …) and the
+// project's own .mcp.json (mazarax) stay. Measured with the CLI: 204 → 99 tools.
+const LANE_DISALLOWED_TOOLS = [
+  "mcp__claude_ai_*",     // account connectors: the town has no use for them
+  "mcp__playwright-ext",  // the user's browser extension — never reachable from a headless lane
+];
+
 // Pin every character to Opus 4.8 — the most capable model — so sessions never
 // silently fall back to a smaller/cheaper model (Maksym's rule). Maps to the
 // CLI's --model flag via the SDK query options.
@@ -1011,7 +1025,7 @@ export class LaneManager {
       const q = query({
         prompt,
         options: {
-          cwd, model: MODEL, effort: EFFORT, maxTurns: 20, settingSources: SETTING_SOURCES, permissionMode: "default",
+          cwd, model: MODEL, effort: EFFORT, maxTurns: 20, settingSources: SETTING_SOURCES, disallowedTools: LANE_DISALLOWED_TOOLS, permissionMode: "default",
           abortController: abort,
           ...(sess.sdkSessionId ? { resume: sess.sdkSessionId } : {}),
           hooks: {
@@ -1420,6 +1434,7 @@ export class LaneManager {
           // Our PreToolUse hook is still the permission gate regardless (AD-6;
           // canUseTool doesn't fire in this SDK's local transport, the hook does).
           settingSources: SETTING_SOURCES,
+          disallowedTools: LANE_DISALLOWED_TOOLS,
           // When bypass is on (Maksym's "just work, never ask" pref), run in TRUE
           // bypass mode — not "default". "default" still enforces Claude Code's
           // built-in guards (notably: an agent editing its own `.claude/**` config
@@ -1533,7 +1548,11 @@ export class LaneManager {
           }
         } else if (msg.type === "system" && msg.subtype === "init") {
           l.sessionId = msg.session_id;
-          log("lane", `${id} session ready`, { sessionId: msg.session_id, cwd });
+          // Tool count + MCP servers at start: the measurable footprint of what
+          // every model call will carry (see LANE_DISALLOWED_TOOLS).
+          const servers = (msg.mcp_servers || []) as { name: string; status: string }[];
+          const tools = (msg.tools || []) as string[];
+          log("lane", `${id} session ready`, { sessionId: msg.session_id, cwd, tools: tools.length, mcpTools: tools.filter((t) => t.startsWith("mcp__")).length, mcpServers: servers.length, mcpConnected: servers.filter((sv) => sv.status === "connected").map((sv) => sv.name) });
         } else if (mtype === "system" && msub === "task_started") {
           // A sub-agent ("helper") started. ONLY task_started registers one (its
           // name is stable here); task_progress is deliberately ignored for
