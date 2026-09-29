@@ -13,6 +13,8 @@ import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
 import { clearStrayApiKey } from "./claude";
 import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue, sanitizeStatus, statusAccepted, fallbackNote } from "./guards";
 import { shouldLand, type Landing, type DeviceSpec } from "../config/townProfile";
+import { setupNote, setupActivity, type LaneSetup, type SetupReport } from "../domain/laneSetup";
+import { runSetup, setupDue, loadReport } from "./laneSetup";
 import { Booth, boothStep, phoneMatch, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN } from "../domain/booth";
 import { log } from "../log";
 
@@ -277,6 +279,10 @@ interface Lane {
   // The Phone Booth: on the phone, waiting outside its door, or neither. Runtime
   // only — never persisted; a relaunch starts with an empty booth.
   booth: "holding" | "queued" | null;
+  // Lane setup: what the town's recipe did for this lane before the character
+  // started (packages, generated code, copied secrets). Runtime only; the town
+  // keeps .bikini/setup/<id>.json so a relaunch re-reads it.
+  setupReport: SetupReport | null;
 }
 
 /** Adoption support (Scout & Runner): a character labels an existing lane.
@@ -355,7 +361,10 @@ export class LaneManager {
     private landing: Landing = "none",
     /** The Phone Booth: this town's one test phone (from its profile), or null
      *  when the town has none — then no command ever waits and nothing is refused. */
-    private device: DeviceSpec | null = null
+    private device: DeviceSpec | null = null,
+    /** Lane setup: the town's recipe for a fresh lane (git-ignored files to copy,
+     *  commands to run once), or null when a lane is ready as checked out. */
+    private setup: LaneSetup | null = null
   ) {
     this.sessionsFile = path.join(projectPath, ".bikini", "sessions.json");
     this.booth = new Booth({ graceSec: device?.graceSec, maxHoldMin: device?.maxHoldMin });
@@ -486,7 +495,7 @@ export class LaneManager {
         lastAskAnsweredAt: 0, nudged: false,
         limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null,
         note: cur?.note ?? null, noteAt: cur?.noteAt ?? 0,
-        booth: null,
+        booth: null, setupReport: null,
       }).get(id)!;
       // Closed the app while waiting out a usage limit? Keep waiting — and keep
       // the promise to pick up by ourselves when it resets.
@@ -1125,6 +1134,30 @@ export class LaneManager {
     return ensureWorktree(this.projectPath, id);
   }
 
+  /** Lane setup: run the town's recipe in a fresh (non-adopted) lane before the
+   *  session opens — packages, generated code, git-ignored secrets — so the
+   *  character never spends its first turns on them. Skipped when nothing is
+   *  due (all steps passed earlier; copies are re-done, they are cheap). A
+   *  failing step never stops the job: it is reported to the character instead. */
+  private async prepareLane(id: CharacterId, cwd: string): Promise<void> {
+    const l = this.lane(id);
+    if (!this.setup || this.adopt?.adoptionFor(id)) { l.setupReport = null; return; }
+    const previous = await loadReport(this.projectPath, cwd);
+    if (!setupDue(this.setup, previous)) { l.setupReport = previous; return; }
+    const started = Date.now();
+    try {
+      l.setupReport = await runSetup(this.projectPath, cwd, this.setup, (cmd) => {
+        l.activity = setupActivity(cmd); l.beatAt = Date.now(); this.onChange();
+      });
+      log("lane", `${id} lane prepared`, { ms: Date.now() - started, copied: l.setupReport.copied.length, passed: l.setupReport.passed.length, failed: l.setupReport.failed.map((f) => f.cmd) });
+    } catch (e) {
+      // The recipe itself blew up (not a step): the character works as if there were none.
+      log("lane", `${id} lane setup crashed`, { error: String(e).slice(0, 200) });
+      l.setupReport = previous;
+    }
+    l.activity = "getting started…"; this.onChange();
+  }
+
   /** The character's lane folder as a path (no creation) — for "open terminal here". */
   worktreeDir(id: CharacterId): string {
     const a = this.adopt?.adoptionFor(id);
@@ -1249,6 +1282,7 @@ export class LaneManager {
     let cwd: string;
     try { cwd = await this.worktreeFor(id); }
     catch (e) { await this.burn(id, `couldn't set up my workspace (${(e as Error).message})`); l.pump = null; return; }
+    await this.prepareLane(id, cwd);
 
     l.agents.clear();
     l.abort = new AbortController();
@@ -1357,7 +1391,7 @@ export class LaneManager {
     // the PreToolUse hook below, this just tells the character the rules.
     const dev = this.device;
     const phoneNote = dev
-      ? ` This town has ONE test phone, the ${dev.name} (${dev.kind}, id ${dev.id}). Every command that installs, runs, or drives the app on a device must target exactly this phone (\`-d ${dev.id}\`, \`--device ${dev.id}\`, \`device_id: "${dev.id}"\`). Build, analyse, run unit tests, and edit freely and in parallel — nothing waits for that. Your lane is a fresh checkout: run \`flutter pub get\` (and \`pod install\` if iOS needs it) once before your first build. Phone commands may pause before they start: that means another character is on the phone and you are next; do NOT retry, do NOT boot or use any other simulator, never shut down, erase, or reinstall the simulator itself. Run real commands (\`maestro test …\`, \`flutter run …\`) rather than package scripts that hide them, so the town can see them. Group your phone work (build first, then install and run all flows back to back) so you hold the phone briefly.`
+      ? ` This town has ONE test phone, the ${dev.name} (${dev.kind}, id ${dev.id}). Every command that installs, runs, or drives the app on a device must target exactly this phone (\`-d ${dev.id}\`, \`--device ${dev.id}\`, \`device_id: "${dev.id}"\`). Build, analyse, run unit tests, and edit freely and in parallel — nothing waits for that.${this.setup ? "" : " Your lane is a fresh checkout: run \`flutter pub get\` (and \`pod install\` if iOS needs it) once before your first build."} Phone commands may pause before they start: that means another character is on the phone and you are next; do NOT retry, do NOT boot or use any other simulator, never shut down, erase, or reinstall the simulator itself. Run real commands (\`maestro test …\`, \`flutter run …\`) rather than package scripts that hide them, so the town can see them. Group your phone work (build first, then install and run all flows back to back) so you hold the phone briefly.`
       : "";
 
     try {
@@ -1378,7 +1412,8 @@ export class LaneManager {
               + " KEEP MAKSYM POSTED: after every meaningful step or phase change, call `post_status` with ONE plain sentence about where you are (what just happened → what's next) — it never waits, and it is NOT a substitute for `ask_maksym`: anything you need him to decide still goes through `ask_maksym`."
               + " POINTED-AT ELEMENTS: when a message says Maksym 'pointed at' things (a numbered list, pictures, and a pointed-elements.json with the exact details), treat them as the design brief — find each element in this lane's source, make the change, and say which file you touched."
               + serverNote
-              + phoneNote,
+              + phoneNote
+              + setupNote(l.setupReport),
           },
           // Load the repo's full setup (CLAUDE.md, skills, /commands, rules,
           // agents, connectors) so the character is as smart as the terminal.

@@ -5,6 +5,7 @@
 
 import path from "node:path";
 import type { CharacterId, TownTab } from "../../shared/ipc";
+import { normalizeSetup, type LaneSetup } from "../domain/laneSetup";
 
 export interface LaneSpec {
   /** The lane's worktree, RELATIVE to the project (e.g. "../sr-bob"). */
@@ -46,6 +47,9 @@ export interface TownProfile {
   servers?: string;
   /** The test phone (the booth), when this town has one. */
   device?: DeviceSpec;
+  /** What a fresh lane needs before building (git-ignored files to copy in,
+   *  commands to run once). Absent = a lane is ready as checked out. */
+  setup?: LaneSetup;
 }
 
 /** Where a project's profile lives. */
@@ -105,6 +109,8 @@ export function normalizeProfile(raw: unknown, projectPath: string): TownProfile
   if (typeof r.servers === "string" && r.servers.trim()) out.servers = r.servers.trim();
   const dev = normalizeDevice(r.device);
   if (dev) out.device = dev;
+  const setup = normalizeSetup(r.setup);
+  if (setup) out.setup = setup;
   return out;
 }
 

@@ -18,6 +18,7 @@ import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { defaultName, loadProfile, seedProfile, serializeProfile, profilePath, laneAdoption, townTabsFor, type TownProfile, type DeviceSpec } from "./config/townProfile";
 import { parseSimctlDevices } from "./domain/booth";
+import { seedSetup } from "./domain/laneSetup";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
@@ -98,6 +99,8 @@ async function openTown(projectPath: string): Promise<Town> {
   let profile = loadProfile(projectPath, (f) => readFileSync(f, "utf8"));
   if (!profile) {
     profile = seedProfile(projectPath);
+    const setup = seedSetup((rel) => existsSync(path.join(projectPath, rel)));
+    if (setup) profile.setup = setup;
     try {
       mkdirSync(path.dirname(profilePath(projectPath)), { recursive: true });
       writeFileSync(profilePath(projectPath), serializeProfile(profile), "utf8");
@@ -115,7 +118,7 @@ async function openTown(projectPath: string): Promise<Town> {
     () => cfg.data.bypassPermissions, adopt,
     // One account, one fuel file: two towns sharing it is fine (same numbers).
     { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning },
-    profile.landing, profile.device ?? null);
+    profile.landing, profile.device ?? null, profile.setup ?? null);
   // The Phone Booth: wake the town's test phone so the first tester never waits
   // for a cold start. Best effort, never blocks the town, never shuts anything down.
   if (profile.device) void bootPhone(profile.device, townLanes);
@@ -775,6 +778,12 @@ async function finishAddTown(folder: string, landing: "none" | "auto", device: D
   const existing = loadProfile(folder, (f) => readFileSync(f, "utf8"));
   const profile: TownProfile = existing ? { ...existing, landing } : seedProfile(folder, landing);
   if (device) profile.device = device; else delete profile.device;
+  // Lane setup: a Flutter folder gets the seed recipe (packages, generated code,
+  // env files) unless the profile already carries one Maksym edited.
+  if (!profile.setup) {
+    const setup = seedSetup((rel) => existsSync(path.join(folder, rel)));
+    if (setup) profile.setup = setup;
+  }
   try {
     mkdirSync(path.dirname(profilePath(folder)), { recursive: true });
     writeFileSync(profilePath(folder), serializeProfile(profile), "utf8");
