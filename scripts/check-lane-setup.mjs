@@ -19,7 +19,7 @@ const ok = (cond, msg) => { if (!cond) { fails++; console.log("  ✗", msg); } e
 console.log("seedSetup — a Flutter folder gets the recipe, anything else none:");
 const hc = new Set(["pubspec.yaml", ".fvmrc", ".maestro"]);
 const flutter = seedSetup((rel) => hc.has(rel));
-ok(flutter && JSON.stringify(flutter.copy) === JSON.stringify(["env/.env*"]), "copies the git-ignored env files (env/.env*)");
+ok(flutter && JSON.stringify(flutter.copy) === JSON.stringify(["env/.env*", ".mcp.json"]), "copies the git-ignored env files (env/.env*) and the per-machine MCP wiring (.mcp.json)");
 ok(flutter && flutter.run[0] === "fvm install", "step 1 is `fvm install` (the pinned SDK may be missing; `fvm flutter` would prompt)");
 ok(flutter && flutter.run[1] === "fvm flutter pub get", "step 2 is `fvm flutter pub get`");
 ok(flutter && flutter.run[2] === "fvm dart run build_runner build --delete-conflicting-outputs", "step 3 is build_runner");

@@ -31,7 +31,9 @@ export function seedSetup(has: (rel: string) => boolean): LaneSetup | null {
   if (!has("pubspec.yaml")) return null;
   const fvm = has(".fvmrc") ? "fvm " : "";
   const setup: LaneSetup = {
-    copy: ["env/.env*"],
+    // env/.env*: the secrets. .mcp.json: per-machine MCP wiring (highcap's
+    // CLAUDE.md tells agents to use Mazarax; its wiring is git-ignored).
+    copy: ["env/.env*", ".mcp.json"],
     // `fvm install` (no args) installs the version .fvmrc pins if it is missing
     // and exits at once when it is there — without it, `fvm flutter` stops at a
     // "install it now? (y/n)" prompt nobody can answer in a lane.
