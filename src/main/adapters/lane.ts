@@ -36,17 +36,13 @@ process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = process.env.CLAUDE_CODE_STREAM_CL
 // on and our PreToolUse hook is the gate regardless.)
 const SETTING_SOURCES: ("user" | "project" | "local")[] = ["user", "project", "local"];
 
-// Tools a character never gets. Loading the user's setup (above) also pulls in
-// every claude.ai connector on the account — Linear, Mixpanel, Slack, Drive,
-// Gmail, … 60+ servers, several hundred tool schemas — and their schemas ride on
-// EVERY model call. Measured 2026-09-29 in the highcap town: 155k tokens on the
-// first call, 445k on the second once the slow connectors had joined (a 2 KB
-// tool result was the only real addition). A server-level spec removes the
-// server's tools from the model's context entirely; the wildcard also covers
-// connectors that connect late. Plugin servers (dart, maestro, …) and the
-// project's own .mcp.json (mazarax) stay. Measured with the CLI: 204 → 99 tools.
+// Tools a character never gets. The blanket "mcp__claude_ai_*" block tried here
+// on 2026-09-29 (155k→445k tokens saved by cutting every claude.ai connector,
+// 204→99 tools) also silently killed Jira/Confluence access in every lane with
+// no visibility into why — removed 2026-09-30 (Maksym's call). If the token
+// cost needs cutting again, do it per-connector, not with a wildcard that also
+// eats connectors nobody's decided to cut yet.
 const LANE_DISALLOWED_TOOLS = [
-  "mcp__claude_ai_*",     // account connectors: the town has no use for them
   "mcp__playwright-ext",  // the user's browser extension — never reachable from a headless lane
 ];
 
