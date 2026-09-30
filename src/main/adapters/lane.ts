@@ -44,6 +44,15 @@ const SETTING_SOURCES: ("user" | "project" | "local")[] = ["user", "project", "l
 // eats connectors nobody's decided to cut yet.
 const LANE_DISALLOWED_TOOLS = [
   "mcp__playwright-ext",  // the user's browser extension — never reachable from a headless lane
+  // The account has TWO Atlassian connectors. The older "claude.ai Atlassian"
+  // (mcp__claude_ai_Atlassian__*) answers every Jira call for empat.atlassian.net
+  // with 403 "The app is not installed on this instance" — from lanes, from the
+  // SDK standalone, and from an interactive CLI alike (measured 2026-09-30 with
+  // both the hostname and the UUID cloudId). The newer "claude.ai Atlassian MCP"
+  // (mcp__claude_ai_Atlassian_MCP__*) returns the ticket fine through the very
+  // same SDK path. Characters reach for the first one alphabetically and report
+  // Jira as broken, so hide the dead one; the working one stays.
+  "mcp__claude_ai_Atlassian__*",
 ];
 
 // The EXECUTOR model — every character's base session. Pinned to a full model
