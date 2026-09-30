@@ -42,6 +42,26 @@ const SETTING_SOURCES: ("user" | "project" | "local")[] = ["user", "project", "l
 // no visibility into why — removed 2026-09-30 (Maksym's call). If the token
 // cost needs cutting again, do it per-connector, not with a wildcard that also
 // eats connectors nobody's decided to cut yet.
+// Settings overlay for every character session (the SDK's `settings` option →
+// the CLI's --settings JSON; merges on top of user/project/local).
+//
+// deniedMcpServers "claude.ai Figma": the account has an UNAUTHORIZED claude.ai
+// Figma connector that points at the same URL as the signed-in Figma plugin
+// server (plugin:figma:figma, token valid for months). Claude Code's dedup is
+// supposed to let the plugin win, but in non-interactive sessions (SDK lanes
+// and `claude -p` alike, CLI 2.1.285 / SDK 0.3.207) its debug log shows BOTH
+// sides suppressed at the same instant — the plugin server connects with tools
+// that never reach the tool index, and the connector "needs authorization" —
+// so a character has no Figma at all ("why can't you view Figma?", 2026-09-30).
+// Blocking the connector's tools with disallowedTools does NOT stop the dedup
+// (measured); denying the connector by name does: the plugin's tools then show
+// up in ToolSearch (get_screenshot found, $0.11 test). Interactive terminals
+// are unaffected either way. Remove this line once the connector is either
+// authorized or deleted at claude.ai/customize/connectors.
+const LANE_SETTINGS = JSON.stringify({
+  deniedMcpServers: [{ serverName: "claude.ai Figma" }],
+});
+
 const LANE_DISALLOWED_TOOLS = [
   "mcp__playwright-ext",  // the user's browser extension — never reachable from a headless lane
   // The account has TWO Atlassian connectors. The older "claude.ai Atlassian"
@@ -1048,7 +1068,7 @@ export class LaneManager {
       const q = query({
         prompt,
         options: {
-          cwd, model: MODEL, effort: EFFORT, maxTurns: 20, settingSources: SETTING_SOURCES, disallowedTools: LANE_DISALLOWED_TOOLS, permissionMode: "default",
+          cwd, model: MODEL, effort: EFFORT, maxTurns: 20, settingSources: SETTING_SOURCES, settings: LANE_SETTINGS, disallowedTools: LANE_DISALLOWED_TOOLS, permissionMode: "default",
           abortController: abort,
           ...(sess.sdkSessionId ? { resume: sess.sdkSessionId } : {}),
           hooks: {
@@ -1457,6 +1477,7 @@ export class LaneManager {
           // Our PreToolUse hook is still the permission gate regardless (AD-6;
           // canUseTool doesn't fire in this SDK's local transport, the hook does).
           settingSources: SETTING_SOURCES,
+          settings: LANE_SETTINGS,
           disallowedTools: LANE_DISALLOWED_TOOLS,
           // When bypass is on (Maksym's "just work, never ask" pref), run in TRUE
           // bypass mode — not "default". "default" still enforces Claude Code's
