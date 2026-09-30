@@ -1274,7 +1274,19 @@ app.whenReady().then(async () => {
   try {
     const proxyUrl = await startCacheProxy();
     process.env.ANTHROPIC_BASE_URL = proxyUrl;
-    log("app", "cache proxy active", { proxyUrl });
+    // Behind a custom base URL Claude Code switches its MCP tool search OFF and
+    // loads EVERY connector's full tool schema into every call (docs: env-vars →
+    // ANTHROPIC_BASE_URL). That was the 2026-09-29 "445k tokens on turn 1" and the
+    // 2026-09-30 "Prompt is too long" in the highcap town: 340–500 MCP tools ≈
+    // 300–480k tokens before the character has read a single file. The docs'
+    // opt-back-in is ENABLE_TOOL_SEARCH=true, safe when the proxy forwards
+    // tool_reference blocks — ours only adds cache_control and passes the rest
+    // through. Measured 2026-09-30 through the live proxy from a lane worktree:
+    // turn-1 context 214.6k → 55.5k (MCP tools 142k loaded → 631 loaded + 141.6k
+    // deferred index), and a real ToolSearch → deferred Atlassian tool call
+    // round-trips fine. Connectors stay available; they are just loaded on demand.
+    process.env.ENABLE_TOOL_SEARCH = process.env.ENABLE_TOOL_SEARCH || "true";
+    log("app", "cache proxy active", { proxyUrl, toolSearch: process.env.ENABLE_TOOL_SEARCH });
   } catch (e) {
     log("app", "cache proxy failed to start — running without it", { error: String(e) });
   }
