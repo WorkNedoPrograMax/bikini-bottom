@@ -335,7 +335,8 @@ export interface AddingTown {
 
 /** The Phone Booth as the street draws it: null when the town has no phone. */
 export interface BoothView {
-  /** The phone's name from the town's profile, e.g. "iPhone 16". */
+  /** The phone's name from the town's profile, e.g. "iPhone 16" — or both
+   *  phones when the town also has an Android one: "iPhone 17 + Pixel 8 (asleep)". */
   name: string;
   /** Who is inside, or null when the booth is empty. */
   holder: CharacterId | null;

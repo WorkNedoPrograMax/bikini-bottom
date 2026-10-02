@@ -45,8 +45,14 @@ export interface TownProfile {
   lanes?: Partial<Record<CharacterId, LaneSpec>>;
   /** Optional extra sentence for the system prompt (future projects with servers). */
   servers?: string;
-  /** The test phone (the booth), when this town has one. */
+  /** The test phone (the booth), when this town has one. The default phone:
+   *  awake while the town is open. */
   device?: DeviceSpec;
+  /** The town's Android phone, when it has one besides `device`: an emulator
+   *  that sleeps until a job aims a command at it, then the town wakes it. It
+   *  shares the booth's one door with the default phone. Always kind
+   *  "android-emulator"; dropped when `device` is itself an emulator. */
+  android?: DeviceSpec;
   /** What a fresh lane needs before building (git-ignored files to copy in,
    *  commands to run once). Absent = a lane is ready as checked out. */
   setup?: LaneSetup;
@@ -109,6 +115,10 @@ export function normalizeProfile(raw: unknown, projectPath: string): TownProfile
   if (typeof r.servers === "string" && r.servers.trim()) out.servers = r.servers.trim();
   const dev = normalizeDevice(r.device);
   if (dev) out.device = dev;
+  // A second phone only makes sense next to a default one, and only as an
+  // Android emulator (two emulators at once is not a setup this Mac can carry).
+  const android = normalizeDevice(r.android);
+  if (dev && android && android.kind === "android-emulator" && dev.kind !== "android-emulator") out.android = android;
   const setup = normalizeSetup(r.setup);
   if (setup) out.setup = setup;
   return out;

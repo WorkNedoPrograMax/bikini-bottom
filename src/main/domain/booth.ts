@@ -1,6 +1,10 @@
-// The Phone Booth: ONE test phone per town, shared in turns. Characters build in
-// parallel on their own copies; only a command that touches the phone (install,
-// run, drive, Maestro flow, screenshot) walks to the booth and waits its turn.
+// The Phone Booth: ONE door per town, shared in turns. Behind the door sit the
+// town's test phones: the default one (an iPhone simulator, awake while the town
+// is open) and, when the town has one, an Android emulator that sleeps until an
+// Android job needs it — the TOWN wakes it, a character never boots anything.
+// Characters build in parallel on their own copies; only a command that touches
+// a phone (install, run, drive, Maestro flow, screenshot) walks to the booth and
+// waits its turn.
 // PURE (no Electron, no timers of its own, the clock is injected) so
 // scripts/check-booth.mjs can test it with plain node.
 
@@ -47,9 +51,12 @@ function subcommand(seg: string[], valueFlags: Set<string>): string | null {
   return null;
 }
 
-function bashVerdict(seg: string[], deviceId: string): PhoneVerdict {
+/** Android emulators show up in `adb devices` as emulator-5554, emulator-5556… */
+const EMULATOR_SERIAL = /^emulator-\d+$/;
+
+function bashVerdict(seg: string[], ids: ReadonlySet<string>): PhoneVerdict {
   const bin = seg[0];
-  const isDevice = (t: string | undefined): boolean => !!t && t === deviceId;
+  const isDevice = (t: string | undefined): boolean => !!t && ids.has(t);
   if (bin === "xcrun" || bin === "simctl") {
     const a = bin === "xcrun" ? seg.slice(1) : seg;
     if (a[0] !== "simctl") return null;
@@ -68,7 +75,12 @@ function bashVerdict(seg: string[], deviceId: string): PhoneVerdict {
     return isDevice(seg[ui + 1]) ? null : "forbidden";
   }
   if (bin === "emulator" || bin === "emulator-headless") {
+    // Booting ANY emulator is the town's job (it wakes its own Android phone
+    // when a command needs it); `emulator -list-avds` is just a look.
     return seg.some((t) => t === "-avd" || t.startsWith("@")) ? "forbidden" : null;
+  }
+  if (bin === "avdmanager") {
+    return seg.includes("delete") ? "forbidden" : null; // list / create are harmless
   }
   if (bin === "adb") {
     // Skip target selectors: -s <serial>, -e, -d, -t <id>, -H/-P with values.
@@ -76,7 +88,8 @@ function bashVerdict(seg: string[], deviceId: string): PhoneVerdict {
     while (i < seg.length && seg[i].startsWith("-")) { if (["-s", "-t", "-H", "-P", "-L"].includes(seg[i])) i++; i++; }
     const sub = seg[i];
     if (sub === "emu" && seg[i + 1] === "kill") return "forbidden";
-    if (sub === "install" || sub === "uninstall" || sub === "shell") return "phone";
+    if (sub === "reboot" || sub === "kill-server") return "forbidden";
+    if (["install", "uninstall", "shell", "push", "pull", "exec-out", "root"].includes(sub || "")) return "phone";
     return null; // devices, logcat, version…
   }
   if (bin === "maestro") {
@@ -87,6 +100,9 @@ function bashVerdict(seg: string[], deviceId: string): PhoneVerdict {
     const sub = subcommand(seg, new Set(["-d", "--device-id"]));
     if (sub === "run" || sub === "drive" || sub === "install") return "phone";
     if (sub === "test") return seg.some((t) => t.includes("integration_test")) ? "phone" : null;
+    // `flutter emulators --launch <avd>` boots an emulator: the town's job, like
+    // `emulator -avd`. A plain `flutter emulators` listing is just a look.
+    if (sub === "emulators") return seg.some((t) => t === "--launch" || t.startsWith("--launch=")) ? "forbidden" : null;
     return null; // build, analyze, pub, doctor…
   }
   if (bin === "patrol") {
@@ -96,17 +112,23 @@ function bashVerdict(seg: string[], deviceId: string): PhoneVerdict {
   return null; // dart, pod, gradle, npm run <script> (NOT seen through), everything else
 }
 
-/** Does this tool call touch the town's phone ("phone"), do something to the
- *  phone that only the town may do ("forbidden"), or neither (null)?
+/** The town's phone ids: one id (the default phone alone) or every id the town
+ *  has (default + Android AVD). Loose on purpose so each caller passes what it holds. */
+export type PhoneIds = string | readonly string[];
+const idSet = (ids: PhoneIds): ReadonlySet<string> => new Set(typeof ids === "string" ? [ids] : ids);
+
+/** Does this tool call touch one of the town's phones ("phone"), do something
+ *  to a phone that only the town may do ("forbidden"), or neither (null)?
  *  Bash lines are matched anywhere in the command (`cd ios && flutter run -d X`
  *  counts); `npm run <script>` is NOT seen through. A forbidden segment wins
  *  over a phone segment in the same line. */
-export function phoneMatch(toolName: string, toolInput: Record<string, unknown> | null | undefined, deviceId: string): PhoneVerdict {
+export function phoneMatch(toolName: string, toolInput: Record<string, unknown> | null | undefined, phoneIds: PhoneIds): PhoneVerdict {
   const input = toolInput || {};
+  const ids = idSet(phoneIds);
   if (toolName === "Bash") {
     let phone = false;
     for (const seg of commandSegments(String(input.command ?? ""))) {
-      const v = bashVerdict(seg, deviceId);
+      const v = bashVerdict(seg, ids);
       if (v === "forbidden") return "forbidden";
       if (v === "phone") phone = true;
     }
@@ -120,14 +142,45 @@ export function phoneMatch(toolName: string, toolInput: Record<string, unknown> 
   return null;
 }
 
+/** Is this phone command aimed at the town's Android phone — so the town should
+ *  wake the emulator before letting it run? True when the line talks to adb or
+ *  the emulator, names the AVD or an emulator serial anywhere, gives "android"
+ *  as its device, or a Maestro tool is handed an emulator serial. Pure; a plain
+ *  iPhone command → false. */
+export function wantsAndroid(toolName: string, toolInput: Record<string, unknown> | null | undefined, androidId: string): boolean {
+  const input = toolInput || {};
+  const DEVICE_FLAGS = ["-d", "--device", "--device-id", "--udid"];
+  const isAndroidRef = (t: string | undefined): boolean => !!t && (t === androidId || EMULATOR_SERIAL.test(t) || t.toLowerCase() === "android");
+  if (toolName === "Bash") {
+    for (const seg of commandSegments(String(input.command ?? ""))) {
+      const bin = seg[0];
+      if (bin === "adb" || bin === "emulator" || bin === "emulator-headless") return true;
+      for (let i = 1; i < seg.length; i++) {
+        const t = seg[i];
+        if (t === androidId || EMULATOR_SERIAL.test(t)) return true;
+        if (DEVICE_FLAGS.includes(t) && isAndroidRef(seg[i + 1])) return true;
+        const eq = t.indexOf("=");
+        if (t.startsWith("--") && eq > 0 && DEVICE_FLAGS.includes(t.slice(0, eq)) && isAndroidRef(t.slice(eq + 1))) return true;
+      }
+    }
+    return false;
+  }
+  if (toolName.startsWith("mcp__") && /maestro/i.test(toolName)) {
+    const d = input.device_id ?? input.deviceId;
+    return typeof d === "string" && (d === androidId || EMULATOR_SERIAL.test(d));
+  }
+  return false;
+}
+
 /** The FIRST step of the PreToolUse hook, before the permission gate — kept pure
  *  so the check script can prove the order: the booth check runs BEFORE the
  *  bypass allow, so bypass mode still refuses forbidden commands and still queues
  *  phone work. "forbidden" → deny; "phone" → claim the booth, then the gate;
- *  "allow" → bypass allows everything else; "gate" → isSafe / ask Maksym. */
-export function boothStep(toolName: string, toolInput: Record<string, unknown> | null | undefined, device: { id: string } | null, bypass: boolean): "forbidden" | "phone" | "allow" | "gate" {
-  if (device) {
-    const m = phoneMatch(toolName, toolInput, device.id);
+ *  "allow" → bypass allows everything else; "gate" → isSafe / ask Maksym.
+ *  `phones` is every phone id the town has (null when the town has no booth). */
+export function boothStep(toolName: string, toolInput: Record<string, unknown> | null | undefined, phones: PhoneIds | null, bypass: boolean): "forbidden" | "phone" | "allow" | "gate" {
+  if (phones && (typeof phones === "string" || phones.length)) {
+    const m = phoneMatch(toolName, toolInput, phones);
     if (m) return m;
   }
   return bypass ? "allow" : "gate";

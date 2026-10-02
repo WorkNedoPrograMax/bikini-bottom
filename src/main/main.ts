@@ -18,6 +18,7 @@ import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { defaultName, loadProfile, seedProfile, serializeProfile, profilePath, laneAdoption, townTabsFor, type TownProfile, type DeviceSpec } from "./config/townProfile";
 import { parseSimctlDevices } from "./domain/booth";
+import { androidSerial, wakeAndroid } from "./adapters/phone";
 import { seedSetup } from "./domain/laneSetup";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
@@ -118,10 +119,12 @@ async function openTown(projectPath: string): Promise<Town> {
     () => cfg.data.bypassPermissions, adopt,
     // One account, one fuel file: two towns sharing it is fine (same numbers).
     { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning },
-    profile.landing, profile.device ?? null, profile.setup ?? null);
-  // The Phone Booth: wake the town's test phone so the first tester never waits
-  // for a cold start. Best effort, never blocks the town, never shuts anything down.
-  if (profile.device) void bootPhone(profile.device, townLanes);
+    profile.landing, profile.device ?? null, profile.setup ?? null, profile.android ?? null);
+  // The Phone Booth: wake the town's default phone so the first tester never
+  // waits for a cold start; the Android phone (if any) only gets looked at — it
+  // sleeps until a job needs it. Best effort, never blocks the town, never
+  // shuts anything down.
+  if (profile.device) void bootPhone(profile.device, profile.android ?? null, townLanes);
   // Real-terminal characters: the actual `claude` CLI in the lane worktree.
   // onData/onExit stream straight to the renderer's xterm. (TERMINAL_IDS is empty.)
   const townTerminals = new TerminalManager(
@@ -155,11 +158,17 @@ async function openTown(projectPath: string): Promise<Town> {
   return town;
 }
 
-/** Boot the town's test phone (iOS: `simctl boot` + bring the Simulator up;
- *  Android: only check `adb devices` and say on the street if it is off). */
-async function bootPhone(dev: DeviceSpec, townLanes: LaneManager): Promise<void> {
+/** Boot the town's default phone (iOS: `simctl boot` + bring the Simulator up;
+ *  an Android default: wake the emulator). A second, Android phone is only
+ *  looked at — asleep is its normal state until a job aims a command at it. */
+async function bootPhone(dev: DeviceSpec, android: DeviceSpec | null, townLanes: LaneManager): Promise<void> {
   const run = (cmd: string, args: string[]): Promise<{ ok: boolean; out: string }> =>
     new Promise((resolve) => execFile(cmd, args, { timeout: 60_000 }, (err, stdout, stderr) => resolve({ ok: !err, out: String(stdout || "") + String(stderr || "") })));
+  if (android) {
+    const serial = await androidSerial(android.id);
+    log("booth", serial ? "android phone already awake" : "android phone asleep (wakes when a job needs it)", { avd: android.id, serial });
+    townLanes.setAndroidOn(!!serial);
+  }
   if (dev.kind === "ios-simulator") {
     const boot = await run("xcrun", ["simctl", "boot", dev.id]);
     const already = /current state: Booted/i.test(boot.out);
@@ -173,11 +182,11 @@ async function bootPhone(dev: DeviceSpec, townLanes: LaneManager): Promise<void>
       townLanes.setPhoneWarning(`The test phone did not start — check the ${dev.name} in Simulator`);
     }
   } else {
-    // Android: auto-boot is a later job. Check it is running and say so if not.
-    const adb = await run("adb", ["devices"]);
-    const running = adb.ok && /^emulator-\d+\s+device/m.test(adb.out);
-    log("booth", running ? "emulator running" : "emulator not running", { name: dev.name, out: adb.out.slice(0, 160) });
-    townLanes.setPhoneWarning(running ? null : `The test phone is off — start the ${dev.name} emulator`);
+    // An Android default phone: wake the emulator like the iPhone above.
+    const r = await wakeAndroid(dev.id);
+    log("booth", r.ok ? (r.alreadyOn ? "phone already awake" : "phone booted") : "phone could not be woken", { avd: dev.id, name: dev.name, detail: r.detail });
+    townLanes.setAndroidOn(r.ok);
+    townLanes.setPhoneWarning(r.ok ? null : `The test phone did not start — ${r.detail}; check the ${dev.name} emulator`);
   }
 }
 

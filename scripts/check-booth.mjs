@@ -3,7 +3,7 @@
 // after `npm run build`:  node scripts/check-booth.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { phoneMatch, boothStep, Booth, parseSimctlDevices, commandSegments, FORBIDDEN_REASON, DEFAULT_GRACE_SEC, DEFAULT_MAX_HOLD_MIN } = require("../dist/main/domain/booth.js");
+const { phoneMatch, boothStep, wantsAndroid, Booth, parseSimctlDevices, commandSegments, FORBIDDEN_REASON, DEFAULT_GRACE_SEC, DEFAULT_MAX_HOLD_MIN } = require("../dist/main/domain/booth.js");
 const { normalizeProfile, seedProfile, serializeProfile, normalizeDevice } = require("../dist/main/config/townProfile.js");
 const { emptyTown, fold } = require("../dist/main/domain/snapshot.js");
 
@@ -48,6 +48,29 @@ ok(bash(`open -a Simulator --args -CurrentDeviceUDID ${ID}`) === null, "open -a 
 ok(bash("open -a Simulator --args -CurrentDeviceUDID 1111-2222") === "forbidden", "open -a Simulator naming another phone → forbidden");
 ok(bash("emulator -avd Pixel_7") === "forbidden" && bash("emulator @Pixel_7") === "forbidden", "emulator -avd / @avd → forbidden");
 ok(bash("adb emu kill") === "forbidden" && bash("adb -s emulator-5554 emu kill") === "forbidden", "adb emu kill → forbidden");
+ok(bash("adb reboot") === "forbidden" && bash("adb kill-server") === "forbidden" && bash("avdmanager delete avd -n Pixel_7") === "forbidden", "adb reboot / kill-server, avdmanager delete → forbidden");
+ok(bash("flutter emulators --launch Pixel_8_API_34") === "forbidden" && bash("fvm flutter emulators --launch=Pixel_8_API_34") === "forbidden", "flutter emulators --launch → forbidden (the town boots, never the character)");
+ok(bash("flutter emulators") === null && bash("emulator -list-avds") === null && bash("avdmanager list avd") === null, "flutter emulators / emulator -list-avds / avdmanager list → null (just a look)");
+ok(bash("adb -s emulator-5554 push a.txt /sdcard/") === "phone" && bash("adb exec-out screencap -p > s.png") === "phone", "adb push / exec-out → phone");
+
+console.log("phoneMatch — a town with TWO phones (iPhone + Android emulator), one door:");
+const AVD = "Pixel_8_API_34";
+const both = (command) => phoneMatch("Bash", { command }, [ID, AVD]);
+ok(both(`flutter run -d ${ID}`) === "phone" && both(`flutter run -d ${AVD}`) === "phone" && both("flutter run -d emulator-5554") === "phone", "flutter run on either phone → phone");
+ok(both(`emulator -avd ${AVD}`) === "forbidden" && both(`flutter emulators --launch ${AVD}`) === "forbidden", "booting even the town's OWN Android phone is forbidden for a character (the town wakes it)");
+ok(both("adb emu kill") === "forbidden" && both(`xcrun simctl shutdown ${ID}`) === "forbidden", "shutting either phone down → forbidden");
+ok(both(`xcrun simctl boot ${ID}`) === null && both("xcrun simctl boot 1111-2222") === "forbidden", "the iPhone rules are unchanged with a second phone");
+
+console.log("wantsAndroid — which phone commands wake the emulator:");
+const wa = (command) => wantsAndroid("Bash", { command }, AVD);
+ok(wa("adb install app.apk") && wa("adb -s emulator-5554 shell input tap 1 1"), "any adb command → android");
+ok(wa(`flutter run -d ${AVD}`) && wa("flutter run -d emulator-5554") && wa("fvm flutter run -d android"), "flutter run -d <avd> / <serial> / android → android");
+ok(wa("maestro --device emulator-5554 test flows/") && wa(`maestro --udid=${AVD} test flows/`), "maestro --device <serial> / --udid=<avd> → android");
+ok(wa(`cd android && flutter run -d ${AVD}`), "matched anywhere in the line");
+ok(!wa(`flutter run -d ${ID}`) && !wa("maestro test flows/login.yaml") && !wa(`xcrun simctl install ${ID} Runner.app`), "an iPhone (or unnamed) phone command → NOT android");
+ok(!wa("flutter build apk --debug") && !wa("flutter build appbundle"), "building for Android is NOT a phone command → NOT android");
+ok(wantsAndroid("mcp__plugin_empat-qa_maestro__run", { yaml: "…", device_id: "emulator-5554" }, AVD) && !wantsAndroid("mcp__plugin_empat-qa_maestro__run", { yaml: "…", device_id: ID }, AVD), "maestro MCP run: device_id emulator-5554 → android, the iPhone udid → not");
+ok(!wantsAndroid("Read", { file_path: "/x" }, AVD), "Read → not android");
 ok(bash(`flutter run -d ${ID} && xcrun simctl shutdown ${ID}`) === "forbidden", "a forbidden segment wins over a phone segment in the same line");
 ok(typeof FORBIDDEN_REASON === "string" && /Never shut it down/.test(FORBIDDEN_REASON), "the verdict text is the brief's sentence");
 
@@ -61,8 +84,12 @@ ok(phoneMatch("Read", { file_path: "/x" }, ID) === null && phoneMatch("Edit", {}
 ok(commandSegments("(cd ios && flutter run) ; echo done").length === 3 && commandSegments("(cd ios && flutter run) ; echo done")[1][0] === "flutter", "commandSegments: a subshell's parens are stripped");
 
 console.log("boothStep — the hook's order: the booth comes BEFORE the bypass allow:");
-const dev = { id: ID };
+const dev = [ID];
 ok(boothStep("Bash", { command: `xcrun simctl shutdown ${ID}` }, dev, true) === "forbidden", "bypass ON: a forbidden command is still refused");
+ok(boothStep("Bash", { command: `emulator -avd ${AVD}` }, [ID, AVD], true) === "forbidden", "bypass ON, two phones: booting the Android phone is still the town's job");
+ok(boothStep("Bash", { command: `flutter run -d ${AVD}` }, [ID, AVD], true) === "phone", "two phones: an Android run queues at the one door");
+ok(boothStep("Bash", { command: "maestro test x.yaml" }, ID, true) === "phone", "a single id string still works for callers that hold one");
+ok(boothStep("Bash", { command: `xcrun simctl shutdown ${ID}` }, [], true) === "allow", "an empty id list = no booth");
 ok(boothStep("Bash", { command: "maestro test x.yaml" }, dev, true) === "phone", "bypass ON: a phone command still queues (then bypass allows it)");
 ok(boothStep("Bash", { command: "flutter build ios" }, dev, true) === "allow", "bypass ON: anything else is allowed");
 ok(boothStep("Bash", { command: "flutter build ios" }, dev, false) === "gate", "bypass OFF: anything else goes through isSafe / ask");
@@ -127,6 +154,12 @@ ok(good.device && good.device.kind === "ios-simulator" && good.device.id === ID 
 ok(normalizeProfile({ device: { kind: "ios-simulator", id: ID } }, "/x/a").device === undefined, "a device without a name is dropped");
 ok(normalizeProfile({ device: { kind: "tv", id: ID, name: "x" } }, "/x/a").device === undefined, "an unknown kind is dropped");
 ok(normalizeProfile({ device: "iPhone" }, "/x/a").device === undefined && normalizeProfile({ device: { kind: "android-emulator", id: "", name: "Pixel" } }, "/x/a").device === undefined, "a string, or an empty id, is dropped");
+const two = normalizeProfile({ device: { kind: "ios-simulator", id: ID, name: "iPhone 17" }, android: { kind: "android-emulator", id: AVD, name: "Pixel 8" } }, "/x/a");
+ok(two.android && two.android.kind === "android-emulator" && two.android.id === AVD && two.android.name === "Pixel 8", "a second, Android phone is kept next to the default one");
+ok(normalizeProfile({ android: { kind: "android-emulator", id: AVD, name: "Pixel 8" } }, "/x/a").android === undefined, "an Android phone with NO default phone is dropped (no door to share)");
+ok(normalizeProfile({ device: { kind: "ios-simulator", id: ID, name: "iPhone 17" }, android: { kind: "ios-simulator", id: "BBB", name: "iPhone 16" } }, "/x/a").android === undefined, "a second iPhone is dropped (the second phone is Android only)");
+ok(normalizeProfile({ device: { kind: "android-emulator", id: AVD, name: "Pixel 8" }, android: { kind: "android-emulator", id: "Galaxy_26", name: "Galaxy" } }, "/x/a").android === undefined, "two emulators are dropped to one (this Mac cannot carry two)");
+ok(JSON.stringify(normalizeProfile(JSON.parse(serializeProfile(two)), "/x/a").android) === JSON.stringify(two.android), "serialize → parse → normalize keeps the Android phone");
 ok(normalizeDevice({ kind: "android-emulator", id: "Pixel_7", name: "Pixel 7", graceSec: -5 }).graceSec === undefined, "a negative grace falls back to the default");
 ok(seedProfile("/x/scout-and-runner").device === undefined, "Scout & Runner's seed has no phone");
 ok(seedProfile("/x/rock-app", "auto").device === undefined, "a plain seed has no phone (the add-town answer or the profile file adds one)");
