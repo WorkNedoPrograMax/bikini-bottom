@@ -79,27 +79,28 @@ const LANE_DISALLOWED_TOOLS = [
 // The EXECUTOR model — every character's base session. Pinned to a full model
 // ID so sessions never silently drift to whatever an alias resolves to that
 // week (Maksym's rule). Maps to the CLI's --model flag via the SDK query
-// options. The token-heavy build runs on Sonnet; hard planning and review are
-// delegated to the Opus `planner` / `reviewer` / `walkthrough` sub-agents,
-// which the S&R repo pins itself (.claude/agents/*.md).
+// options. Hard planning and review are delegated to the `planner` /
+// `reviewer` / `walkthrough` sub-agents, which the S&R repo pins itself
+// (.claude/agents/*.md).
 //
-// 2026-09-30: Sonnet 5 → Sonnet 5.5 (released 2026-09-28, same $2/$10 price,
-// ~30% faster output, and per Anthropic's migration guide scores higher at
-// "medium" effort than Sonnet 5 did at "high", in far fewer requests).
-// Sonnet 5.5 runs the full 1M context window natively in Claude Code, so the
-// "[1m]" suffix Sonnet 5 needed (plain claude-sonnet-5 was a 200k window and a
-// real /implement overflowed it → autocompact thrash) is no longer required
-// and is deliberately dropped. Measured 2026-09-30: `claude -p --model
-// claude-sonnet-5-5` on CLI 2.1.285 answers on that model.
-const MODEL = "claude-sonnet-5-5";
+// 2026-10-05: Sonnet 5.5 → Opus 5.5 (released 2026-09-22, $4/$20, native 1M
+// window, no "[1m]" suffix). Maksym's call: run Opus everywhere in Bikini for
+// a while and compare against the Sonnet-executor period (2026-09-30 →
+// 2026-10-05). Rationale for the earlier Sonnet choice, kept for the record:
+// Sonnet 5.5 ($2/$10) matched Sonnet 5 "high" at "medium" effort, so the
+// token-heavy build ran at half the Opus rate. To go back, set this to
+// "claude-sonnet-5-5" — nothing else needs to change. Measured 2026-09-30:
+// `claude -p --model claude-opus-5-5` on CLI 2.1.285 answers on that model.
+const MODEL = "claude-opus-5-5";
 
 // Thinking effort (maps to --effort). Set EXPLICITLY, never left to the model's
 // built-in default — the default moved from "high" (Sonnet 5 / Opus 5) to
 // "medium" (Sonnet 5.5 / Opus 5.5), and Anthropic recalibrated the levels, so
 // "the same level" is not the same amount of thinking across models. History:
 // Opus 5 over-invested at "high" (auto-verified + delegated, 5-hour marathons
-// 2026-07-30) so Maksym chose "medium". Kept at "medium" for Sonnet 5.5 — it is
-// Anthropic's recommended starting point for agentic coding on this model, and
+// 2026-07-30) so Maksym chose "medium". Kept at "medium" for Opus 5.5 — it is
+// Anthropic's recommended starting point for agentic coding on the 5.5 models
+// (Opus 5.5 at "medium" matches Opus 5 at "high" with ~half the tokens), and
 // the guide warns that "low" makes it skip verifying its own changes. Tune only
 // against a real job, not by feel.
 const EFFORT = "medium";
