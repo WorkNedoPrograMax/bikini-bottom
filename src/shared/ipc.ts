@@ -429,7 +429,10 @@ export type Intent =
   | { type: "addTownKind"; landing: "none" | "auto" }
   // The phone question (Flutter towns only): a simulator's id, or null for "no phone".
   | { type: "addTownPhone"; deviceId: string | null }
-  | { type: "cancelAddTown" };
+  | { type: "cancelAddTown" }
+  // Forget a town whose folder is gone (greyed "folder missing"): drops it from
+  // the list and the config. A town that is open is never forgotten this way.
+  | { type: "forgetTown"; path: string };
 
 /** A one-shot sound cue (transient, view-only — like the token stream). */
 export interface SoundCue {

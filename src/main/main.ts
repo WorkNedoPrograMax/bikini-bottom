@@ -943,6 +943,18 @@ async function handleIntent(intent: Intent): Promise<void> {
       break;
     }
 
+    case "forgetTown": {
+      // Only a MISSING town can be forgotten (its folder is gone — e.g. Scout &
+      // Runner, 2026-10-05). An open town has lanes; it stays.
+      if (towns.has(intent.path)) { log("town", "forget refused — town is open", { path: intent.path }); break; }
+      if (!cfg.data.towns.some((t) => t.path === intent.path)) break;
+      await cfg.save({ towns: cfg.data.towns.filter((t) => t.path !== intent.path) });
+      missingTowns.delete(intent.path);
+      log("town", "forgotten", { path: intent.path });
+      pushSnapshot();
+      break;
+    }
+
     case "addTown": {
       if (firstRun) break;
       const picked = await dialog.showOpenDialog(win!, {

@@ -568,6 +568,8 @@ html, body {
 .town-menu button:hover { background: rgba(120,80,20,.12); }
 .town-menu button.here { background: rgba(120,80,20,.18); cursor: default; }
 .town-menu button.missing { opacity: .55; cursor: default; }
+.town-menu .tm-forget { margin-left: auto; font-size: .85em; text-decoration: underline; cursor: pointer; opacity: .9; }
+.town-menu .tm-forget:hover { opacity: 1; color: #ffcf5a; }
 .town-menu .tm-name { flex: 1; min-width: 0; font-size: 17px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .town-menu .tm-word { flex: none; font-size: 12px; color: #7a5c26; white-space: nowrap; }
 .town-menu .tm-word.needs { color: #8c1e12; font-weight: 700; }
