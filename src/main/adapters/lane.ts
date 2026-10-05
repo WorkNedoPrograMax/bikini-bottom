@@ -111,6 +111,7 @@ function voiceFor(id: CharacterId): string {
     + " Maksym is a friend, not a client, and he is not an engineer. Talk to him like a good, funny friend who happens to be great at this: warm, relaxed, human, with a light joke when it fits. Short messages. Everyday words."
     + " READ HIS MOOD FIRST. He writes fast and typo-y; look at how he feels before what he asks. If he's frustrated, annoyed, tired or worried, say you see it and mean it (\"ugh, yeah, that's annoying — I've got it\"), then help. If he's excited, be excited with him. If he says something is really bad, don't just agree flatly — react like a person would, then show him it's fixable. Never lecture, never be preachy, never sound like documentation."
     + " EXPLAIN LIKE TO A SMART FRIEND WHO ISN'T TECHNICAL: what happened, why it matters to him, what you'll do — in plain language. One simple picture or comparison beats a paragraph. No jargon, no acronyms, no file paths, function names, command names or version numbers in chat unless he asks or truly needs one to act (then one, in plain words). No bullet-walls, no headers, no academic tone. If something is complicated, say the simple version first and offer the details only if he wants them."
+    + " WHEN YOU ASK HIM SOMETHING (ask_maksym): the question is one or two short sentences a friend would say — what he must decide and why it matters to him. Progress goes in your normal reply before the question, never inside it. He should get it in three seconds on his phone."
     + " STAY HONEST AND REAL: being friendly never means softening bad news or pretending — say what's true, kindly and simply, and own mistakes with humour, not apologies in triplicate. Match his energy and his length: a one-line question gets a one-line answer.";
 }
 
@@ -227,6 +228,9 @@ const HELPER_STALL_MS = 900_000; // 15 min
 // `batchComplete: true`), and an ask whose every option is a mere acknowledgment
 // ("I'll check it", "Looks good, keep going") is bounced as a status update.
 const ASK_COOLDOWN_MS = 5 * 60_000;
+// Longest question text ask_maksym will forward. Two short plain sentences fit
+// easily; a status report does not. See GUARD 3 in the tool.
+const ASK_MAX_CHARS = 300;
 
 // USAGE LIMIT: when Claude's subscription limit is used up, the CLI ends the
 // turn with "You've hit your session limit · resets 1:40pm" and an error result.
@@ -1417,13 +1421,13 @@ export class LaneManager {
       tools: [
         tool(
           "ask_maksym",
-          "Ask Maksym to DECIDE something, with clickable answer choices; blocks until he answers and returns his answer as text. Only for real decisions that change what you do next — never for progress reports ('Fixed…', 'Deployed…', 'Done…'): write those as normal text and keep working. Maksym wants questions BATCHED: finish the current step, collect every open question, then ask them all in ONE call via `questions` (each answered separately). A lone follow-up question within a few minutes of his last answer is bounced back with 'batch it' unless you set batchComplete=true (meaning: nothing else can come up, this one blocks everything).",
+          "Ask Maksym to DECIDE something, with clickable answer choices; blocks until he answers and returns his answer as text. Only for real decisions that change what you do next — never for progress reports ('Fixed…', 'Deployed…', 'Done…'): write those as normal text and keep working. Maksym wants questions BATCHED: finish the current step, collect every open question, then ask them all in ONE call via `questions` (each answered separately). A lone follow-up question within a few minutes of his last answer is bounced back with 'batch it' unless you set batchComplete=true (meaning: nothing else can come up, this one blocks everything). HOW TO WRITE IT: Maksym is not an engineer and reads this on his phone. Each question is ONE or two short, plain sentences a friend would say: what you need him to decide and why it matters to him. Put any progress ('282 tests green, analyzer clean, X moved to its own file') in your normal reply BEFORE asking, never inside the question. No jargon, no test counts, no file or layer names, no numbered deviation lists. A question over ~300 characters is bounced back for a rewrite. Options are short and human ('Yes, go on', 'Stop, let me look first'), not acknowledgments.",
           {
-            question: z.string().optional().describe("A single question — clear and specific. (Or use `questions` for several at once.)"),
+            question: z.string().optional().describe("A single question — one or two short plain sentences for a non-technical friend (what to decide + why it matters to him). Under ~300 characters. (Or use `questions` for several at once.)"),
             options: z.array(z.string()).min(2).max(6).optional().describe("2–6 short answer choices for `question`."),
             multiSelect: z.boolean().optional().describe("true if he may pick more than one option."),
             questions: z.array(z.object({
-              question: z.string().describe("The question — clear and specific."),
+              question: z.string().describe("The question — one or two short plain sentences for a non-technical friend, under ~300 characters."),
               options: z.array(z.string()).min(2).max(6).describe("2–6 short answer choices."),
               multiSelect: z.boolean().optional(),
             })).min(1).max(8).optional().describe("Several questions asked together in one go (preferred over asking one at a time)."),
@@ -1446,6 +1450,17 @@ export class LaneManager {
             if (acks.length === list.length) {
               log("lane", `${id} ask bounced — status update, not a decision`, { q: list[0].question.slice(0, 80) });
               return { content: [{ type: "text", text: "Not sent to Maksym — this reads as a progress update, not a decision: every option is just an acknowledgment. Say it in your normal reply (he reads everything you write) and KEEP WORKING; do not wait for a reply. Use ask_maksym only when he must CHOOSE between outcomes that change what you build or do next." }] };
+            }
+            // GUARD 3 — a wall of text is not a question. 2026-10-05: Squidward sent a
+            // 600-character "checkpoint" (test counts, analyzer, two numbered
+            // deviations, three sub-clauses) with a Continue button; Maksym: "I
+            // don't want to even read it, it's boring, I don't get it." Bounce it
+            // once with the recipe; the character puts the report in its reply and
+            // asks the one-line question.
+            const walls = list.filter((q) => q.question.length > ASK_MAX_CHARS);
+            if (walls.length) {
+              log("lane", `${id} ask bounced — too long`, { chars: walls[0].question.length, q: walls[0].question.slice(0, 80) });
+              return { content: [{ type: "text", text: `Not sent — ${walls.length === 1 ? "that question is" : `${walls.length} questions are`} a wall of text (${walls[0].question.length} characters) and Maksym won't read it. He is not an engineer. Do this: (1) put the progress report (what's done, tests, small deviations) in your NORMAL reply first, in plain friendly words; (2) then call ask_maksym again with the question as ONE or two short sentences a friend would say — what he must decide and why it matters to him — under ${ASK_MAX_CHARS} characters, no jargon, no counts, no file or layer names; (3) options short and human.` }] };
             }
             // GUARD 2 — batch, don't drip. A lone question minutes after his last
             // answer means you're asking one at a time. Go collect the rest first.
