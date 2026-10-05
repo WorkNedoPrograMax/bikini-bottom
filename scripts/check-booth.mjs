@@ -1,9 +1,9 @@
-// Checks the Phone Booth's PURE parts (one test phone per town, shared in turns)
+// Checks the Phone Booth's PURE parts (a door per phone, one line per town)
 // against dist/, with plain node — no Electron, no simulator, no Claude. Run
 // after `npm run build`:  node scripts/check-booth.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { phoneMatch, boothStep, wantsAndroid, Booth, parseSimctlDevices, commandSegments, FORBIDDEN_REASON, DEFAULT_GRACE_SEC, DEFAULT_MAX_HOLD_MIN } = require("../dist/main/domain/booth.js");
+const { phoneMatch, boothStep, wantsAndroid, Booth, Switchboard, phoneTarget, PHONE_ORDER, parseSimctlDevices, commandSegments, FORBIDDEN_REASON, DEFAULT_GRACE_SEC, DEFAULT_MAX_HOLD_MIN } = require("../dist/main/domain/booth.js");
 const { normalizeProfile, seedProfile, serializeProfile, normalizeDevice } = require("../dist/main/config/townProfile.js");
 const { emptyTown, fold } = require("../dist/main/domain/snapshot.js");
 
@@ -99,7 +99,7 @@ ok(boothStep("Bash", { command: "maestro test x.yaml" }, null, false) === "gate"
 console.log("Booth — first come, first served:");
 let t = 1_000_000;
 const now = () => t;
-const booth = new Booth({ graceSec: 60, maxHoldMin: 30 }, now);
+const booth = new Booth({ graceSec: 60, maxHoldMin: 30 }, now); // the single-door class keeps its own tests (60 s grace set explicitly)
 ok(booth.isEmpty(), "starts empty");
 const states = {};
 const claim = (id) => { states[id] = "pending"; return booth.claim(id).then((r) => { states[id] = r; }); };
@@ -146,7 +146,7 @@ await b2.claim("pat");
 const r1 = b2.claim("bob"), r2 = b2.claim("bob");
 b2.release("pat");
 ok((await r1) === "ok" && (await r2) === "ok" && b2.view().queue.length === 0 && b2.view().holder === "bob", "two queued calls from one character both resolve when it steps in");
-ok(DEFAULT_GRACE_SEC === 60 && DEFAULT_MAX_HOLD_MIN === 30, "defaults: 60 s grace, 30 min cap");
+ok(DEFAULT_GRACE_SEC === 600 && DEFAULT_MAX_HOLD_MIN === 30, "defaults: 600 s grace (2026-10-05: a tester editing a flow must not lose the phone), 30 min cap");
 
 console.log("normalizeProfile — the phone in town.json:");
 const good = normalizeProfile({ name: "Rock App", landing: "none", device: { kind: "ios-simulator", id: ID, name: "iPhone 17 Pro", graceSec: 90, extra: 1 } }, "/x/rock-app");
@@ -186,6 +186,99 @@ ok(devs.length === 3 && devs[0].id === "BBB" && devs[0].booted === true, "booted
 ok(devs[0].os === "iOS 26.3" && devs[1].os === "iOS 18.0", "runtime key → \"iOS 26.3\"");
 ok(devs.map((d) => d.name).join("|") === "iPhone 17|iPhone 16|iPhone 17 Pro", "then by name");
 ok(parseSimctlDevices("not json").length === 0 && parseSimctlDevices("{}").length === 0, "bad or empty JSON → []");
+
+
+console.log("phoneTarget — which phone a command wants, and whether it is bound to it:");
+const PH = { ios: ID, android: AVD };
+const tgt = (command) => phoneTarget("Bash", { command }, PH);
+const eq = (a, want, bound) => a.want === want && a.bound === bound;
+ok(eq(tgt(`flutter run -d ${ID}`), "ios", false), "flutter run -d <iphone> → wants ios, NOT bound (may be re-aimed at Android)");
+ok(eq(tgt(`maestro --device ${ID} test flows/`), "ios", false), "maestro --device <iphone> → ios, not bound");
+ok(eq(tgt("maestro test flows/login.yaml"), null, false) && eq(tgt("flutter run"), null, false), "names no phone → want null");
+ok(eq(tgt(`xcrun simctl install ${ID} Runner.app`), "ios", true) && eq(tgt(`xcrun simctl io ${ID} screenshot s.png`), "ios", true), "xcrun simctl … → ios, BOUND");
+ok(eq(tgt(`open -a Simulator --args -CurrentDeviceUDID ${ID}`), "ios", true), "open -a Simulator → ios, bound");
+ok(eq(tgt("maestro --platform ios test flows/"), "ios", true) && eq(tgt("maestro --platform=iOS test flows/"), "ios", true), "maestro --platform ios → ios, bound");
+ok(eq(tgt("flutter run -d ios"), "ios", true), "flutter run -d ios → ios, bound");
+ok(eq(tgt("adb install app.apk"), "android", true) && eq(tgt(`flutter run -d ${AVD}`), "android", true) && eq(tgt("flutter run -d emulator-5554"), "android", true) && eq(tgt("fvm flutter run -d android"), "android", true), "adb / -d <avd> / <serial> / android → android, BOUND");
+ok(eq(phoneTarget("mcp__plugin_empat-qa_maestro__run", { yaml: "…", device_id: ID }, PH), "ios", false), "maestro MCP device_id <iphone> → ios, not bound");
+ok(eq(phoneTarget("mcp__plugin_empat-qa_maestro__run", { yaml: "…", device_id: "emulator-5554" }, PH), "android", true), "maestro MCP device_id <serial> → android, bound");
+ok(eq(phoneTarget("mcp__maestro__take_screenshot", {}, PH), null, false), "maestro MCP with no device → null");
+ok(eq(phoneTarget("Bash", { command: "maestro test x.yaml" }, { ios: ID }), null, false), "a one-phone (iPhone) town: unnamed → null (the caller maps it to the only phone)");
+ok(eq(phoneTarget("Bash", { command: "maestro test x.yaml" }, { android: AVD }), "android", true), "a one-phone (Android) town: everything is the Android phone");
+ok(PHONE_ORDER[0] === "ios" && PHONE_ORDER[1] === "android", "preference order: iPhone first");
+
+console.log("Switchboard — a door per phone, ONE line, iPhone first:");
+let T = 2_000_000;
+const nowB = () => T;
+const sb = new Switchboard(["ios", "android"], { graceSec: 600, maxHoldMin: 30 }, nowB);
+const got = {};
+const want = (id, w) => { got[id] = "pending"; return sb.claim(id, w).then((g) => { got[id] = g.r === "ok" ? g.phone : "left"; }); };
+ok(sb.isEmpty() && sb.view().doors.length === 2, "starts empty with two doors");
+await want("squid", null);
+ok(got.squid === "ios" && sb.holding("squid") === "ios", "first comer, no preference → the iPhone");
+await want("pat", null);
+ok(got.pat === "android" && sb.holding("pat") === "android", "iPhone busy → the next comer gets the Android phone");
+want("bob", null); await tick();
+ok(got.bob === "pending" && sb.view().queue.join(",") === "bob", "both busy → bob waits in the line");
+await want("squid", null);
+ok(got.squid === "ios", "re-entry: the holder's unnamed command uses the phone it holds");
+await want("squid", "ios");
+ok(got.squid === "ios", "re-entry: the holder naming its own phone → ok at once");
+sb.release("pat"); await tick();
+ok(got.bob === "android" && sb.holding("bob") === "android" && sb.view().queue.length === 0, "pat hangs up → bob (first in line) takes WHICHEVER freed first: the Android phone");
+want("pat", "ios"); await tick();
+ok(got.pat === "pending", "pat now wants the iPhone specifically (bound) → waits even though… both are busy");
+sb.release("bob"); await tick();
+ok(got.pat === "pending" && sb.holding("bob") === null && sb.view().doors[1].holder === null, "the Android phone frees but pat is bound to the iPhone → keeps waiting; Android stays free");
+want("krabs", null); await tick();
+ok(got.krabs === "android", "krabs, no preference, arrives later → takes the free Android phone (does not jump pat for the iPhone)");
+sb.release("squid"); await tick();
+ok(got.pat === "ios" && sb.holding("pat") === "ios", "squid hangs up → pat gets the iPhone it waited for");
+// Bound switch: a holder asking for the OTHER phone hands its own back.
+want("krabs", "ios"); await tick();
+ok(got.krabs === "pending" && sb.holding("krabs") === "android", "krabs (on Android) asks for the iPhone, which is busy → waits, still holding Android for now");
+sb.release("pat"); await tick();
+ok(got.krabs === "ios" && sb.holding("krabs") === "ios" && sb.view().doors[1].holder === null, "…iPhone frees → krabs switches to it and the Android phone is handed back (one phone per character)");
+// Grace is per door and only when someone who could use THAT door waits.
+want("squid", "android"); await tick();
+ok(got.squid === "android", "a bound Android request takes the free Android door at once");
+want("pat", null); await tick();
+ok(got.pat === "pending", "pat (any) waits: both doors busy");
+T += 599_000;
+ok(sb.settle(T).length === 0, "599 s of silence: nobody is let go (grace is 600 s)");
+T += 2_000;
+let rels = sb.settle(T); await tick();
+ok(rels.length === 1 && rels[0].id === "krabs" && rels[0].phone === "ios" && rels[0].reason === "grace", "601 s: the quiet iPhone holder is let go by grace (pat was waiting) — doors are checked iPhone first");
+ok(got.pat === "ios", "…and pat, first in line with no preference, gets the iPhone (preference order), not the Android phone");
+ok(sb.holding("squid") === "android", "squid, quiet on the Android phone, KEEPS it: nobody who could use it is waiting any more (grace needs a waiter)");
+sb.begin("pat"); T += 2_000_000;
+want("bob", null); await tick();
+rels = sb.settle(T); await tick();
+ok(rels.length === 2 && rels.every((r) => r.reason === "maxHold") && rels.some((r) => r.id === "pat") && rels.some((r) => r.id === "squid"), "33 min in: a phone command still running does not stop the 30-min cap — both long holders are let go (reason maxHold)");
+ok(sb.holding("pat") === null && got.bob === "ios", "…the cap handed the iPhone to bob (first in line, iPhone first)");
+// Abandon while queued.
+want("squid", null); await tick(); // Android is free → takes it
+want("krabs", "ios"); await tick();
+ok(got.krabs === "pending", "krabs waits for the busy iPhone");
+sb.abandon("krabs"); await tick();
+ok(got.krabs === "left" && sb.view().queue.length === 0, "abandon(krabs) → 'left', out of the line");
+sb.release("bob"); sb.release("squid");
+ok(sb.isEmpty(), "everyone hung up → empty");
+// Parallel tool calls from one character resolve together on one door.
+const sb2 = new Switchboard(["ios", "android"], {}, nowB);
+await sb2.claim("squid", null); await sb2.claim("pat", null);
+const q1 = sb2.claim("bob", null), q2 = sb2.claim("bob", null);
+sb2.release("squid");
+const g1 = await q1, g2 = await q2;
+ok(g1.r === "ok" && g2.r === "ok" && g1.phone === "ios" && g2.phone === "ios" && sb2.view().queue.length === 0, "two queued calls from one character both resolve on the same freed phone");
+// A one-phone town behaves like the old single door.
+const sb3 = new Switchboard(["ios"], {}, nowB);
+await sb3.claim("squid", null);
+const q3 = sb3.claim("pat", null); let r3 = "pending"; q3.then((g) => { r3 = g.phone; });
+await tick();
+ok(r3 === "pending", "one phone: the second comer waits");
+sb3.release("squid"); await tick();
+ok(r3 === "ios", "…and gets it when the holder hangs up");
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");
 process.exit(fails ? 1 : 0);

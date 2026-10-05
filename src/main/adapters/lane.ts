@@ -15,8 +15,8 @@ import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelW
 import { shouldLand, type Landing, type DeviceSpec } from "../config/townProfile";
 import { setupNote, setupActivity, type LaneSetup, type SetupReport } from "../domain/laneSetup";
 import { runSetup, setupDue, loadReport } from "./laneSetup";
-import { Booth, boothStep, phoneMatch, wantsAndroid, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN } from "../domain/booth";
-import { wakeAndroid } from "./phone";
+import { Switchboard, boothStep, phoneMatch, phoneTarget, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN, type PhoneKey } from "../domain/booth";
+import { wakeAndroid, androidSerial } from "./phone";
 import { log } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -363,6 +363,12 @@ interface Lane {
   // The Phone Booth: on the phone, waiting outside its door, or neither. Runtime
   // only — never persisted; a relaunch starts with an empty booth.
   booth: "holding" | "queued" | null;
+  /** Which phone this lane holds ("ios" / "android"), or null. */
+  phone: PhoneKey | null;
+  /** Set when the town took the phone away while the job was still running
+   *  (grace / cap): the next phone command is refused ONCE with "reinstall your
+   *  build first" — another lane may have changed what is on the phone. */
+  phoneLost: string | null;
   // Lane setup: what the town's recipe did for this lane before the character
   // started (packages, generated code, copied secrets). Runtime only; the town
   // keeps .bikini/setup/<id>.json so a relaunch re-reads it.
@@ -417,6 +423,8 @@ export interface LaneView {
   viewing: { index: number; readOnly: boolean; messages: ChatMessage[]; asking: boolean } | null;
   /** The Phone Booth: holding the phone, queued for it, or neither. */
   booth: "holding" | "queued" | null;
+  /** Which phone is held, or null. */
+  phone: PhoneKey | null;
 }
 
 export class LaneManager {
@@ -450,12 +458,12 @@ export class LaneManager {
      *  commands to run once), or null when a lane is ready as checked out. */
     private setup: LaneSetup | null = null,
     /** The Phone Booth's second phone: the town's Android emulator, asleep until
-     *  a job aims a command at it (then the town wakes it), or null. Shares the
-     *  one door with `device`. */
+     *  a job aims a command at it (then the town wakes it), or null. Has its own
+     *  door; the one waiting line is shared with `device`. */
     private android: DeviceSpec | null = null
   ) {
     this.sessionsFile = path.join(projectPath, ".bikini", "sessions.json");
-    this.booth = new Booth({ graceSec: device?.graceSec, maxHoldMin: device?.maxHoldMin });
+    this.board = new Switchboard(this.phoneKeys(), { graceSec: device?.graceSec, maxHoldMin: device?.maxHoldMin });
     if (fuelOpts.fuelFile) {
       try {
         const raw = JSON.parse(readFileSync(fuelOpts.fuelFile, "utf8"));
@@ -478,20 +486,38 @@ export class LaneManager {
   private loaded: Record<string, PersistedLane> = {};
 
   // ───────────── The Phone Booth ─────────────
-  // One door per town. The pure queue lives in domain/booth.ts; this is the
-  // wiring: who is at the door (per lane), the clock, and the release points.
-  private booth: Booth;
+  // One door per phone, one line per town. The pure switchboard lives in
+  // domain/booth.ts; this is the wiring: who holds what (per lane), the clock,
+  // the release points, and the "re-aim at the other phone" refusals.
+  private board: Switchboard;
   private boothTicker: ReturnType<typeof setInterval> | null = null;
   /** "The test phone did not start — check the iPhone 17 in Simulator", or null. */
   private phoneWarning: string | null = null;
   /** Whether the Android phone was last seen awake (the street's "(asleep)" tag). */
   private androidOn = false;
+  /** The phones this town has, iPhone first (Maksym's preference order). */
+  private phoneKeys(): PhoneKey[] {
+    const out: PhoneKey[] = [];
+    if (this.device?.kind === "ios-simulator") out.push("ios");
+    if (this.androidPhone()) out.push("android");
+    return out;
+  }
+  /** The DeviceSpec behind a door. */
+  private specFor(k: PhoneKey): DeviceSpec | null {
+    if (k === "ios") return this.device?.kind === "ios-simulator" ? this.device : null;
+    return this.androidPhone();
+  }
   /** The booth as the street draws it, or null when the town has no phone. */
-  boothView(): { name: string; holder: CharacterId | null; since: number; queue: CharacterId[]; warning: string | null } | null {
+  boothView(): { name: string; holder: CharacterId | null; since: number; queue: CharacterId[]; warning: string | null; doors: { phone: PhoneKey; name: string; holder: CharacterId | null; since: number; asleep: boolean }[] } | null {
     if (!this.device) return null;
-    const v = this.booth.view();
+    const v = this.board.view();
+    const doors = v.doors.map((d) => {
+      const spec = this.specFor(d.phone)!;
+      return { phone: d.phone, name: spec.name, holder: d.holder as CharacterId | null, since: d.since, asleep: d.phone === "android" && !this.androidOn };
+    });
     const name = this.android ? `${this.device.name} + ${this.android.name}${this.androidOn ? "" : " (asleep)"}` : this.device.name;
-    return { name, holder: v.holder as CharacterId | null, since: v.since, queue: v.queue as CharacterId[], warning: this.phoneWarning };
+    const first = doors.find((d) => d.holder) ?? doors[0];
+    return { name, holder: first?.holder ?? null, since: first?.since ?? 0, queue: v.queue as CharacterId[], warning: this.phoneWarning, doors };
   }
   /** The town found a phone off or broken — say so on the street (null clears it). */
   setPhoneWarning(text: string | null): void { this.phoneWarning = text; this.onChange(); }
@@ -523,34 +549,47 @@ export class LaneManager {
     this.setPhoneWarning(`The ${a.name} did not wake up — ${r.detail}`);
     return `The town could not wake the ${a.name} emulator (${r.detail}). This command was not run. Do NOT boot it or any other emulator yourself — tell Maksym and carry on with what does not need Android.`;
   }
-  /** Hang up and/or step out of the queue — the one exit for every way a job can
+  /** How a character must address a phone in its commands. */
+  private async addressOf(k: PhoneKey): Promise<string> {
+    const spec = this.specFor(k)!;
+    if (k === "ios") return `the ${spec.name}: \`-d ${spec.id}\` / \`--device ${spec.id}\` / Maestro \`device_id: "${spec.id}"\``;
+    const serial = (await androidSerial(spec.id)) || "emulator-5554";
+    return `the ${spec.name}: \`-d ${serial}\` / \`--device ${serial}\` / Maestro \`device_id: "${serial}"\` (Maestro flows need the app's ANDROID appId)`;
+  }
+  /** Hang up and/or step out of the line — the one exit for every way a job can
    *  end. Safe to call when the lane was never at the booth. */
   private leaveBooth(id: CharacterId): void {
     const l = this.lane(id);
-    this.booth.release(id);
-    this.booth.abandon(id);
-    if (l.booth !== null) { l.booth = null; this.onChange(); }
+    const rel = this.board.release(id);
+    this.board.abandon(id);
+    for (const r of rel) log("booth", `${id} hung up the ${r.phone}`, { queue: this.board.view().queue });
+    if (rel.length) this.onChange(); // whoever was next may have stepped in
+    if (l.booth !== null || l.phone !== null) { l.booth = null; l.phone = null; this.onChange(); }
   }
-  /** Start the door's clock on the first claim; it clears itself once the booth
-   *  is empty (the limitSweep pattern). Each tick: settle, and on a release drop
-   *  that lane's place — chalking the max-hold case so Maksym can look. */
+  /** Start the switchboard's clock on the first claim; it clears itself once
+   *  the booth is empty. Each tick: settle, and on a release drop that lane's
+   *  place — chalking the max-hold case so Maksym can look, and flagging a lane
+   *  that lost the phone mid-job so it reinstalls its build before testing on. */
   private armBoothTicker(): void {
     if (this.boothTicker) return;
     this.boothTicker = setInterval(() => {
-      const rel = this.booth.settle(Date.now());
-      if (rel) {
+      for (const rel of this.board.settle(Date.now())) {
         const l = this.lanes.get(rel.id as CharacterId);
+        const spec = this.specFor(rel.phone);
         if (l) {
-          l.booth = null;
+          l.booth = null; l.phone = null;
+          if (l.working) l.phoneLost = `The town took the ${spec?.name ?? rel.phone} from you (${rel.reason === "maxHold" ? `you had it ${this.device?.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min` : "you were quiet while someone waited"}) and another lane may have put ITS build on it. You have a phone again now, but this command was NOT run: reinstall YOUR build first, then run it again.`;
           if (rel.reason === "maxHold") {
-            l.note = `Handed the phone over after ${this.device?.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min`; l.noteAt = Date.now();
+            l.note = `Handed the ${spec?.name ?? "phone"} over after ${this.device?.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min`; l.noteAt = Date.now();
             this.persist();
           }
         }
-        log("booth", `${rel.id} released the phone (${rel.reason})`, { queue: this.booth.view().queue });
+        log("booth", `${rel.id} released the ${rel.phone} (${rel.reason})`, { queue: this.board.view().queue });
       }
-      if (this.booth.isEmpty() && this.boothTicker) { clearInterval(this.boothTicker); this.boothTicker = null; }
-      this.onChange(); // the door's minutes tick on the street and in the Work Window
+      // A lane that stepped in from the line has its place updated by the hook
+      // that was waiting; here we only keep the street's minutes ticking.
+      if (this.board.isEmpty() && this.boothTicker) { clearInterval(this.boothTicker); this.boothTicker = null; }
+      this.onChange();
     }, BOOTH_TICK_MS);
     this.boothTicker.unref?.();
   }
@@ -614,7 +653,7 @@ export class LaneManager {
         lastAskAnsweredAt: 0, nudged: false,
         limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null,
         note: cur?.note ?? null, noteAt: cur?.noteAt ?? 0,
-        booth: null, setupReport: null,
+        booth: null, phone: null, phoneLost: null, setupReport: null,
       }).get(id)!;
       // Closed the app while waiting out a usage limit? Keep waiting — and keep
       // the promise to pick up by ourselves when it resets.
@@ -692,6 +731,7 @@ export class LaneManager {
         ? { index: l.viewing, readOnly: l.viewReadOnly, messages: l.archive[l.viewing].messages, asking: l.askingPast }
         : null,
       booth: l.booth,
+      phone: l.phone,
     };
   }
 
@@ -1509,6 +1549,19 @@ export class LaneManager {
             return { content: [{ type: "text", text: "Posted. Carry on." }] };
           },
         ),
+        tool(
+          "phone_done",
+          "Hang up the test phone: call this the moment you no longer need a phone (your install → run → flow → screenshot is finished), so the next character in line can test. Nothing is lost — your next phone command simply takes a phone again (iPhone first, else Android, else the line). Not needed when your job ends; the town hangs up for you then.",
+          {},
+          async () => {
+            const held = this.board.holding(id);
+            if (!held) return { content: [{ type: "text", text: "You were not holding a phone. Carry on." }] };
+            const name = this.specFor(held)?.name ?? held;
+            this.leaveBooth(id);
+            log("booth", `${id} phone_done`, { phone: held });
+            return { content: [{ type: "text", text: `Hung up — the ${name} is free for the others. Carry on.` }] };
+          },
+        ),
       ],
     });
 
@@ -1522,11 +1575,12 @@ export class LaneManager {
     // the PreToolUse hook below, this just tells the character the rules.
     const dev = this.device;
     const andr = this.android;
-    const androidNote = dev && andr
-      ? ` This town ALSO has an Android phone, the ${andr.name} (an emulator, AVD "${andr.id}"). The ${dev.name} is the default: use the Android phone only when the job needs Android (an Android-only behaviour, permission, or acceptance criterion). It SLEEPS until needed — the town wakes it on your first command aimed at it (any \`adb …\`, or a device flag naming the AVD, an emulator serial, or \`android\`), so expect that first command to pause a minute or two while it boots; do not retry it. NEVER boot it or any emulator yourself (no \`emulator -avd\`, no \`flutter emulators --launch\`) and never kill it (\`adb emu kill\`). Once it is awake, both phones are on, so always say which one you mean: find the Android serial with \`adb devices\` (usually emulator-5554) and pass it explicitly (\`-d emulator-5554\`, \`--device emulator-5554\`, \`device_id: "emulator-5554"\`). Do your Android checks in one stretch, then go back to the ${dev.name}.`
-      : "";
+    const iosSpec = this.specFor("ios"), andSpec = this.specFor("android");
+    const twoPhones = !!(iosSpec && andSpec);
     const phoneNote = dev
-      ? ` This town has ${andr ? "a shared test phone" : "ONE test phone"}, the ${dev.name} (${dev.kind}, id ${dev.id}). Every command that installs, runs, or drives the app on a device must target exactly this phone (\`-d ${dev.id}\`, \`--device ${dev.id}\`, \`device_id: "${dev.id}"\`)${andr ? " unless the job needs the Android phone described below" : ""}. Build, analyse, run unit tests, and edit freely and in parallel — nothing waits for that.${this.setup ? "" : " Your lane is a fresh checkout: run \`flutter pub get\` (and \`pod install\` if iOS needs it) once before your first build."} Phone commands may pause before they start: that means another character is on the phone and you are next; do NOT retry, do NOT boot or use any other simulator or emulator, never shut down, erase, or reinstall the simulator itself. Run real commands (\`maestro test …\`, \`flutter run …\`) rather than package scripts that hide them, so the town can see them. Group your phone work (build first, then install and run all flows back to back) so you hold the phone briefly.` + androidNote
+      ? (twoPhones
+        ? ` THE PHONE BOOTH: this town has two test phones — the ${iosSpec!.name} (iPhone simulator, id ${iosSpec!.id}) and the ${andSpec!.name} (Android emulator, AVD "${andSpec!.id}", asleep until needed; the town wakes it, you never boot anything). Every command that installs, runs, or drives the app on a device walks through the booth: you get the ${iosSpec!.name} if it is free, else the ${andSpec!.name} if it is free, else you wait in line for whichever frees first — the wait happens INSIDE your command (it can take minutes; that is normal, not a hang). Always name the phone in the command (\`-d <id>\`, \`--device <id>\`, Maestro \`device_id\`). If the phone you named is busy and the other is free, the command is refused ONCE with the other phone's address — run it again aimed there and stay on that phone; your Flutter app runs on both, Maestro flows just need that platform's appId. If a test truly must run on the iPhone, say so (\`--platform ios\` for Maestro, or xcrun simctl commands) and you will wait for it; anything \`adb\`, an AVD name, an emulator serial or \`-d android\` waits for the Android phone. STRICT: a phone has ONE holder — while you hold it nobody else's command touches it (so your build stays put), and you hold it until you call \`phone_done\`, go quiet for ${dev.graceSec ?? 600} s while someone waits, or ${dev.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min pass. So: install → run → flow → screenshot in one go, then call \`phone_done\` the moment you are finished with the phone. If you ever lost the phone mid-job the next phone command is refused once with "reinstall your build first" — do that. Build, analyse, run unit tests and edit on your own copy as usual — none of that needs a phone. Never shut a phone down, wipe it, or boot another one; if a phone looks broken, tell Maksym.`
+        : ` THE PHONE BOOTH: this town has ONE test phone, the ${dev.name} (${dev.kind}, id ${dev.id}). Every command that installs, runs, or drives the app on a device must target exactly this phone (\`-d ${dev.id}\`, \`--device ${dev.id}\`, \`device_id: "${dev.id}"\`) and walks through the booth: if another character is testing, your command waits its turn INSIDE the call (minutes are normal, not a hang). STRICT: the phone has ONE holder — while you hold it nobody else's command touches it, and you hold it until you call \`phone_done\`, go quiet for ${dev.graceSec ?? 600} s while someone waits, or ${dev.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min pass. So: install → run → flow → screenshot in one go, then call \`phone_done\` the moment you are finished. If you ever lost the phone mid-job the next phone command is refused once with "reinstall your build first" — do that. Build, analyse, run unit tests and edit on your own copy as usual — none of that needs the phone. Never shut the phone down, wipe it, or boot another one; if it looks broken, tell Maksym.`)
       : "";
 
     try {
@@ -1592,31 +1646,59 @@ export class LaneManager {
                   return DENY_PHONE;
                 }
                 const phone = step === "phone";
-                if (phone && l.booth !== "holding") {
-                  // Walk to the booth. The stall watchdog is off while we wait (a
-                  // long queue is not "stuck") and back on once we step in.
-                  l.booth = "queued"; l.activity = "waiting for the phone…";
-                  this.clearWatchdog(l);
-                  log("booth", `${id} wants the phone`, { holder: this.booth.view().holder, queue: this.booth.view().queue });
-                  this.onChange();
-                  const r = await this.booth.claim(id);
-                  this.armBoothTicker();
-                  if (r === "left") { l.booth = null; return DENY_LEFT; }
-                  l.booth = "holding"; l.activity = "on the phone…";
-                  this.armWatchdog(id);
-                  log("booth", `${id} has the phone`);
-                  this.onChange();
-                }
-                // The Android phone sleeps until needed: a holder's command aimed
-                // at it (or any phone command, when the town's only phone is the
-                // emulator) first wakes it — the town boots, never the character.
-                const androidPhone = this.androidPhone();
-                if (phone && androidPhone && (androidPhone === dev || wantsAndroid(toolName, ti, androidPhone.id))) {
-                  const fail = await this.ensureAndroid(id, l, androidPhone);
-                  if (fail) {
-                    l.conversation.push({ from: "them", text: fail, tool: true });
+                if (phone) {
+                  // The switchboard: which phone does this command want, and is
+                  // it bound to it? iPhone first when free, else Android, else
+                  // the line (whichever frees first) — Maksym's rule.
+                  const keys = this.phoneKeys();
+                  const iosSpec = this.specFor("ios"), andSpec = this.specFor("android");
+                  const target = phoneTarget(toolName, ti, { ios: iosSpec?.id, android: andSpec?.id });
+                  const want: PhoneKey | null = target.want && keys.includes(target.want) ? target.want : (keys.length === 1 ? keys[0] : null);
+                  const bound = target.bound && want !== null;
+                  const held = this.board.holding(id);
+                  let granted: PhoneKey;
+                  if (held && (!bound || want === held)) {
+                    granted = held; // re-entry: the phone you hold is the one you use
+                  } else {
+                    l.booth = "queued"; l.activity = "waiting for a phone…";
+                    this.clearWatchdog(l);
+                    log("booth", `${id} wants a phone`, { want, bound, doors: this.board.view().doors.map((d) => `${d.phone}:${d.holder ?? "-"}`), queue: this.board.view().queue });
                     this.onChange();
-                    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: fail } };
+                    const g = await this.board.claim(id, bound ? want : null);
+                    this.armBoothTicker();
+                    if (g.r === "left") { l.booth = null; l.phone = null; return DENY_LEFT; }
+                    granted = g.phone;
+                    this.armWatchdog(id);
+                  }
+                  l.booth = "holding"; l.phone = granted; l.activity = "on the phone…";
+                  log("booth", `${id} has the ${granted}`, { held, want, bound });
+                  this.onChange();
+                  // The Android phone sleeps until needed: the town wakes it for
+                  // the holder's command — the town boots, never the character.
+                  if (granted === "android" && andSpec) {
+                    const fail = await this.ensureAndroid(id, l, andSpec);
+                    if (fail) {
+                      l.conversation.push({ from: "them", text: fail, tool: true });
+                      this.onChange();
+                      return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: fail } };
+                    }
+                  }
+                  // Lost the phone mid-job earlier? The build on it may not be yours.
+                  if (l.phoneLost) {
+                    const why = l.phoneLost; l.phoneLost = null;
+                    log("booth", `${id} told to reinstall after losing the phone`);
+                    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: why } };
+                  }
+                  // The command is aimed at a phone other than the one it got (or
+                  // at none, in a two-phone town): refuse ONCE with the address.
+                  // The phone stays reserved for this character meanwhile.
+                  if (keys.length > 1 && want !== granted) {
+                    const gotSpec = this.specFor(granted)!;
+                    const wantedName = want ? this.specFor(want)?.name : null;
+                    const reason = (wantedName ? `The ${wantedName} is busy (another character is testing on it). ` : "This town has two phones, so every phone command must name one. ")
+                      + `The ${gotSpec.name} is yours now — reserved and ${granted === "android" ? "awake" : "ready"}. Run this command again aimed at ${await this.addressOf(granted)}. Keep using the ${gotSpec.name} for the rest of your testing; call \`phone_done\` when you no longer need a phone.`;
+                    log("booth", `${id} re-aimed`, { want, granted });
+                    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } };
                   }
                 }
                 const decision = await (async (): Promise<unknown> => {
@@ -1641,14 +1723,14 @@ export class LaneManager {
                 })();
                 // A phone command that is really going to run: the grace clock
                 // waits for it to finish (PostToolUse below) before counting.
-                if (phone && decision === ALLOW) this.booth.begin(id);
+                if (phone && decision === ALLOW) this.board.begin(id);
                 return decision;
               }],
             }],
             // A phone command finished (well or badly): the holder's grace clock
             // starts. Never release here — the next command may be seconds away.
-            PostToolUse: [{ hooks: [async (input: any): Promise<any> => { const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.booth.touch(id); return {}; }] }],
-            PostToolUseFailure: [{ hooks: [async (input: any): Promise<any> => { const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.booth.touch(id); return {}; }] }],
+            PostToolUse: [{ hooks: [async (input: any): Promise<any> => { const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.board.touch(id); return {}; }] }],
+            PostToolUseFailure: [{ hooks: [async (input: any): Promise<any> => { const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.board.touch(id); return {}; }] }],
           },
         },
       });

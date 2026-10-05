@@ -216,10 +216,11 @@ export interface WindowView {
   /** Terminal-mode only: the character's past Claude sessions (its "Past orders"),
    *  newest first. Clicking one resumes it in the terminal via `claude --resume`. */
   termSessions?: { sessionId: string; title: string }[];
-  /** The Phone Booth line under the name: "On the phone (4 min)" or "Waiting for
-   *  the phone — Patrick is testing (4 min)". `holder` is the name of whoever has
-   *  the phone; `minutes` how long they have had it. Null when not at the booth. */
-  booth: { role: BoothRole; holder: string; minutes: number } | null;
+  /** The Phone Booth line under the name: "On the iPhone 17 (4 min)" or "Waiting
+   *  for a phone — Patrick has the iPhone 17 (4 min), Squidward has the Pixel 3a
+   *  (2 min)". `holder` is the sentence's who-has-what part; `minutes` how long the
+   *  holder has had it; `phone` the held phone's name. Null when not at the booth. */
+  booth: { role: BoothRole; holder: string; minutes: number; phone?: string | null } | null;
 }
 
 /** What one job has cost so far — the numbers that were invisible on 25 Aug 2026
@@ -346,6 +347,10 @@ export interface BoothView {
   queue: CharacterId[];
   /** The phone is off (Android: emulator not running) — one line for the street, or null. */
   warning: string | null;
+  /** One door per phone, iPhone first: who holds it and since when; `asleep`
+   *  marks an Android emulator that is not running. (`holder`/`since` above
+   *  mirror the first busy door, for older callers and fixtures.) */
+  doors?: { phone: "ios" | "android"; name: string; holder: CharacterId | null; since: number; asleep: boolean }[];
 }
 
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */

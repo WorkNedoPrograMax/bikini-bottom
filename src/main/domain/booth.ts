@@ -1,10 +1,16 @@
-// The Phone Booth: ONE door per town, shared in turns. Behind the door sit the
-// town's test phones: the default one (an iPhone simulator, awake while the town
-// is open) and, when the town has one, an Android emulator that sleeps until an
-// Android job needs it — the TOWN wakes it, a character never boots anything.
-// Characters build in parallel on their own copies; only a command that touches
-// a phone (install, run, drive, Maestro flow, screenshot) walks to the booth and
-// waits its turn.
+// The Phone Booth: one door PER PHONE, shared in turns, with ONE waiting line.
+// Behind the doors sit the town's test phones: the default one (an iPhone
+// simulator, awake while the town is open) and, when the town has one, an
+// Android emulator that sleeps until a job needs it — the TOWN wakes it, a
+// character never boots anything. Characters build in parallel on their own
+// copies; only a command that touches a phone (install, run, drive, Maestro
+// flow, screenshot) walks to the booth. Maksym's routing rule (2026-10-05): take
+// the iPhone if it is free, else the Android phone if it is free, else wait in
+// the line and take whichever frees first. A command that can only run on one
+// phone (xcrun/simctl, adb, --platform) waits for that phone. STRICT: a phone
+// has one holder; nobody else's command touches it until the holder hangs up,
+// goes quiet for the grace (10 min, while someone waits) or hits the cap — so a
+// build cannot change under a tester (the 2026-10-04 complaint).
 // PURE (no Electron, no timers of its own, the clock is injected) so
 // scripts/check-booth.mjs can test it with plain node.
 
@@ -14,7 +20,11 @@ export type PhoneVerdict = "phone" | "forbidden" | null;
 export const FORBIDDEN_REASON = "The town runs the test phone. Never shut it down, wipe it, or boot another one — tell Maksym if it looks broken.";
 export const LEFT_REASON = "Your job ended while waiting for the phone — this command was not run.";
 
-export const DEFAULT_GRACE_SEC = 60;
+// 2026-10-05: 60 → 600. A tester who edits a flow for three minutes between two
+// phone commands must NOT lose the phone to a waiting lane (whose install then
+// swaps the build under the test). With a door per phone the line is short, so
+// a long grace costs little; `phone_done` hands the phone over at once.
+export const DEFAULT_GRACE_SEC = 600;
 export const DEFAULT_MAX_HOLD_MIN = 30;
 
 /** Word wrappers that sit in front of the real binary on a command line. */
@@ -277,6 +287,168 @@ export class Booth {
     const rest = this.queue.filter((x) => x.id === q.id);
     this.queue = this.queue.filter((x) => x.id !== q.id);
     for (const r of rest) r.resolve("ok");
+  }
+}
+
+/** The town's phone slots, in Maksym's preference order: iPhone first. */
+export type PhoneKey = "ios" | "android";
+export const PHONE_ORDER: readonly PhoneKey[] = ["ios", "android"];
+
+/** Which phone a phone command is aimed at. `bound` = it can ONLY run there
+ *  (xcrun/simctl, open -a Simulator, --platform ios, -d ios → iPhone; any adb /
+ *  emulator / AVD / serial / -d android → Android). Not bound + want "ios" = it
+ *  merely names the iPhone and may be re-aimed at the Android phone when the
+ *  iPhone is busy. want null = names no phone at all. */
+export interface PhoneTarget { want: PhoneKey | null; bound: boolean }
+export function phoneTarget(toolName: string, toolInput: Record<string, unknown> | null | undefined, phones: { ios?: string; android?: string }): PhoneTarget {
+  const input = toolInput || {};
+  if (phones.android && wantsAndroid(toolName, toolInput, phones.android)) return { want: "android", bound: true };
+  if (!phones.ios) return { want: phones.android ? "android" : null, bound: !!phones.android };
+  const iosId = phones.ios;
+  if (toolName === "Bash") {
+    let names = false;
+    for (const seg of commandSegments(String(input.command ?? ""))) {
+      const bin = seg[0];
+      if (bin === "xcrun" || bin === "simctl") return { want: "ios", bound: true };
+      if (bin === "open" && seg.includes("-a") && seg.some((t) => t.replace(/\.app$/, "") === "Simulator")) return { want: "ios", bound: true };
+      for (let i = 1; i < seg.length; i++) {
+        const t = seg[i];
+        if (t === iosId) names = true;
+        const lower = t.toLowerCase();
+        if ((lower === "--platform" || lower === "-p") && (seg[i + 1] || "").toLowerCase() === "ios") return { want: "ios", bound: true };
+        if (lower === "--platform=ios" || lower === "-p=ios") return { want: "ios", bound: true };
+        if ((lower === "-d" || lower === "--device-id" || lower === "--device") && (seg[i + 1] || "").toLowerCase() === "ios") return { want: "ios", bound: true };
+        if (lower === "-d=ios" || lower === "--device-id=ios" || lower === "--device=ios") return { want: "ios", bound: true };
+      }
+    }
+    return names ? { want: "ios", bound: false } : { want: null, bound: false };
+  }
+  if (toolName.startsWith("mcp__") && /maestro/i.test(toolName)) {
+    const d = input.device_id ?? input.deviceId;
+    if (d === iosId) return { want: "ios", bound: false };
+    const plat = String(input.platform ?? "").toLowerCase();
+    if (plat === "ios") return { want: "ios", bound: true };
+  }
+  return { want: null, bound: false };
+}
+
+/** What the switchboard answers a claim with. */
+export type Granted = { r: "ok"; phone: PhoneKey } | { r: "left" };
+export type BoardRelease = { id: string; phone: PhoneKey; reason: "grace" | "maxHold" | "hangUp" | "switch" };
+export interface DoorView { phone: PhoneKey; holder: string | null; since: number }
+export interface BoardView { doors: DoorView[]; queue: string[] }
+
+interface Door { holder: string | null; since: number; touchedAt: number; busy: number }
+interface Waiting { id: string; want: PhoneKey | null; resolve: (g: Granted) => void }
+
+/** The switchboard: one door per phone, ONE line. A character holds at most one
+ *  phone. claim(id, want): the held phone when it fits; else the first free
+ *  phone in preference order (or the one wanted); else a place in the line,
+ *  served first-come-first-served by whichever fitting door frees first. The
+ *  holder keeps a phone while a phone command runs and for `graceSec` after
+ *  its last one (only while someone who could use it waits); after `maxHoldMin`
+ *  it is let go regardless. Never persisted: a relaunch starts empty. */
+export class Switchboard {
+  private doors = new Map<PhoneKey, Door>();
+  private line: Waiting[] = [];
+  private readonly graceMs: number;
+  private readonly maxHoldMs: number;
+  private released: BoardRelease[] = []; // what the last operation let go (for the caller's log)
+
+  constructor(public readonly phones: readonly PhoneKey[], opts: { graceSec?: number; maxHoldMin?: number } = {}, private now: () => number = Date.now) {
+    for (const k of phones) this.doors.set(k, { holder: null, since: 0, touchedAt: 0, busy: 0 });
+    this.graceMs = (opts.graceSec ?? DEFAULT_GRACE_SEC) * 1000;
+    this.maxHoldMs = (opts.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN) * 60_000;
+  }
+
+  /** The phone this character holds, or null. */
+  holding(id: string): PhoneKey | null {
+    for (const [k, d] of this.doors) if (d.holder === id) return k;
+    return null;
+  }
+
+  /** Step up to the switchboard. Resolves at once when a fitting phone is the
+   *  character's already or free; otherwise when its turn comes ("left" if its
+   *  job ended while it waited). Taking a different phone than the one held
+   *  (a bound request) hands the held one back. */
+  claim(id: string, want: PhoneKey | null): Promise<Granted> {
+    const held = this.holding(id);
+    if (held && (want === null || want === held)) return Promise.resolve({ r: "ok", phone: held });
+    const candidates = want ? [want] : this.phones;
+    for (const k of candidates) {
+      const d = this.doors.get(k);
+      if (d && !d.holder) { this.take(k, id); return Promise.resolve({ r: "ok", phone: k }); }
+    }
+    return new Promise((resolve) => this.line.push({ id, want, resolve }));
+  }
+
+  /** A phone command of the holder is starting (the grace clock waits for it). */
+  begin(id: string): void { const k = this.holding(id); if (k) { const d = this.doors.get(k)!; d.busy++; d.touchedAt = this.now(); } }
+
+  /** A phone command of the holder finished: the grace clock starts. */
+  touch(id: string): void { const k = this.holding(id); if (k) { const d = this.doors.get(k)!; if (d.busy > 0) d.busy--; d.touchedAt = this.now(); } }
+
+  /** Hang up (every phone this character holds). A non-holder is a no-op. */
+  release(id: string, reason: BoardRelease["reason"] = "hangUp"): BoardRelease[] {
+    const out: BoardRelease[] = [];
+    for (const [k, d] of this.doors) {
+      if (d.holder !== id) continue;
+      d.holder = null; d.since = 0; d.touchedAt = 0; d.busy = 0;
+      out.push({ id, phone: k, reason });
+      this.fill(k);
+    }
+    return out;
+  }
+
+  /** Take a waiting character out of the line and tell its hook ("left"). */
+  abandon(id: string): void {
+    const mine = this.line.filter((w) => w.id === id);
+    if (!mine.length) return;
+    this.line = this.line.filter((w) => w.id !== id);
+    for (const w of mine) w.resolve({ r: "left" });
+  }
+
+  /** The ticker's job: let a holder go when (a) someone who could use that
+   *  phone waits, no phone command runs and the last touch is older than the
+   *  grace, or (b) the hold is older than the cap. */
+  settle(now: number = this.now()): BoardRelease[] {
+    const out: BoardRelease[] = [];
+    for (const [k, d] of this.doors) {
+      if (!d.holder) continue;
+      const id = d.holder;
+      if (now - d.since >= this.maxHoldMs) { out.push(...this.release(id, "maxHold")); continue; }
+      const wanted = this.line.some((w) => w.want === null || w.want === k);
+      if (wanted && d.busy === 0 && now - d.touchedAt >= this.graceMs) out.push(...this.release(id, "grace"));
+    }
+    return out;
+  }
+
+  view(): BoardView {
+    const queue: string[] = [];
+    for (const w of this.line) if (!queue.includes(w.id)) queue.push(w.id);
+    return { doors: this.phones.map((k) => { const d = this.doors.get(k)!; return { phone: k, holder: d.holder, since: d.since }; }), queue };
+  }
+
+  isEmpty(): boolean { return this.line.length === 0 && [...this.doors.values()].every((d) => !d.holder); }
+
+  private take(k: PhoneKey, id: string): void {
+    const prev = this.holding(id);
+    const d = this.doors.get(k)!;
+    d.holder = id; d.since = this.now(); d.touchedAt = d.since; d.busy = 0;
+    // One phone per character: a bound switch hands the other one back.
+    if (prev && prev !== k) { const pd = this.doors.get(prev)!; pd.holder = null; pd.since = 0; pd.touchedAt = 0; pd.busy = 0; this.fill(prev); }
+  }
+
+  /** A door just freed: serve the first in line who can use it, and every other
+   *  waiting call of that same character that fits (parallel tool calls). */
+  private fill(k: PhoneKey): void {
+    const i = this.line.findIndex((w) => w.want === null || w.want === k);
+    if (i < 0) return;
+    const first = this.line[i];
+    this.take(k, first.id);
+    const mine = this.line.filter((w) => w.id === first.id && (w.want === null || w.want === k));
+    this.line = this.line.filter((w) => !mine.includes(w));
+    for (const w of mine) w.resolve({ r: "ok", phone: k });
   }
 }
 

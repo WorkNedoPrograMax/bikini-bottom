@@ -296,12 +296,23 @@ function buildWindow(chars: TownSnapshot["characters"]): WindowView | null {
 
 /** The Work Window's booth line: who has the phone and for how long, or null. */
 function boothLineFor(id: CharacterId, chars: TownSnapshot["characters"]): WindowView["booth"] {
-  const role = lanes?.view(id).booth ?? null;
+  const v = lanes?.view(id);
+  const role = v?.booth ?? null;
   const b = boothView();
   if (!role || !b) return null;
-  const holderName = chars.find((x) => x.id === b.holder)?.name ?? ROSTER.find((r) => r.id === b.holder)?.name ?? "someone";
-  const minutes = b.since ? Math.max(0, Math.round((Date.now() - b.since) / 60_000)) : 0;
-  return { role, holder: holderName, minutes };
+  const nameOf = (cid: CharacterId | null) => chars.find((x) => x.id === cid)?.name ?? ROSTER.find((r) => r.id === cid)?.name ?? "someone";
+  const mins = (since: number) => (since ? Math.max(0, Math.round((Date.now() - since) / 60_000)) : 0);
+  const doors = b.doors ?? [];
+  if (role === "holding") {
+    const mine = doors.find((d) => d.phone === v?.phone) ?? doors.find((d) => d.holder === id);
+    return { role, holder: nameOf(id), minutes: mins(mine?.since ?? b.since), phone: mine?.name ?? b.name };
+  }
+  // Queued: say who has what, so the wait makes sense.
+  const busy = doors.filter((d) => d.holder);
+  const who = busy.length
+    ? busy.map((d) => `${nameOf(d.holder)} has the ${d.name} (${mins(d.since)} min)`).join(", ")
+    : `${nameOf(b.holder)} is testing`;
+  return { role, holder: who, minutes: mins(busy[0]?.since ?? b.since), phone: null };
 }
 
 /** The shown town's booth (fixture first, for photographs), or null. */
