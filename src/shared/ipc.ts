@@ -62,6 +62,11 @@ export interface FirstRunView {
 /** A structured question a Character asks (from Claude's AskUserQuestion tool).
  *  Rendered as clickable option buttons + a "type my own" box (FR-12 sibling). */
 export interface AskChoice {
+  /** The story so far, in plain words, for someone who did not watch the work:
+   *  what was found, what the choice is about, why it matters. Shown in the 🤔
+   *  bubble and above the questions. (2026-10-06: short questions with no story
+   *  left Maksym answering "what?") */
+  story?: string;
   questions: {
     question: string;
     header: string;

@@ -111,7 +111,7 @@ function voiceFor(id: CharacterId): string {
     + " Maksym is a friend, not a client, and he is not an engineer. Talk to him like a good, funny friend who happens to be great at this: warm, relaxed, human, with a light joke when it fits. Short messages. Everyday words."
     + " READ HIS MOOD FIRST. He writes fast and typo-y; look at how he feels before what he asks. If he's frustrated, annoyed, tired or worried, say you see it and mean it (\"ugh, yeah, that's annoying — I've got it\"), then help. If he's excited, be excited with him. If he says something is really bad, don't just agree flatly — react like a person would, then show him it's fixable. Never lecture, never be preachy, never sound like documentation."
     + " EXPLAIN LIKE TO A SMART FRIEND WHO ISN'T TECHNICAL: what happened, why it matters to him, what you'll do — in plain language. One simple picture or comparison beats a paragraph. No jargon, no acronyms, no file paths, function names, command names or version numbers in chat unless he asks or truly needs one to act (then one, in plain words). No bullet-walls, no headers, no academic tone. If something is complicated, say the simple version first and offer the details only if he wants them."
-    + " WHEN YOU ASK HIM SOMETHING (ask_maksym): the question is one or two short sentences a friend would say — what he must decide and why it matters to him. Progress goes in your normal reply before the question, never inside it. He should get it in three seconds on his phone. SHORT NEVER MEANS HIDING: anything that would change his decision, costs money, touches real users or their data, weakens security, departs from what he asked for, or carries a risk MUST be said — in one plain sentence inside the question if it affects the choice, otherwise in your reply right before it. Shorten the words, never the facts. If you're unsure whether something matters to him, say it in one plain sentence."
+    + " WHEN YOU ASK HIM SOMETHING (ask_maksym): he sees ONLY the tool's `story` and the questions — not your chat replies — so the story (2–5 plain sentences: what the job is, what you found, what the choice is about, why it matters to him) is where the context lives, and each question is one or two short sentences a friend would say. He should get it in a few seconds on his phone without having watched you work. SHORT NEVER MEANS HIDING: anything that would change his decision, costs money, touches real users or their data, weakens security, departs from what he asked for, or carries a risk MUST be said — in one plain sentence inside the question if it affects the choice, otherwise in your reply right before it. Shorten the words, never the facts. If you're unsure whether something matters to him, say it in one plain sentence."
     + " STAY HONEST AND REAL: being friendly never means softening bad news or pretending — say what's true, kindly and simply, and own mistakes with humour, not apologies in triplicate. Match his energy and his length: a one-line question gets a one-line answer.";
 }
 
@@ -231,6 +231,8 @@ const ASK_COOLDOWN_MS = 5 * 60_000;
 // Longest question text ask_maksym will forward. Two short plain sentences fit
 // easily; a status report does not. See GUARD 3 in the tool.
 const ASK_MAX_CHARS = 300;
+// Longest `story` (the plain-words context in front of the questions).
+const ASK_STORY_MAX_CHARS = 700;
 
 // USAGE LIMIT: when Claude's subscription limit is used up, the CLI ends the
 // turn with "You've hit your session limit · resets 1:40pm" and an error result.
@@ -1243,9 +1245,12 @@ export class LaneManager {
     const q0 = ask.questions[0];
     // One question → its text in the bubble (the option buttons follow). A
     // BATCH → say how many; the panel titles each one.
+    // With a story, the bubble tells it first — Maksym reads the bubble and the
+    // panel, nothing else, when he answers.
+    const lead = ask.story ? `🤔 ${ask.story}\n\n` : "🤔 ";
     const head = ask.questions.length > 1
-      ? `🤔 I've got ${ask.questions.length} questions for you — all in one go:`
-      : `🤔 ${q0 ? q0.question : "I have a question."}`;
+      ? `${lead}I've got ${ask.questions.length} questions for you — all in one go:`
+      : `${lead}${q0 ? q0.question : "I have a question."}`;
     l.conversation.push({ from: "them", text: head, tool: true });
     l.working = false;
     l.stats.asks++;
@@ -1472,6 +1477,7 @@ export class LaneManager {
               multiSelect: z.boolean().optional(),
             })).min(1).max(8).optional().describe("Several questions asked together in one go (preferred over asking one at a time)."),
             batchComplete: z.boolean().optional().describe("Set true only when this single question blocks all further work and no other question can come up. Skips the batching cooldown."),
+            story: z.string().describe("REQUIRED. The story so far for someone who did NOT watch you work, 2–5 plain sentences, under 700 characters: what the job is, what you found, what this choice is about and why it matters to him. Everyday words — no code, file names, ticket numbers or jargon. Maksym reads ONLY this and the questions; your chat replies are not in front of him when he answers. Example: 'Anna reviewed the sign-up change and left three notes. One is about which unit we save for a new person — kilometres or miles. Right now we save a unit even when they never picked one, which can show a runner the wrong distances.'"),
           },
           async (args) => {
             // Normalise the two shapes into one list.
@@ -1481,6 +1487,16 @@ export class LaneManager {
             ).filter((q) => q.question && q.options && q.options.length >= 2);
             if (!list.length) {
               return { content: [{ type: "text", text: "Nothing was asked: pass `question` + `options` (2–6), or a `questions` array of those." }] };
+            }
+            // GUARD 0 — no story, no question. 2026-10-06: Bob asked four short,
+            // correct questions ("km buttons or mile buttons?") with no context in
+            // front of Maksym, who answered "what?" and "explain simpler" to each.
+            const story = String(args.story ?? "").replace(/\s+/g, " ").trim();
+            if (story.length < 60 || story.length > ASK_STORY_MAX_CHARS) {
+              log("lane", `${id} ask bounced — story ${story.length < 60 ? "missing" : "too long"}`, { chars: story.length });
+              return { content: [{ type: "text", text: story.length < 60
+                ? "Not sent — the `story` is missing or too thin. Maksym sees ONLY the story and the questions, not your earlier replies. Write 2–5 plain sentences for someone who did not watch: what the job is, what you found, what this choice is about and why it matters to him. Everyday words, no code, file names, ticket numbers or jargon. Then call ask_maksym again with the same questions."
+                : `Not sent — the \`story\` is ${story.length} characters; keep it under ${ASK_STORY_MAX_CHARS} (2–5 plain sentences). Say the simple version; he can ask for more.` }] };
             }
             // GUARD 1 — a status update is not a question. If every option is a
             // mere acknowledgment ("I'll check it", "Looks good, keep going"),
@@ -1511,6 +1527,7 @@ export class LaneManager {
               return { content: [{ type: "text", text: `Not sent yet — Maksym answered you only ${mins} minute${mins === 1 ? "" : "s"} ago, and he wants questions BATCHED, not one at a time (every question pauses him and his phone rings). Do this instead: keep working on everything that does NOT depend on this answer, note every other question that comes up, and then call ask_maksym ONCE with a \`questions\` array holding all of them. If this one question truly blocks all further work and nothing else can come up, call again with batchComplete: true.` }] };
             }
             const answer = await this.promptChoice(id, {
+              story,
               questions: list.map((q) => ({
                 question: q.question,
                 header: "",

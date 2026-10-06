@@ -417,6 +417,7 @@ html, body {
   border-radius: 8px; padding: 2px 8px;
 }
 .choice-t { font-family: var(--body); font-size: 15px; font-weight: 600; line-height: 1.35; color: #241d0e; }
+.choice-story { font-family: var(--body); font-size: 15px; line-height: 1.45; color: #241d0e; background: rgba(255,255,255,.45); border-left: 4px solid #c58a3a; border-radius: 6px; padding: 8px 10px; white-space: pre-line; }
 .choice-opts { display: flex; flex-direction: column; gap: 7px; }
 .choice-opt {
   text-align: left; cursor: pointer; border: 2px solid #3a2c14; border-radius: 10px;
