@@ -18,7 +18,7 @@ import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { defaultName, loadProfile, seedProfile, serializeProfile, profilePath, laneAdoption, townTabsFor, type TownProfile, type DeviceSpec } from "./config/townProfile";
 import { parseSimctlDevices } from "./domain/booth";
-import { androidSerial, wakeAndroid } from "./adapters/phone";
+import { androidSerial, iosBooted } from "./adapters/phone";
 import { seedSetup } from "./domain/laneSetup";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
@@ -120,11 +120,12 @@ async function openTown(projectPath: string): Promise<Town> {
     // One account, one fuel file: two towns sharing it is fine (same numbers).
     { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning },
     profile.landing, profile.device ?? null, profile.setup ?? null, profile.android ?? null);
-  // The Phone Booth: wake the town's default phone so the first tester never
-  // waits for a cold start; the Android phone (if any) only gets looked at — it
-  // sleeps until a job needs it. Best effort, never blocks the town, never
-  // shuts anything down.
-  if (profile.device) void bootPhone(profile.device, profile.android ?? null, townLanes);
+  // The Phone Booth: only LOOK at the town's phones on open — the iPhone and the
+  // Android phone both sleep until a job aims a command at one, then the town
+  // wakes it from the lane hook (Maksym, 2026-10-15: no simulator at app start,
+  // only on first real use). Best effort, never blocks the town, never boots
+  // or shuts anything down.
+  if (profile.device) void checkPhones(profile.device, profile.android ?? null, townLanes);
   // Real-terminal characters: the actual `claude` CLI in the lane worktree.
   // onData/onExit stream straight to the renderer's xterm. (TERMINAL_IDS is empty.)
   const townTerminals = new TerminalManager(
@@ -158,35 +159,24 @@ async function openTown(projectPath: string): Promise<Town> {
   return town;
 }
 
-/** Boot the town's default phone (iOS: `simctl boot` + bring the Simulator up;
- *  an Android default: wake the emulator). A second, Android phone is only
- *  looked at — asleep is its normal state until a job aims a command at it. */
-async function bootPhone(dev: DeviceSpec, android: DeviceSpec | null, townLanes: LaneManager): Promise<void> {
-  const run = (cmd: string, args: string[]): Promise<{ ok: boolean; out: string }> =>
-    new Promise((resolve) => execFile(cmd, args, { timeout: 60_000 }, (err, stdout, stderr) => resolve({ ok: !err, out: String(stdout || "") + String(stderr || "") })));
+/** Look at the town's phones on open — never boot one: is the iPhone simulator
+ *  booted, is the Android emulator running? The street tags a sleeping phone
+ *  "asleep"; the first job that needs it wakes it (LaneManager.ensurePhone). */
+async function checkPhones(dev: DeviceSpec, android: DeviceSpec | null, townLanes: LaneManager): Promise<void> {
   if (android) {
     const serial = await androidSerial(android.id);
     log("booth", serial ? "android phone already awake" : "android phone asleep (wakes when a job needs it)", { avd: android.id, serial });
     townLanes.setAndroidOn(!!serial);
   }
   if (dev.kind === "ios-simulator") {
-    const boot = await run("xcrun", ["simctl", "boot", dev.id]);
-    const already = /current state: Booted/i.test(boot.out);
-    if (boot.ok || already) {
-      log("booth", already ? "phone already booted" : "phone booted", { id: dev.id, name: dev.name });
-      const open = await run("open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", dev.id]);
-      log("booth", open.ok ? "Simulator brought up" : "Simulator could not be brought up", { id: dev.id, out: open.out.slice(0, 160) });
-      townLanes.setPhoneWarning(null);
-    } else {
-      log("booth", "phone could not be booted", { id: dev.id, name: dev.name, out: boot.out.slice(0, 200) });
-      townLanes.setPhoneWarning(`The test phone did not start — check the ${dev.name} in Simulator`);
-    }
+    const on = await iosBooted(dev.id);
+    log("booth", on ? "iphone already awake" : "iphone asleep (wakes when a job needs it)", { id: dev.id, name: dev.name });
+    townLanes.setIosOn(on);
   } else {
-    // An Android default phone: wake the emulator like the iPhone above.
-    const r = await wakeAndroid(dev.id);
-    log("booth", r.ok ? (r.alreadyOn ? "phone already awake" : "phone booted") : "phone could not be woken", { avd: dev.id, name: dev.name, detail: r.detail });
-    townLanes.setAndroidOn(r.ok);
-    townLanes.setPhoneWarning(r.ok ? null : `The test phone did not start — ${r.detail}; check the ${dev.name} emulator`);
+    // An Android default phone: looked at, like the second phone above.
+    const serial = await androidSerial(dev.id);
+    log("booth", serial ? "phone already awake" : "phone asleep (wakes when a job needs it)", { avd: dev.id, name: dev.name, serial });
+    townLanes.setAndroidOn(!!serial);
   }
 }
 

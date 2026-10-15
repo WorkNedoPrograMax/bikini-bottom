@@ -1,8 +1,9 @@
-// The town's Android phone: an emulator that sleeps until a job needs it. The
-// TOWN wakes it (a character may never boot a device, see domain/booth.ts): the
-// lane hook calls wakeAndroid() while the character holds the booth, and the
-// command it was about to run goes ahead once Android says it has booted.
-// Nothing here ever shuts an emulator down.
+// The town's phones: an Android emulator and an iPhone simulator that BOTH
+// sleep until a job needs them (Maksym, 2026-10-15: no simulator at app start,
+// only on first real use). The TOWN wakes a phone (a character may never boot a
+// device, see domain/booth.ts): the lane hook calls wakeAndroid() / wakeIos()
+// while the character holds the booth, and the command it was about to run goes
+// ahead once the phone says it has booted. Nothing here ever shuts a phone down.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import os from "node:os";
@@ -27,14 +28,15 @@ const emulatorBin = (): string => sdkBin("emulator/emulator", "emulator");
 /** Run a tool and settle on its EXIT, not on its pipes closing: an adb client
  *  that finds no server forks one that inherits the pipes and lives on, so the
  *  usual execFile would wait forever (seen 2026-10-02 — the first wake test hung). */
-const run = (cmd: string, args: string[], timeout = 20_000): Promise<{ ok: boolean; out: string }> =>
+const run = (cmd: string, args: string[], timeout = 20_000): Promise<{ ok: boolean; out: string; stdout: string }> =>
   new Promise((resolve) => {
     let out = "";
+    let stdout = ""; // stdout alone, for callers that parse JSON (stderr noise kept out)
     let done = false;
-    const finish = (ok: boolean): void => { if (done) return; done = true; setImmediate(() => resolve({ ok, out })); };
+    const finish = (ok: boolean): void => { if (done) return; done = true; setImmediate(() => resolve({ ok, out, stdout })); };
     let child: ReturnType<typeof spawn>;
     try { child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] }); } catch (e) { out = String((e as Error).message || e); finish(false); return; }
-    child.stdout?.on("data", (d) => { out += String(d); });
+    child.stdout?.on("data", (d) => { out += String(d); stdout += String(d); });
     child.stderr?.on("data", (d) => { out += String(d); });
     child.once("error", (e) => { out += String(e.message || e); finish(false); });
     child.once("exit", (code) => finish(code === 0));
@@ -132,6 +134,57 @@ async function wake(avd: string, timeoutMs: number): Promise<WakeResult> {
     }
     log("booth", "android phone did not wake in time", { avd, afterSec: Math.round(timeoutMs / 1000) });
     return { ok: false, serial: null, alreadyOn: false, detail: `no boot after ${Math.round(timeoutMs / 1000)} s` };
+  } catch (e) {
+    return { ok: false, serial: null, alreadyOn: false, detail: String((e as Error)?.message || e).slice(0, 120) };
+  }
+}
+
+// ---- The iPhone: a simulator with the same sleep/wake life as the Android
+// phone above. Booting one cold takes ~30–60 s; a booted one answers at once.
+
+/** Is this simulator booted right now? An unknown UDID or a simctl failure
+ *  counts as off (the wake path then tries to boot and reports what simctl says). */
+export async function iosBooted(udid: string): Promise<boolean> {
+  const r = await run("xcrun", ["simctl", "list", "devices", "-j"]);
+  if (!r.ok) return false;
+  try {
+    const parsed = JSON.parse(r.stdout) as { devices?: Record<string, { udid?: string; state?: string }[]> };
+    for (const list of Object.values(parsed.devices ?? {})) for (const d of list) if (d.udid === udid) return d.state === "Booted";
+  } catch { /* not json — treat as off */ }
+  return false;
+}
+
+/** Boot the simulator if it is not booted and wait until iOS is up (or give up
+ *  after `timeoutMs`); on a cold boot also bring the Simulator window up so
+ *  there is something to look at. Two lanes asking at once share one boot.
+ *  Never throws; `serial` carries the UDID. */
+export function wakeIos(udid: string, timeoutMs = 180_000): Promise<WakeResult> {
+  const key = `ios:${udid}`;
+  const cur = inflight.get(key);
+  if (cur) return cur;
+  const p = wakeSim(udid, timeoutMs).finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
+}
+
+async function wakeSim(udid: string, timeoutMs: number): Promise<WakeResult> {
+  const started = Date.now();
+  try {
+    if (await iosBooted(udid)) return { ok: true, serial: udid, alreadyOn: true, detail: "already awake" };
+    log("booth", "iphone simulator starting", { udid });
+    // `bootstatus -b` boots the device when it is off and returns once iOS has
+    // finished booting — the one call that both starts and waits.
+    const r = await run("xcrun", ["simctl", "bootstatus", udid, "-b"], timeoutMs);
+    if (!r.ok && !(await iosBooted(udid))) {
+      const detail = /timed out/.test(r.out) ? `no boot after ${Math.round(timeoutMs / 1000)} s` : (r.out.trim().split("\n").pop() || "simctl could not boot it").slice(0, 120);
+      log("booth", "iphone did not wake", { udid, detail });
+      return { ok: false, serial: null, alreadyOn: false, detail };
+    }
+    // The window, only on a cold boot: re-opening it on every phone grant would
+    // steal Maksym's focus each time a character takes the phone.
+    const open = await run("open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", udid]);
+    log("booth", "iphone awake", { udid, afterSec: Math.round((Date.now() - started) / 1000), window: open.ok ? "up" : `not up: ${open.out.slice(0, 120)}` });
+    return { ok: true, serial: udid, alreadyOn: false, detail: "booted" };
   } catch (e) {
     return { ok: false, serial: null, alreadyOn: false, detail: String((e as Error)?.message || e).slice(0, 120) };
   }

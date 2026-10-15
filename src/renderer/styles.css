@@ -109,7 +109,7 @@ html, body {
 /* Two phones: two booths side by side between Patrick and Squidward (iPhone left, Android right). */
 .booth.pair-left { left: 26.5%; }
 .booth.pair-right { left: 36.5%; }
-/* The Android booth while its emulator is off: dimmed glass, a small "asleep" tag. */
+/* A booth while its phone is off (either one sleeps until a job needs it): dimmed glass, a small "asleep" tag. */
 .booth.asleep .booth-glass { opacity: .55; }
 .booth-tag {
   margin-top: 3px; font-family: "Marker Felt", var(--disp); font-size: clamp(9px, .85vw, 11px); letter-spacing: 1px;

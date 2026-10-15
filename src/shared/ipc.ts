@@ -341,8 +341,9 @@ export interface AddingTown {
 
 /** The Phone Booth as the street draws it: null when the town has no phone. */
 export interface BoothView {
-  /** The phone's name from the town's profile, e.g. "iPhone 16" — or both
-   *  phones when the town also has an Android one: "iPhone 17 + Pixel 8 (asleep)". */
+  /** The phone's name from the town's profile, e.g. "iPhone 16 (asleep)" — or
+   *  both phones when the town also has an Android one: "iPhone 17 + Pixel 8
+   *  (asleep)". Every phone sleeps until a job needs it. */
   name: string;
   /** Who is inside, or null when the booth is empty. */
   holder: CharacterId | null;
@@ -350,11 +351,12 @@ export interface BoothView {
   since: number;
   /** Who is waiting outside the door, in arrival order. */
   queue: CharacterId[];
-  /** The phone is off (Android: emulator not running) — one line for the street, or null. */
+  /** A phone would not wake up — one line for the street, or null. */
   warning: string | null;
   /** One door per phone, iPhone first: who holds it and since when; `asleep`
-   *  marks an Android emulator that is not running. (`holder`/`since` above
-   *  mirror the first busy door, for older callers and fixtures.) */
+   *  marks a phone (simulator or emulator) that is not running — the town wakes
+   *  it when a job needs it. (`holder`/`since` above mirror the first busy
+   *  door, for older callers and fixtures.) */
   doors?: { phone: "ios" | "android"; name: string; holder: CharacterId | null; since: number; asleep: boolean }[];
 }
 
