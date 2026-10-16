@@ -1258,8 +1258,10 @@ export class LaneManager {
     // With a story, the bubble tells it first — Maksym reads the bubble and the
     // panel, nothing else, when he answers.
     const lead = ask.story ? `🤔 ${ask.story}\n\n` : "🤔 ";
+    // The batch's questions are listed in the bubble too, so the chat keeps a
+    // readable record of what was asked even after the panel is answered.
     const head = ask.questions.length > 1
-      ? `${lead}I've got ${ask.questions.length} questions for you — all in one go:`
+      ? `${lead}I've got ${ask.questions.length} questions for you — all in one go:\n${ask.questions.map((q, i) => `${i + 1}. ${q.question}`).join("\n")}`
       : `${lead}${q0 ? q0.question : "I have a question."}`;
     l.conversation.push({ from: "them", text: head, tool: true });
     l.working = false;
