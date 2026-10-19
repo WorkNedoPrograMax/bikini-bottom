@@ -17,6 +17,7 @@ import { setupNote, setupActivity, type LaneSetup, type SetupReport } from "../d
 import { runSetup, setupDue, loadReport } from "./laneSetup";
 import { Switchboard, boothStep, phoneMatch, phoneTarget, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN, type PhoneKey } from "../domain/booth";
 import { wakeAndroid, wakeIos, androidSerial } from "./phone";
+import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../domain/stayInLane";
 import { log } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -74,6 +75,11 @@ const LANE_DISALLOWED_TOOLS = [
   // same SDK path. Characters reach for the first one alphabetically and report
   // Jira as broken, so hide the dead one; the working one stays.
   "mcp__claude_ai_Atlassian__*",
+  // 2026-10-19: one worktree per character. The engine's own "work in a
+  // separate worktree" tool made nested copies inside the lanes (Squid, 7×
+  // in highcap) that the town never sees — see domain/stayInLane.ts. The
+  // PreToolUse hook also refuses the Bash/Agent forms.
+  "EnterWorktree",
 ];
 
 // The EXECUTOR model — every character's base session. Pinned to a full model
@@ -272,6 +278,8 @@ const READ_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "NotebookRead"];
 // and a queued phone command whose job ended before its turn came.
 const DENY_PHONE = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: FORBIDDEN_REASON } } as const;
 const DENY_LEFT = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: LEFT_REASON } } as const;
+// Stay in your lane: a character never makes another worktree (domain/stayInLane.ts).
+const DENY_WORKTREE = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: STRAY_WORKTREE_REASON } } as const;
 // The booth's clock: settle the door every few seconds while anyone is at it
 // (the limitSweep pattern — self-clearing, unref'd, never persisted).
 const BOOTH_TICK_MS = 5_000;
@@ -1194,8 +1202,9 @@ export class LaneManager {
               hooks: [async (input: any) => {
                 const tool = input.tool_name as string;
                 if (readOnly) return READ_TOOLS.includes(tool) ? ALLOW : DENY_READONLY; // look-only wins over bypass
-                if (this.getBypass()) return ALLOW; // changes-on + bypass → anything goes
                 const ti = (input.tool_input || {}) as Record<string, unknown>;
+                if (isStrayWorktree(tool, ti)) return DENY_WORKTREE; // stay in your lane, bypass or not
+                if (this.getBypass()) return ALLOW; // changes-on + bypass → anything goes
                 if (this.isSafe(tool, ti, cwd)) return ALLOW;
                 return DENY_READONLY; // reopened sessions don't do risky ops [ASSUMPTION]
               }],
@@ -1634,6 +1643,7 @@ export class LaneManager {
               + " POINTED-AT ELEMENTS: when a message says Maksym 'pointed at' things (a numbered list, pictures, and a pointed-elements.json with the exact details), treat them as the design brief — find each element in this lane's source, make the change, and say which file you touched."
               + serverNote
               + phoneNote
+              + STAY_IN_LANE_NOTE
               + setupNote(l.setupReport),
           },
           // Load the repo's full setup (CLAUDE.md, skills, /commands, rules,
@@ -1668,6 +1678,13 @@ export class LaneManager {
                 // Our own "ask Maksym" tool is never a permission risk — always allow
                 // it so the question reaches him (even when asking-mode is on).
                 if (toolName.startsWith("mcp__bikini__")) return ALLOW;
+                // Stay in your lane — refused even in bypass mode, like the booth.
+                if (isStrayWorktree(toolName, ti)) {
+                  log("lane", `${id} tried to make another worktree`, { tool: toolName, command: String(ti.command ?? "").slice(0, 120) });
+                  l.conversation.push({ from: "them", text: "The town stopped me making a second workspace — I'll switch branches here in my lane instead.", tool: true });
+                  this.onChange();
+                  return DENY_WORKTREE;
+                }
                 // The Phone Booth comes BEFORE the bypass allow: bypass mode still
                 // refuses what only the town may do to the phone, and still queues.
                 const step = boothStep(toolName, ti, this.phoneIds(), this.getBypass());
