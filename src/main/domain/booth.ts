@@ -1,8 +1,9 @@
 // The Phone Booth: one door PER PHONE, shared in turns, with ONE waiting line.
 // Behind the doors sit the town's test phones: the default one (an iPhone
-// simulator, awake while the town is open) and, when the town has one, an
-// Android emulator that sleeps until a job needs it — the TOWN wakes it, a
-// character never boots anything. Characters build in parallel on their own
+// simulator) and, when the town has one, an Android emulator. Both sleep until
+// a job needs them — the TOWN wakes a phone, a character never boots anything —
+// and a phone nobody has held for 10 minutes goes back to sleep (Bedtime, below;
+// Maksym, 2026-10-21). Characters build in parallel on their own
 // copies; only a command that touches a phone (install, run, drive, Maestro
 // flow, screenshot) walks to the booth. Maksym's routing rule (2026-10-05): take
 // the iPhone if it is free, else the Android phone if it is free, else wait in
@@ -449,6 +450,46 @@ export class Switchboard {
     const mine = this.line.filter((w) => w.id === first.id && (w.want === null || w.want === k));
     this.line = this.line.filter((w) => !mine.includes(w));
     for (const w of mine) w.resolve({ r: "ok", phone: k });
+  }
+}
+
+// 2026-10-21 (Maksym): a phone nobody has used for 10 minutes goes back to
+// sleep — an emulator and a simulator eat memory and fans for nothing while
+// every character is just building. The town puts it to sleep (a character
+// never may) and wakes it again on the next phone command, as always.
+export const DEFAULT_SLEEP_AFTER_MIN = 10;
+
+/** The phones' bedtime clock — PURE like the switchboard (the clock is
+ *  injected). Knows which phones are awake and when each was last held; `due()`
+ *  names the awake phones no character has held for the whole `sleepAfterMin`.
+ *  A held phone's clock stands still (the hold IS the use) and starts when the
+ *  holder lets go — or when the town wakes the phone or finds it awake on open,
+ *  so a phone left on by hand goes to sleep too once it has sat unused that long. */
+export class Bedtime {
+  private lastUsed = new Map<PhoneKey, number>(); // awake phones only: when last held / woken
+  private readonly sleepAfterMs: number;
+
+  constructor(sleepAfterMin: number = DEFAULT_SLEEP_AFTER_MIN, private now: () => number = Date.now) {
+    this.sleepAfterMs = sleepAfterMin * 60_000;
+  }
+
+  /** The town woke this phone, or found it awake: its clock starts now. */
+  awake(k: PhoneKey): void { this.lastUsed.set(k, this.now()); }
+  /** The phone is off (put to sleep, or found off). */
+  asleep(k: PhoneKey): void { this.lastUsed.delete(k); }
+  isAwake(k: PhoneKey): boolean { return this.lastUsed.has(k); }
+  anyAwake(): boolean { return this.lastUsed.size > 0; }
+
+  /** The ticker's job. `held` = the phones some character holds right now:
+   *  their clocks restart; every other awake phone is due once it has gone
+   *  unheld for the whole sleepAfter. Due phones stay due until `asleep()`. */
+  due(held: ReadonlySet<PhoneKey>, now: number = this.now()): PhoneKey[] {
+    const out: PhoneKey[] = [];
+    for (const [k, t] of this.lastUsed) {
+      if (held.has(k)) { this.lastUsed.set(k, now); continue; }
+      if (now - t >= this.sleepAfterMs) out.push(k);
+    }
+    return out;
   }
 }
 

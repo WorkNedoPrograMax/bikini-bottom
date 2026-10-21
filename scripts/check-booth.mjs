@@ -3,7 +3,7 @@
 // after `npm run build`:  node scripts/check-booth.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { phoneMatch, boothStep, wantsAndroid, Booth, Switchboard, phoneTarget, PHONE_ORDER, parseSimctlDevices, commandSegments, FORBIDDEN_REASON, DEFAULT_GRACE_SEC, DEFAULT_MAX_HOLD_MIN } = require("../dist/main/domain/booth.js");
+const { phoneMatch, boothStep, wantsAndroid, Booth, Switchboard, Bedtime, phoneTarget, PHONE_ORDER, parseSimctlDevices, commandSegments, FORBIDDEN_REASON, DEFAULT_GRACE_SEC, DEFAULT_MAX_HOLD_MIN, DEFAULT_SLEEP_AFTER_MIN } = require("../dist/main/domain/booth.js");
 const { normalizeProfile, seedProfile, serializeProfile, normalizeDevice } = require("../dist/main/config/townProfile.js");
 const { emptyTown, fold } = require("../dist/main/domain/snapshot.js");
 
@@ -279,6 +279,29 @@ await tick();
 ok(r3 === "pending", "one phone: the second comer waits");
 sb3.release("squid"); await tick();
 ok(r3 === "ios", "…and gets it when the holder hangs up");
+
+console.log("Bedtime — a phone nobody holds for 10 min goes back to sleep (Maksym, 2026-10-21):");
+let N = 5_000_000;
+const bt = new Bedtime(10, () => N);
+const none = new Set(), iosHeld = new Set(["ios"]);
+ok(DEFAULT_SLEEP_AFTER_MIN === 10, "the default bedtime is 10 min");
+ok(!bt.anyAwake() && bt.due(none, N).length === 0, "nothing awake → nothing due");
+bt.awake("ios"); bt.awake("android");
+ok(bt.isAwake("ios") && bt.isAwake("android") && bt.anyAwake(), "both woken → both awake, the clocks start");
+N += 9 * 60_000 + 59_000;
+ok(bt.due(none, N).length === 0, "9 min 59 s unused: nobody is put to sleep");
+N += 2_000;
+ok(bt.due(iosHeld, N).join(",") === "android", "10 min 1 s: the unheld Android phone is due; the iPhone, held by a character, is not (its clock restarts)");
+N += 10 * 60_000 + 1_000;
+ok(bt.due(none, N).join(",") === "ios,android", "the iPhone is due 10 min after the last tick that saw it held; the Android phone stays due until it is put to sleep");
+bt.asleep("android");
+ok(!bt.isAwake("android") && bt.due(none, N).join(",") === "ios", "put to sleep → no longer awake, no longer due");
+bt.asleep("ios");
+ok(!bt.anyAwake(), "both asleep → the ticker may stop");
+bt.awake("ios"); N += 60_000;
+ok(bt.due(none, N).length === 0 && bt.isAwake("ios"), "woken again → a fresh clock");
+ok(new Bedtime(undefined, () => N).due(none, N).length === 0, "no setting → the default (10 min) and no phones awake");
+ok(normalizeDevice({ kind: "ios-simulator", id: ID, name: "iPhone 17", sleepAfterMin: 25 }).sleepAfterMin === 25 && normalizeDevice({ kind: "ios-simulator", id: ID, name: "iPhone 17", sleepAfterMin: 0 }).sleepAfterMin === undefined && normalizeDevice({ kind: "ios-simulator", id: ID, name: "iPhone 17" }).sleepAfterMin === undefined, "town.json sleepAfterMin is kept when positive, dropped otherwise (the default is 10)");
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");
 process.exit(fails ? 1 : 0);

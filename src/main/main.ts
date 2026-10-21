@@ -124,7 +124,8 @@ async function openTown(projectPath: string): Promise<Town> {
   // Android phone both sleep until a job aims a command at one, then the town
   // wakes it from the lane hook (Maksym, 2026-10-15: no simulator at app start,
   // only on first real use). Best effort, never blocks the town, never boots
-  // or shuts anything down.
+  // or shuts anything down here — a phone found awake starts its bedtime clock
+  // and the lane engine puts it to sleep after 10 unused minutes (2026-10-21).
   if (profile.device) void checkPhones(profile.device, profile.android ?? null, townLanes);
   // Real-terminal characters: the actual `claude` CLI in the lane worktree.
   // onData/onExit stream straight to the renderer's xterm. (TERMINAL_IDS is empty.)

@@ -15,8 +15,8 @@ import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelW
 import { shouldLand, type Landing, type DeviceSpec } from "../config/townProfile";
 import { setupNote, setupActivity, type LaneSetup, type SetupReport } from "../domain/laneSetup";
 import { runSetup, setupDue, loadReport } from "./laneSetup";
-import { Switchboard, boothStep, phoneMatch, phoneTarget, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN, type PhoneKey } from "../domain/booth";
-import { wakeAndroid, wakeIos, androidSerial } from "./phone";
+import { Switchboard, Bedtime, boothStep, phoneMatch, phoneTarget, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN, DEFAULT_SLEEP_AFTER_MIN, type PhoneKey } from "../domain/booth";
+import { wakeAndroid, wakeIos, sleepAndroid, sleepIos, androidSerial } from "./phone";
 import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../domain/stayInLane";
 import { log } from "../log";
 
@@ -283,6 +283,8 @@ const DENY_WORKTREE = { hookSpecificOutput: { hookEventName: "PreToolUse", permi
 // The booth's clock: settle the door every few seconds while anyone is at it
 // (the limitSweep pattern — self-clearing, unref'd, never persisted).
 const BOOTH_TICK_MS = 5_000;
+/** The bedtime clock looks every half minute: coarse is fine for a 10-min nap. */
+const NAP_TICK_MS = 30_000;
 
 /** A past conversation for a Character, kept so it can be reopened. */
 interface ArchivedSession {
@@ -477,6 +479,7 @@ export class LaneManager {
   ) {
     this.sessionsFile = path.join(projectPath, ".bikini", "sessions.json");
     this.board = new Switchboard(this.phoneKeys(), { graceSec: device?.graceSec, maxHoldMin: device?.maxHoldMin });
+    this.bedtime = new Bedtime(device?.sleepAfterMin);
     if (fuelOpts.fuelFile) {
       try {
         const raw = JSON.parse(readFileSync(fuelOpts.fuelFile, "utf8"));
@@ -506,10 +509,12 @@ export class LaneManager {
   private boothTicker: ReturnType<typeof setInterval> | null = null;
   /** "The test phone did not start — check the iPhone 17 in Simulator", or null. */
   private phoneWarning: string | null = null;
-  /** Whether each phone was last seen awake (the street's "(asleep)" tag). Both
-   *  sleep until a job needs them; the town checks on open and after each wake. */
-  private androidOn = false;
-  private iosOn = false;
+  /** Which phone is awake and since when it has sat unheld (the street's
+   *  "(asleep)" tag, and the bedtime). Both sleep until a job needs them; the
+   *  town checks on open and after each wake, and puts an unused one to sleep. */
+  private bedtime: Bedtime;
+  private napTicker: ReturnType<typeof setInterval> | null = null;
+  private napping = new Set<PhoneKey>(); // shutdowns running right now
   /** The phones this town has, iPhone first (Maksym's preference order). */
   private phoneKeys(): PhoneKey[] {
     const out: PhoneKey[] = [];
@@ -526,7 +531,7 @@ export class LaneManager {
   boothView(): { name: string; holder: CharacterId | null; since: number; queue: CharacterId[]; warning: string | null; doors: { phone: PhoneKey; name: string; holder: CharacterId | null; since: number; asleep: boolean }[] } | null {
     if (!this.device) return null;
     const v = this.board.view();
-    const awake = (k: PhoneKey): boolean => (k === "android" ? this.androidOn : this.iosOn);
+    const awake = (k: PhoneKey): boolean => this.bedtime.isAwake(k);
     const doors = v.doors.map((d) => {
       const spec = this.specFor(d.phone)!;
       return { phone: d.phone, name: spec.name, holder: d.holder as CharacterId | null, since: d.since, asleep: !awake(d.phone) };
@@ -540,9 +545,40 @@ export class LaneManager {
   /** The town found a phone off or broken — say so on the street (null clears it). */
   setPhoneWarning(text: string | null): void { this.phoneWarning = text; this.onChange(); }
   /** The town checked the Android phone (on open, or after waking it). */
-  setAndroidOn(on: boolean): void { if (this.androidOn !== on) { this.androidOn = on; this.onChange(); } }
+  setAndroidOn(on: boolean): void { this.setPhoneOn("android", on); }
   /** The town checked the iPhone simulator (on open, or after waking it). */
-  setIosOn(on: boolean): void { if (this.iosOn !== on) { this.iosOn = on; this.onChange(); } }
+  setIosOn(on: boolean): void { this.setPhoneOn("ios", on); }
+  /** A phone was seen awake (its bedtime clock starts, the ticker runs) or off. */
+  private setPhoneOn(k: PhoneKey, on: boolean): void {
+    if (this.bedtime.isAwake(k) === on) return;
+    if (on) { this.bedtime.awake(k); this.armNapTicker(); } else this.bedtime.asleep(k);
+    this.onChange();
+  }
+  /** The bedtime clock: while any phone is awake, every half minute ask which
+   *  awake phone no character has held for `sleepAfterMin` and put it to sleep.
+   *  The town does it (a character never may), so the street's "(asleep)" tag
+   *  and the next wake stay in step. Clears itself once every phone sleeps. */
+  private armNapTicker(): void {
+    if (this.napTicker) return;
+    this.napTicker = setInterval(() => {
+      const held = new Set<PhoneKey>(this.board.view().doors.filter((d) => d.holder).map((d) => d.phone));
+      for (const k of this.bedtime.due(held, Date.now())) void this.putToSleep(k);
+      if (!this.bedtime.anyAwake() && this.napTicker) { clearInterval(this.napTicker); this.napTicker = null; }
+    }, NAP_TICK_MS);
+    this.napTicker.unref?.();
+  }
+  private async putToSleep(k: PhoneKey): Promise<void> {
+    const spec = this.specFor(k);
+    if (!spec || this.napping.has(k)) return;
+    this.napping.add(k);
+    const mins = this.device?.sleepAfterMin ?? DEFAULT_SLEEP_AFTER_MIN;
+    try {
+      log("booth", `the ${spec.name} sat unused for ${mins} min — putting it to sleep`, { phone: k, id: spec.id });
+      const r = k === "android" ? await sleepAndroid(spec.id) : await sleepIos(spec.id);
+      if (r.ok) { this.setPhoneOn(k, false); log("booth", `the ${spec.name} is asleep`, { phone: k, detail: r.detail }); }
+      else { this.bedtime.awake(k); log("booth", `the ${spec.name} stays up — trying again in ${mins} min`, { phone: k, detail: r.detail }); }
+    } finally { this.napping.delete(k); }
+  }
   /** The town's Android phone: the second phone, or the default one when that
    *  is itself an emulator. Null when the town has no Android phone. */
   private androidPhone(): DeviceSpec | null {
@@ -1620,8 +1656,8 @@ export class LaneManager {
     const twoPhones = !!(iosSpec && andSpec);
     const phoneNote = dev
       ? (twoPhones
-        ? ` THE PHONE BOOTH: this town has two test phones — the ${iosSpec!.name} (iPhone simulator, id ${iosSpec!.id}) and the ${andSpec!.name} (Android emulator, AVD "${andSpec!.id}"); both sleep until needed — the town wakes the one you get for your first phone command (a minute or so cold), you never boot anything. Every command that installs, runs, or drives the app on a device walks through the booth: you get the ${iosSpec!.name} if it is free, else the ${andSpec!.name} if it is free, else you wait in line for whichever frees first — the wait happens INSIDE your command (it can take minutes; that is normal, not a hang). Always name the phone in the command (\`-d <id>\`, \`--device <id>\`, Maestro \`device_id\`). If the phone you named is busy and the other is free, the command is refused ONCE with the other phone's address — run it again aimed there and stay on that phone; your Flutter app runs on both, Maestro flows just need that platform's appId. If a test truly must run on the iPhone, say so (\`--platform ios\` for Maestro, or xcrun simctl commands) and you will wait for it; anything \`adb\`, an AVD name, an emulator serial or \`-d android\` waits for the Android phone. STRICT: a phone has ONE holder — while you hold it nobody else's command touches it (so your build stays put), and you hold it until you call \`phone_done\`, go quiet for ${dev.graceSec ?? 600} s while someone waits, or ${dev.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min pass. So: install → run → flow → screenshot in one go, then call \`phone_done\` the moment you are finished with the phone. If you ever lost the phone mid-job the next phone command is refused once with "reinstall your build first" — do that. Build, analyse, run unit tests and edit on your own copy as usual — none of that needs a phone. Never shut a phone down, wipe it, or boot another one; if a phone looks broken, tell Maksym.`
-        : ` THE PHONE BOOTH: this town has ONE test phone, the ${dev.name} (${dev.kind}, id ${dev.id}), asleep until needed — the town wakes it for your first phone command (a minute or so cold), you never boot anything. Every command that installs, runs, or drives the app on a device must target exactly this phone (\`-d ${dev.id}\`, \`--device ${dev.id}\`, \`device_id: "${dev.id}"\`) and walks through the booth: if another character is testing, your command waits its turn INSIDE the call (minutes are normal, not a hang). STRICT: the phone has ONE holder — while you hold it nobody else's command touches it, and you hold it until you call \`phone_done\`, go quiet for ${dev.graceSec ?? 600} s while someone waits, or ${dev.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min pass. So: install → run → flow → screenshot in one go, then call \`phone_done\` the moment you are finished. If you ever lost the phone mid-job the next phone command is refused once with "reinstall your build first" — do that. Build, analyse, run unit tests and edit on your own copy as usual — none of that needs the phone. Never shut the phone down, wipe it, or boot another one; if it looks broken, tell Maksym.`)
+        ? ` THE PHONE BOOTH: this town has two test phones — the ${iosSpec!.name} (iPhone simulator, id ${iosSpec!.id}) and the ${andSpec!.name} (Android emulator, AVD "${andSpec!.id}"); both sleep until needed — the town wakes the one you get for your first phone command (a minute or so cold), you never boot anything; a phone nobody has held for ${dev.sleepAfterMin ?? DEFAULT_SLEEP_AFTER_MIN} min goes back to sleep by itself and your next phone command wakes it again. Every command that installs, runs, or drives the app on a device walks through the booth: you get the ${iosSpec!.name} if it is free, else the ${andSpec!.name} if it is free, else you wait in line for whichever frees first — the wait happens INSIDE your command (it can take minutes; that is normal, not a hang). Always name the phone in the command (\`-d <id>\`, \`--device <id>\`, Maestro \`device_id\`). If the phone you named is busy and the other is free, the command is refused ONCE with the other phone's address — run it again aimed there and stay on that phone; your Flutter app runs on both, Maestro flows just need that platform's appId. If a test truly must run on the iPhone, say so (\`--platform ios\` for Maestro, or xcrun simctl commands) and you will wait for it; anything \`adb\`, an AVD name, an emulator serial or \`-d android\` waits for the Android phone. STRICT: a phone has ONE holder — while you hold it nobody else's command touches it (so your build stays put), and you hold it until you call \`phone_done\`, go quiet for ${dev.graceSec ?? 600} s while someone waits, or ${dev.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min pass. So: install → run → flow → screenshot in one go, then call \`phone_done\` the moment you are finished with the phone. If you ever lost the phone mid-job the next phone command is refused once with "reinstall your build first" — do that. Build, analyse, run unit tests and edit on your own copy as usual — none of that needs a phone. Never shut a phone down, wipe it, or boot another one; if a phone looks broken, tell Maksym.`
+        : ` THE PHONE BOOTH: this town has ONE test phone, the ${dev.name} (${dev.kind}, id ${dev.id}), asleep until needed — the town wakes it for your first phone command (a minute or so cold), you never boot anything; after ${dev.sleepAfterMin ?? DEFAULT_SLEEP_AFTER_MIN} min with nobody holding it the phone goes back to sleep by itself and your next phone command wakes it again. Every command that installs, runs, or drives the app on a device must target exactly this phone (\`-d ${dev.id}\`, \`--device ${dev.id}\`, \`device_id: "${dev.id}"\`) and walks through the booth: if another character is testing, your command waits its turn INSIDE the call (minutes are normal, not a hang). STRICT: the phone has ONE holder — while you hold it nobody else's command touches it, and you hold it until you call \`phone_done\`, go quiet for ${dev.graceSec ?? 600} s while someone waits, or ${dev.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN} min pass. So: install → run → flow → screenshot in one go, then call \`phone_done\` the moment you are finished. If you ever lost the phone mid-job the next phone command is refused once with "reinstall your build first" — do that. Build, analyse, run unit tests and edit on your own copy as usual — none of that needs the phone. Never shut the phone down, wipe it, or boot another one; if it looks broken, tell Maksym.`)
       : "";
 
     try {

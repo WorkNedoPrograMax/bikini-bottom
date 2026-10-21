@@ -3,7 +3,11 @@
 // only on first real use). The TOWN wakes a phone (a character may never boot a
 // device, see domain/booth.ts): the lane hook calls wakeAndroid() / wakeIos()
 // while the character holds the booth, and the command it was about to run goes
-// ahead once the phone says it has booted. Nothing here ever shuts a phone down.
+// ahead once the phone says it has booted. The town also puts a phone back to
+// sleep (sleepAndroid() / sleepIos()) once nobody has held it for a while
+// (Maksym, 2026-10-21: 10 minutes) — the lane engine's bedtime ticker decides
+// when; a character never may. A wake that arrives mid-shutdown waits for the
+// shutdown and then boots the phone again.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import os from "node:os";
@@ -88,8 +92,12 @@ async function bootCompleted(serial: string): Promise<boolean> {
 }
 
 export type WakeResult = { ok: boolean; serial: string | null; alreadyOn: boolean; detail: string };
+export type SleepResult = { ok: boolean; alreadyOff: boolean; detail: string };
 
 const inflight = new Map<string, Promise<WakeResult>>();
+/** Shutdowns in flight, keyed like `inflight`. A wake waits for one; a sleep
+ *  never starts while a wake runs (the phone was just woken for someone). */
+const napping = new Map<string, Promise<SleepResult>>();
 
 /** Wake the AVD if it is not running and wait until Android reports the boot
  *  complete (or give up after `timeoutMs`). Two lanes asking at once share one
@@ -105,6 +113,7 @@ export function wakeAndroid(avd: string, timeoutMs = 180_000): Promise<WakeResul
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 async function wake(avd: string, timeoutMs: number): Promise<WakeResult> {
+  await napping.get(avd); // a shutdown in progress finishes first; then we boot again
   const started = Date.now();
   try {
     const serial = await androidSerial(avd);
@@ -139,19 +148,98 @@ async function wake(avd: string, timeoutMs: number): Promise<WakeResult> {
   }
 }
 
+/** Put the AVD to sleep: `adb emu kill` on its serial (the emulator saves its
+ *  quick-boot snapshot on the way out, so the next wake is the fast path), then
+ *  wait until adb no longer lists it (or give up after `timeoutMs`). Never throws. */
+export function sleepAndroid(avd: string, timeoutMs = 60_000): Promise<SleepResult> {
+  const cur = napping.get(avd);
+  if (cur) return cur;
+  const p = nap(avd, timeoutMs).finally(() => napping.delete(avd));
+  napping.set(avd, p);
+  return p;
+}
+
+async function nap(avd: string, timeoutMs: number): Promise<SleepResult> {
+  const started = Date.now();
+  try {
+    const waking = inflight.get(avd);
+    if (waking) { await waking; return { ok: false, alreadyOff: false, detail: "it was being woken for someone" }; }
+    const serial = await androidSerial(avd);
+    if (!serial) return { ok: true, alreadyOff: true, detail: "already off" };
+    const r = await run(adbBin(), ["-s", serial, "emu", "kill"]);
+    // Settle on what adb SEES, not on the kill's exit code (some emulator
+    // builds answer the console goodbye with a non-zero status).
+    while (Date.now() - started < timeoutMs) {
+      await sleep(2_000);
+      if (!(await androidSerial(avd))) {
+        log("booth", "android phone asleep", { avd, serial, afterSec: Math.round((Date.now() - started) / 1000) });
+        return { ok: true, alreadyOff: false, detail: "shut down" };
+      }
+    }
+    const detail = `still running after ${Math.round(timeoutMs / 1000)} s (${(r.out.trim().split("\n").pop() || "no answer from adb").slice(0, 80)})`;
+    log("booth", "android phone would not sleep", { avd, serial, detail });
+    return { ok: false, alreadyOff: false, detail };
+  } catch (e) {
+    return { ok: false, alreadyOff: false, detail: String((e as Error)?.message || e).slice(0, 120) };
+  }
+}
+
 // ---- The iPhone: a simulator with the same sleep/wake life as the Android
 // phone above. Booting one cold takes ~30–60 s; a booted one answers at once.
 
-/** Is this simulator booted right now? An unknown UDID or a simctl failure
- *  counts as off (the wake path then tries to boot and reports what simctl says). */
-export async function iosBooted(udid: string): Promise<boolean> {
+/** The UDIDs simctl reports as Booted right now. A simctl failure or bad JSON
+ *  reads as "none booted" (a wake then tries to boot and reports what simctl says). */
+async function bootedSims(): Promise<Set<string>> {
+  const out = new Set<string>();
   const r = await run("xcrun", ["simctl", "list", "devices", "-j"]);
-  if (!r.ok) return false;
+  if (!r.ok) return out;
   try {
     const parsed = JSON.parse(r.stdout) as { devices?: Record<string, { udid?: string; state?: string }[]> };
-    for (const list of Object.values(parsed.devices ?? {})) for (const d of list) if (d.udid === udid) return d.state === "Booted";
-  } catch { /* not json — treat as off */ }
-  return false;
+    for (const list of Object.values(parsed.devices ?? {})) for (const d of list) if (d.udid && d.state === "Booted") out.add(d.udid);
+  } catch { /* not json — treat as none */ }
+  return out;
+}
+
+/** Is this simulator booted right now? An unknown UDID or a simctl failure
+ *  counts as off. */
+export async function iosBooted(udid: string): Promise<boolean> {
+  return (await bootedSims()).has(udid);
+}
+
+/** Shut the simulator down (`simctl shutdown`) and, when no simulator is left
+ *  booted, close the Simulator window too — otherwise it would sit there
+ *  showing a dark phone. A simulator Maksym booted by hand keeps the window.
+ *  Never throws. */
+export function sleepIos(udid: string, timeoutMs = 60_000): Promise<SleepResult> {
+  const key = `ios:${udid}`;
+  const cur = napping.get(key);
+  if (cur) return cur;
+  const p = napSim(udid, timeoutMs).finally(() => napping.delete(key));
+  napping.set(key, p);
+  return p;
+}
+
+async function napSim(udid: string, timeoutMs: number): Promise<SleepResult> {
+  const started = Date.now();
+  try {
+    const waking = inflight.get(`ios:${udid}`);
+    if (waking) { await waking; return { ok: false, alreadyOff: false, detail: "it was being woken for someone" }; }
+    if (!(await iosBooted(udid))) return { ok: true, alreadyOff: true, detail: "already off" };
+    const r = await run("xcrun", ["simctl", "shutdown", udid], timeoutMs);
+    const left = await bootedSims();
+    if (left.has(udid)) {
+      const detail = (/timed out/.test(r.out) ? `no shutdown after ${Math.round(timeoutMs / 1000)} s` : (r.out.trim().split("\n").pop() || "simctl could not shut it down")).slice(0, 120);
+      log("booth", "iphone would not sleep", { udid, detail });
+      return { ok: false, alreadyOff: false, detail };
+    }
+    // SIGTERM, not AppleScript: an Electron app sending Apple Events would pop
+    // macOS's "wants to control Simulator" consent dialog the first time.
+    const window = left.size ? "left up (another simulator is booted)" : ((await run("pkill", ["-x", "Simulator"])).ok ? "closed" : "was not open");
+    log("booth", "iphone asleep", { udid, afterSec: Math.round((Date.now() - started) / 1000), window });
+    return { ok: true, alreadyOff: false, detail: "shut down" };
+  } catch (e) {
+    return { ok: false, alreadyOff: false, detail: String((e as Error)?.message || e).slice(0, 120) };
+  }
 }
 
 /** Boot the simulator if it is not booted and wait until iOS is up (or give up
@@ -168,6 +256,7 @@ export function wakeIos(udid: string, timeoutMs = 180_000): Promise<WakeResult> 
 }
 
 async function wakeSim(udid: string, timeoutMs: number): Promise<WakeResult> {
+  await napping.get(`ios:${udid}`); // a shutdown in progress finishes first; then we boot again
   const started = Date.now();
   try {
     if (await iosBooted(udid)) return { ok: true, serial: udid, alreadyOn: true, detail: "already awake" };

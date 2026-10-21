@@ -29,10 +29,14 @@ export interface DeviceSpec {
   id: string;
   /** What the street and the character call it, e.g. "iPhone 16". */
   name: string;
-  /** Seconds the holder keeps the phone between two phone commands (default 60). */
+  /** Seconds the holder keeps the phone between two phone commands (default 600). */
   graceSec?: number;
   /** Minutes after which the phone is handed over regardless (default 30). */
   maxHoldMin?: number;
+  /** Minutes a phone may sit awake with no character holding it before the
+   *  town puts it back to sleep (default 10). Read from the default phone and
+   *  applied to both. */
+  sleepAfterMin?: number;
 }
 
 export interface TownProfile {
@@ -45,8 +49,8 @@ export interface TownProfile {
   lanes?: Partial<Record<CharacterId, LaneSpec>>;
   /** Optional extra sentence for the system prompt (future projects with servers). */
   servers?: string;
-  /** The test phone (the booth), when this town has one. The default phone:
-   *  awake while the town is open. */
+  /** The test phone (the booth), when this town has one. Asleep until a job
+   *  needs it; back to sleep after `sleepAfterMin` minutes unused. */
   device?: DeviceSpec;
   /** The town's Android phone, when it has one besides `device`: an emulator
    *  that sleeps until a job aims a command at it, then the town wakes it. It
@@ -134,6 +138,7 @@ export function normalizeDevice(raw: unknown): DeviceSpec | null {
   const out: DeviceSpec = { kind: d.kind, id: d.id.trim(), name: d.name.trim() };
   if (typeof d.graceSec === "number" && isFinite(d.graceSec) && d.graceSec > 0) out.graceSec = d.graceSec;
   if (typeof d.maxHoldMin === "number" && isFinite(d.maxHoldMin) && d.maxHoldMin > 0) out.maxHoldMin = d.maxHoldMin;
+  if (typeof d.sleepAfterMin === "number" && isFinite(d.sleepAfterMin) && d.sleepAfterMin > 0) out.sleepAfterMin = d.sleepAfterMin;
   return out;
 }
 
