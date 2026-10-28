@@ -5,7 +5,9 @@
 import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import path from "node:path";
+import os from "node:os";
 import { readFileSync, promises as fs } from "node:fs";
+import { nativeImage } from "electron";
 import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats, Fuel, Gauge } from "../../shared/ipc";
 import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
@@ -201,6 +203,63 @@ function fileNames(atts?: Attachment[]): string[] | undefined {
   return files.length ? files.map((a) => a.name) : undefined;
 }
 
+// ───────────── Pictures a character makes FOR Maksym ─────────────
+// 2026-10-28: Squidward wrote "three pictures are in the Claude deliverables
+// folder on your Desktop" and the chat showed only words. Maksym should never
+// go hunting for a file a character made for him: any picture saved into
+// ~/Desktop/claude-deliverables/ during the turn, or named by its full path in
+// a reply, rides along inside the bubble (same `images` the renderer already
+// draws for his own attachments). Thumbnails are shrunk so a dozen phone
+// screenshots don't bloat the persisted chat or every snapshot.
+const DELIVERABLES_DIR = path.join(os.homedir(), "Desktop", "claude-deliverables");
+const PICTURE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
+/** Absolute or ~-paths ending in a picture extension, as written in prose. */
+const PICTURE_PATH_RE = /(?:~|\/)[^\s"'`()\[\]<>]+?\.(?:png|jpe?g|gif|webp)\b/gi;
+const PICTURE_MAX_PER_BUBBLE = 8;
+const PICTURE_MAX_BYTES = 25 * 1024 * 1024;
+const PICTURE_THUMB_WIDTH = 720;
+
+/** Picture files Maksym was handed this turn: new in the deliverables folder
+ *  (two levels deep) since `sinceMs`, plus any path named in `text`. Newest last. */
+export async function findPictures(sinceMs: number, text: string): Promise<{ file: string; mtime: number }[]> {
+  const found = new Map<string, number>();
+  const consider = async (file: string) => {
+    if (!PICTURE_EXT_RE.test(file) || found.has(file)) return;
+    try {
+      const st = await fs.stat(file);
+      if (st.isFile() && st.size > 0 && st.size <= PICTURE_MAX_BYTES) found.set(file, st.mtimeMs);
+    } catch { /* not there */ }
+  };
+  const walk = async (dir: string, depth: number) => {
+    let entries: import("node:fs").Dirent[];
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { if (depth > 0) await walk(full, depth - 1); continue; }
+      if (!PICTURE_EXT_RE.test(e.name)) continue;
+      try { const st = await fs.stat(full); if (st.mtimeMs >= sinceMs - 2000 && st.size > 0 && st.size <= PICTURE_MAX_BYTES) found.set(full, st.mtimeMs); } catch { /* raced */ }
+    }
+  };
+  await walk(DELIVERABLES_DIR, 1);
+  for (const m of text.match(PICTURE_PATH_RE) || []) {
+    const raw = m.startsWith("~") ? path.join(os.homedir(), m.slice(1)) : m;
+    await consider(raw);
+  }
+  return [...found].map(([file, mtime]) => ({ file, mtime })).sort((a, b) => a.mtime - b.mtime);
+}
+
+/** A picture file as a shrunk data: URL for the bubble (JPEG ≤720 px wide), or
+ *  null when Electron can't decode it. */
+export function pictureThumb(file: string): string | null {
+  try {
+    let img = nativeImage.createFromPath(file);
+    if (img.isEmpty()) return null;
+    if (img.getSize().width > PICTURE_THUMB_WIDTH) img = img.resize({ width: PICTURE_THUMB_WIDTH });
+    return `data:image/jpeg;base64,${img.toJPEG(82).toString("base64")}`;
+  } catch { return null; }
+}
+
 const WATCHDOG_MS = 2_700_000; // 45 min of TRUE silence → BURNED (AD-10). Very
 // generous: real dev work (long reviews, test suites, sub-agents thinking for a
 // long stretch) legitimately goes quiet. Any streamed output resets this clock.
@@ -388,6 +447,12 @@ interface Lane {
   // started (packages, generated code, copied secrets). Runtime only; the town
   // keeps .bikini/setup/<id>.json so a relaunch re-reads it.
   setupReport: SetupReport | null;
+  /** Epoch ms the current turn's message was sent — pictures newer than this
+   *  in the deliverables folder are "made for Maksym this turn". */
+  turnStartedAt: number;
+  /** Pictures already shown in a bubble this job (path@mtime), so a reply that
+   *  names the same file twice shows it once. */
+  shownPictures: Set<string>;
 }
 
 /** Adoption support (Scout & Runner): a character labels an existing lane.
@@ -713,6 +778,7 @@ export class LaneManager {
         limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null,
         note: cur?.note ?? null, noteAt: cur?.noteAt ?? 0,
         booth: null, phone: null, phoneLost: null, setupReport: null,
+        turnStartedAt: Date.now(), shownPictures: new Set(),
       }).get(id)!;
       // Closed the app while waiting out a usage limit? Keep waiting — and keep
       // the promise to pick up by ourselves when it resets.
@@ -981,6 +1047,7 @@ export class LaneManager {
     // finished a prior task) — otherwise it instantly shows a stale "no update for
     // 110s" the moment you send, which looks stuck but isn't.
     l.beatAt = Date.now();
+    l.turnStartedAt = Date.now();
     l.activity = "getting started…";
     // Turn attachments into image content blocks (inline vision) + saved files
     // (referenced by path so the character opens them with its tools — works for
@@ -1294,11 +1361,35 @@ export class LaneManager {
     resolve(allow ? ALLOW : DENY);
   }
 
+  /** The pictures this character made for Maksym that he has not seen yet —
+   *  as bubble thumbnails — and mark them shown. Undefined when there are none. */
+  private async picturesFor(l: Lane, text: string): Promise<string[] | undefined> {
+    let fresh: { file: string; mtime: number }[];
+    try { fresh = (await findPictures(l.turnStartedAt, text)).filter((p) => !l.shownPictures.has(`${p.file}@${p.mtime}`)); }
+    catch { return undefined; }
+    if (!fresh.length) return undefined;
+    const out: string[] = [];
+    for (const p of fresh.slice(-PICTURE_MAX_PER_BUBBLE)) {
+      l.shownPictures.add(`${p.file}@${p.mtime}`);
+      const url = pictureThumb(p.file);
+      if (url) out.push(url);
+    }
+    if (out.length) log("lane", "pictures shown", { count: out.length, files: fresh.slice(-PICTURE_MAX_PER_BUBBLE).map((p) => path.basename(p.file)) });
+    return out.length ? out : undefined;
+  }
+
+  /** At a turn's end: any picture made this turn that no bubble carried yet gets
+   *  its own "here are the pictures" bubble, so nothing made for Maksym hides. */
+  private async flushPictures(l: Lane): Promise<void> {
+    const images = await this.picturesFor(l, "");
+    if (images) l.conversation.push({ from: "them", text: images.length === 1 ? "📸 Here's the picture I made for you:" : `📸 Here are the ${images.length} pictures I made for you:`, images });
+  }
+
   // The Character's `ask_maksym` tool called in. Pause it (Calling), show the
   // question with clickable options, and WAIT for Maksym's answer. Resolves to
   // the answer text, which becomes the tool's result (the model reads it and
   // continues) — so a question is a clean round-trip, not a failed tool.
-  private promptChoice(id: CharacterId, ask: AskChoice): Promise<string> {
+  private async promptChoice(id: CharacterId, ask: AskChoice): Promise<string> {
     const l = this.lane(id);
     const q0 = ask.questions[0];
     // One question → its text in the bubble (the option buttons follow). A
@@ -1311,7 +1402,9 @@ export class LaneManager {
     const head = ask.questions.length > 1
       ? `${lead}I've got ${ask.questions.length} questions for you — all in one go:\n${ask.questions.map((q, i) => `${i + 1}. ${q.question}`).join("\n")}`
       : `${lead}${q0 ? q0.question : "I have a question."}`;
-    l.conversation.push({ from: "them", text: head, tool: true });
+    // "Having seen the pictures…" — the pictures ride in the question bubble.
+    const images = await this.picturesFor(l, `${ask.story || ""}\n${ask.questions.map((q) => q.question).join("\n")}`);
+    l.conversation.push({ from: "them", text: head, tool: true, images });
     l.working = false;
     l.stats.asks++;
     this.setPhase(l, "waiting");
@@ -1675,6 +1768,7 @@ export class LaneManager {
             preset: "claude_code",
             append: voiceFor(id) + "\n\n" + "If you need Maksym to decide, choose, approve, or answer ANYTHING before you can correctly continue, you MUST call the `ask_maksym` tool and WAIT — it blocks until he actually replies (he taps an option or types his own answer). Never write a question only in prose and then keep going, and NEVER assume, invent, guess, or imagine his answer. Do not say you have 'his decisions', 'as he decided', or 'per your call' unless an `ask_maksym` answer really came back to you this turn. If the answer would change WHAT you build, ask via `ask_maksym` and wait BEFORE building anything; if it's a minor call, make a sensible choice and note it rather than blocking."
               + " HOW to ask — Maksym is one person running several of you at once, and every question stops him and rings his phone. So: (1) BATCH. Finish the step you're on, gather EVERY open question, and ask them together in ONE `ask_maksym` call using the `questions` array — never one question now and another ten minutes later. Natural batching points: after planning, after a design walkthrough, before opening a PR. (2) Progress is NOT a question. 'Fixed it', 'Deployed to staging', 'Done — take a look' go in your normal reply; never route them through `ask_maksym`. (3) Prefer deciding small things yourself and saying what you chose. The tool enforces (1) and (2): a lone follow-up question right after his last answer, or a question whose options are all acknowledgments, is bounced back to you — that means keep working and batch, not stop."
+              + " PICTURES FOR MAKSYM: any picture (png, jpg, gif, webp) you save into ~/Desktop/claude-deliverables/ during a turn, or name by its full path in a reply, is shown to him INSIDE the chat by itself, right in the bubble — so write 'here are the pictures' and say in one plain sentence what each one shows; never send him to a folder or a file name to go and look."
               + " KEEP MAKSYM POSTED: after every meaningful step or phase change, call `post_status` with ONE plain sentence about where you are (what just happened → what's next) — it never waits, and it is NOT a substitute for `ask_maksym`: anything you need him to decide still goes through `ask_maksym`."
               + " POINTED-AT ELEMENTS: when a message says Maksym 'pointed at' things (a numbered list, pictures, and a pointed-elements.json with the exact details), treat them as the design brief — find each element in this lane's source, make the change, and say which file you touched."
               + serverNote
@@ -1945,7 +2039,7 @@ export class LaneManager {
           if (au) { const c = (au.input_tokens || 0) + (au.cache_read_input_tokens || 0) + (au.cache_creation_input_tokens || 0); if (c > 0) l.lastCallCtx = c; }
           for (const block of msg.message.content) {
             if (block.type === "text" && block.text.trim()) {
-              l.conversation.push({ from: "them", text: block.text.trim() });
+              l.conversation.push({ from: "them", text: block.text.trim(), images: await this.picturesFor(l, block.text) });
               l.activity = "writing a reply…";
               // "You've hit your session limit · resets 1:40pm" arrives as plain
               // text before the error result — read the reset clock from it.
@@ -2049,6 +2143,7 @@ export class LaneManager {
             return;
           }
           l.limitSeen = null; // a limit mention that did NOT end the turn (e.g. a helper's) is not ours
+          await this.flushPictures(l);
           this.maybeNudge(id, ctx);
           this.persist(); // save progress (survives restart)
           // If more messages appear outstanding OR helpers are still running,

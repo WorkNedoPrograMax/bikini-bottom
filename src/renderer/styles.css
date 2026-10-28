@@ -522,7 +522,10 @@ html, body {
 .work-card.drag { outline: 3px dashed var(--accent, #4fb0a0); outline-offset: -6px; }
 /* images inside a sent chat bubble */
 .msg-imgs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
-.msg-img { max-width: 180px; max-height: 180px; border-radius: 8px; display: block; }
+.msg-img { max-width: 240px; max-height: 320px; border-radius: 8px; display: block; cursor: zoom-in; }
+/* a bubble picture shown big: dark sheet over the town, click or Esc closes */
+.picture-big { position: fixed; inset: 0; z-index: 1000; background: rgba(10, 30, 40, 0.86); display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
+.picture-big img { max-width: 94vw; max-height: 94vh; border-radius: 10px; box-shadow: 0 8px 40px rgba(0,0,0,0.6); background: #fff; }
 /* a non-image file attachment: a named chip (in the pending strip and in bubbles) */
 .attach-file {
   position: relative; display: inline-flex; align-items: center; gap: 6px;
