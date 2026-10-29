@@ -15,9 +15,13 @@ export interface TgHandlers {
   onTap: (data: string) => void | Promise<void>;
   /** A slash command, split into name (no slash) and the rest. */
   onCommand: (cmd: string, args: string) => void | Promise<void>;
-  /** Any other free-text message (a typed answer or a job body). */
-  onText: (text: string) => void | Promise<void>;
+  /** Any other free-text message (a typed answer, a job body, or a swipe-reply
+   *  to an earlier message). `msgId` is this message's own id (so it can be
+   *  replied to later too); `replyTo` is the id of the message it replies to. */
+  onText: (text: string, ctx: TgTextCtx) => void | Promise<void>;
 }
+
+export type TgTextCtx = { msgId: number | null; replyTo: number | null };
 
 const API = "https://api.telegram.org/bot";
 
@@ -61,16 +65,20 @@ export class TelegramBridge {
 
   /** Send a long body as PLAIN text (no HTML, so nothing can break formatting),
    *  auto-split into <=4096-char chunks — used for full character replies. */
-  async sendLong(text: string): Promise<void> {
+  async sendLong(text: string): Promise<number[]> {
     const MAX = 3900; // safely under Telegram's 4096 hard limit
     const t = text || "";
+    const ids: number[] = []; // every chunk's id — a reply to ANY chunk reaches the session
     if (t.length <= MAX) {
-      await this.api("sendMessage", { chat_id: this.ownerChatId, text: t, disable_web_page_preview: true });
-      return;
+      const r = await this.api("sendMessage", { chat_id: this.ownerChatId, text: t, disable_web_page_preview: true });
+      if (r?.result?.message_id) ids.push(r.result.message_id);
+      return ids;
     }
     for (let i = 0; i < t.length; i += MAX) {
-      await this.api("sendMessage", { chat_id: this.ownerChatId, text: t.slice(i, i + MAX), disable_web_page_preview: true });
+      const r = await this.api("sendMessage", { chat_id: this.ownerChatId, text: t.slice(i, i + MAX), disable_web_page_preview: true });
+      if (r?.result?.message_id) ids.push(r.result.message_id);
     }
+    return ids;
   }
 
   /** Acknowledge a tapped button (stops the phone's spinner). */
@@ -139,7 +147,9 @@ export class TelegramBridge {
       const args = sp === -1 ? "" : text.slice(sp + 1).trim();
       await this.h.onCommand(cmd, args);
     } else {
-      await this.h.onText(text);
+      // A swipe-reply carries the replied-to message; main.ts maps it to the
+      // session that message came from (reply-to-continue).
+      await this.h.onText(text, { msgId: m.message_id ?? null, replyTo: m.reply_to_message?.message_id ?? null });
     }
   }
 

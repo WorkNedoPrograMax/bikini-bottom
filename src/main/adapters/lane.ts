@@ -811,6 +811,12 @@ export class LaneManager {
   workingNames(): CharacterId[] { const out: CharacterId[] = []; for (const [id, l] of this.lanes) if (l.working) out.push(id); return out; }
   /** The character's current SDK session id (for `claude --resume`), or null. */
   sessionIdFor(id: CharacterId): string | null { return this.lane(id).sessionId; }
+  /** Where a past order with this SDK session id sits in the archive (-1 = not
+   *  there) — the phone's reply-to-continue finds an archived session by it. */
+  pastIndexOf(id: CharacterId, sdkSessionId: string | null): number {
+    if (!sdkSessionId) return -1;
+    return this.lane(id).archive.findIndex((s) => s.sdkSessionId === sdkSessionId);
+  }
   lastPromptFor(id: CharacterId): string | null { return this.lane(id).lastPrompt; }
   isBurned(id: CharacterId): boolean { return this.lane(id).burned; }
   isPaused(id: CharacterId): boolean { return this.lane(id).paused; }

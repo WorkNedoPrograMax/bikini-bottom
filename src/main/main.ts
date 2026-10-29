@@ -8,7 +8,8 @@ import { execFile } from "node:child_process";
 import { EventLog } from "./domain/eventLog";
 import { fold, emptyTown } from "./domain/snapshot";
 import { ROSTER } from "./config/roster";
-import { TelegramBridge, type TgButton } from "./adapters/telegram";
+import { TelegramBridge, type TgButton, type TgTextCtx } from "./adapters/telegram";
+import { TgThreads, routeReply, type TgThread } from "./domain/tgThreads";
 import { AppConfig } from "./config/appConfig";
 import { prepareProject } from "./adapters/git";
 import { checkClaude, clearStrayApiKey } from "./adapters/claude";
@@ -365,7 +366,7 @@ function notifyTgStart(townPath: string, id: CharacterId): void {
   const L = lanesOf(townPath);
   if (!tg || !L || id === "krabs") return;
   const task = L.lastPromptFor(id);
-  void tg.sendLong(`▶️ ${tgName(id)}${tgTown(townPath)} started:\n\n${task || "a new task."}`);
+  tgRemember(tg.sendLong(`▶️ ${tgName(id)}${tgTown(townPath)} started:\n\n${task || "a new task."}`), townPath, id);
 }
 
 // ───────────────────────── Telegram remote control ─────────────────────────
@@ -376,6 +377,12 @@ let tg: TelegramBridge | null = null;
 // Free-text expectation: after "/new → pick char" we await a job body; after a
 // question we await a typed answer. Cleared once consumed.
 let tgExpect: { mode: "answer" | "job"; id: CharacterId; town: string } | null = null;
+// Reply-to-continue: every message about a session is remembered against that
+// session, so a swipe-reply on the phone goes into IT (domain/tgThreads.ts).
+const tgThreads = new TgThreads();
+// A reply aimed at a past order while the character is busy: held here until
+// Maksym taps "switch" (stops the current order) or "keep" (drops the reply).
+let tgSwitch: { text: string; thread: TgThread; index: number } | null = null;
 const TG_CHARS: CharacterId[] = ["bob", "squid", "pat"];
 const tgName = (id: CharacterId): string => ROSTER.find((r) => r.id === id)?.name ?? id;
 const tgEsc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -388,6 +395,19 @@ const tgTownAt = (idx: string | undefined): string => (idx ? cfg.data.towns[Numb
 const tgData = (action: string, id: CharacterId, extra: string | number | undefined, townPath: string): string => `${action}:${id}:${extra ?? ""}:${tgTownIdx(townPath)}`;
 const lanesOf = (townPath: string): LaneManager | null => towns.get(townPath)?.lanes ?? null;
 const curTown = (): string => currentTownPath ?? "";
+/** The session a character is in RIGHT NOW, as a thread key (null = no lane). */
+const tgThreadFor = (townPath: string, id: CharacterId): TgThread | null => {
+  const L = lanesOf(townPath);
+  if (!L) return null;
+  return { town: townPath, id, session: L.sessionIdFor(id), startedAt: L.view(id).taskStartedAt };
+};
+/** Remember the sent message id(s) against the character's current session —
+ *  fire-and-forget around a send(), so a later swipe-reply finds the session. */
+const tgRemember = (sent: Promise<number | null | number[]> | number | null | Array<number | null | undefined>, townPath: string, id: CharacterId): void => {
+  const thread = tgThreadFor(townPath, id); // the session as it is NOW (the send is about it)
+  if (!thread) return;
+  void Promise.resolve(sent).then((r) => tgThreads.remember(Array.isArray(r) ? r : [r], thread)).catch(() => {});
+};
 
 /** Run a lane intent in a town that may NOT be on screen (a Telegram tap on a
  *  background town's ping). The shown town goes through handleIntent as usual;
@@ -403,6 +423,7 @@ async function runInTown(townPath: string, intent: Intent): Promise<void> {
     case "scrapJob": void t.lanes.scrap(intent.characterId); break;
     case "cancelJob": void t.lanes.cancel(intent.characterId); break;
     case "handOutJob": void t.lanes.startJob(intent.characterId, intent.prompt, intent.attachments); break;
+    case "followUp": void t.lanes.followUp(intent.characterId, intent.prompt, intent.attachments); break;
     case "resumePast": void t.lanes.resumePast(intent.characterId, intent.index, intent.prompt); break;
     case "remindLater": await t.log.append({ type: "ReminderSet", id: intent.characterId }); pushSnapshot(); break;
     default: await handleIntent(intent);
@@ -415,7 +436,7 @@ function startTelegram(): void {
   tg = new TelegramBridge(token, chatId, {
     onTap: (d) => void handleTgTap(d),
     onCommand: (c, a) => void handleTgCommand(c, a),
-    onText: (t) => void handleTgText(t),
+    onText: (t, ctx) => void handleTgText(t, ctx),
   });
   tg.start();
   void tg.send("🍍 Bikini Bottom is online — I'll ping you when someone needs you.\nCommands: /town  /new  /orders  /cancel");
@@ -439,22 +460,22 @@ function notifyTelegram(townPath: string, id: CharacterId): void {
       // (sendLong is plain — HTML tags would show up literally).
       const body = qs.map((qq, qi) => `<b>${qi + 1}.</b> ${tgEsc(qq.question)}\n` + qq.options.map((o, oi) => `   ${oi + 1}) ${tgEsc(o.label.slice(0, 80))}`).join("\n")).join("\n\n");
       const html = `❓ <b>${tgEsc(nm)}</b> has ${qs.length} questions — all at once:\n\n${body}\n\n<i>Reply with one line per question: the option number, or your own words.</i>`;
-      if (html.length <= 3900) void tg.send(html);
-      else void tg.sendLong(html.replace(/<\/?(b|i)>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"));
+      if (html.length <= 3900) tgRemember(tg.send(html), townPath, id);
+      else tgRemember(tg.sendLong(html.replace(/<\/?(b|i)>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")), townPath, id);
       return;
     }
     const rows: TgButton[][] = q.options.map((o, i) => [{ text: o.label.slice(0, 60), data: tgData("ans", id, i, townPath) }]);
-    void tg.send(`❓ <b>${tgEsc(nm)}</b> asks:\n${tgEsc(q.question)}\n\n<i>Tap an option, or reply with your own answer.</i>`, rows);
+    tgRemember(tg.send(`❓ <b>${tgEsc(nm)}</b> asks:\n${tgEsc(q.question)}\n\n<i>Tap an option, or reply with your own answer.</i>`, rows), townPath, id);
   } else if (lanes.hasPendingAsk(id)) {
     tgExpect = { mode: "answer", id, town: townPath };
-    void tg.send(`🔐 <b>${tgEsc(nm)}</b> needs approval:\n${tgEsc(lanes.view(id).pendingAsk || "…")}`, [[{ text: "✅ Allow", data: tgData("perm", id, "allow", townPath) }, { text: "🚫 Deny", data: tgData("perm", id, "deny", townPath) }]]);
+    tgRemember(tg.send(`🔐 <b>${tgEsc(nm)}</b> needs approval:\n${tgEsc(lanes.view(id).pendingAsk || "…")}`, [[{ text: "✅ Allow", data: tgData("perm", id, "allow", townPath) }, { text: "🚫 Deny", data: tgData("perm", id, "deny", townPath) }]]), townPath, id);
   } else if (lanes.limitedUntil(id)) {
     // Usage limit: nothing to decide — it resumes by itself. Just say so honestly.
-    void tg.send(`⏳ <b>${tgEsc(nm)}</b> ran into Claude's usage limit — it resets at ${tgEsc(fmtClock(lanes.limitedUntil(id)))} and ${tgEsc(tgName(id))} will pick up by itself then. Nothing is lost.`, [[{ text: "🗑 Scrap the order", data: tgData("scrap", id, "", townPath) }]]);
+    tgRemember(tg.send(`⏳ <b>${tgEsc(nm)}</b> ran into Claude's usage limit — it resets at ${tgEsc(fmtClock(lanes.limitedUntil(id)))} and ${tgEsc(tgName(id))} will pick up by itself then. Nothing is lost.`, [[{ text: "🗑 Scrap the order", data: tgData("scrap", id, "", townPath) }]]), townPath, id);
   } else if (lanes.isPaused(id)) {
-    void tg.send(`⏸ <b>${tgEsc(nm)}</b> paused at a checkpoint — keep cooking?`, [[{ text: "🍳 Keep cooking", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }]]);
+    tgRemember(tg.send(`⏸ <b>${tgEsc(nm)}</b> paused at a checkpoint — keep cooking?`, [[{ text: "🍳 Keep cooking", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }]]), townPath, id);
   } else if (lanes.isBurned(id)) {
-    void tg.send(`⚠️ <b>${tgEsc(nm)}</b> hit a snag.`, [[{ text: "🔁 Try again", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }]]);
+    tgRemember(tg.send(`⚠️ <b>${tgEsc(nm)}</b> hit a snag.`, [[{ text: "🔁 Try again", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }]]), townPath, id);
   }
 }
 
@@ -465,9 +486,13 @@ function notifyTgDone(townPath: string, id: CharacterId, summary: string): void 
   // message, not the first few lines). sendLong auto-splits if it's huge.
   const full = lanes.view(id).conversation.slice().reverse().find((m) => m.from === "them" && !m.tool)?.text || summary || "finished the job";
   const bridge = tg;
+  const thread = tgThreadFor(townPath, id); // the session that just finished — a reply continues IT
   // …then a short follow-up with a "remind me" button ("come back later" from the phone).
   void Promise.resolve(bridge.sendLong(`✅ ${tgName(id)}${tgTown(townPath)} finished:\n\n${full}`))
-    .then(() => bridge.send("Come back to this later?", [[{ text: "📌 Remind me", data: tgData("remind", id, "", townPath) }]]))
+    .then(async (ids) => {
+      const tail = await bridge.send("Come back to this later, or reply to continue it?", [[{ text: "📌 Remind me", data: tgData("remind", id, "", townPath) }]]);
+      if (thread) tgThreads.remember([...ids, tail], thread);
+    })
     .catch(() => {});
 }
 
@@ -501,12 +526,35 @@ async function handleTgTap(data: string): Promise<void> {
   } else if (action === "remind") {
     await runInTown(townPath, { type: "remindLater", characterId: id });
     await tg?.send(`📌 Pinned — ${who} keeps the red dot until you open it.`);
+  } else if (action === "switch") {
+    // A reply aimed at a past order while the character was busy: Maksym chose
+    // to stop the current order and continue the old one with that reply.
+    const held = tgSwitch; tgSwitch = null;
+    if (!held) { await tg?.send("That reply isn't waiting anymore."); return; }
+    await tgContinuePast(held.thread, held.index, held.text);
+  } else if (action === "keep") {
+    tgSwitch = null;
+    await tg?.send(`👍 Kept ${who} on the current order — that reply was dropped.`);
   }
+}
+
+/** Make a past order the character's current session and send it the reply. The
+ *  archive may have shifted since the reply arrived, so the index is re-found by
+ *  session id at the moment of switching. */
+async function tgContinuePast(thread: TgThread, index: number, text: string): Promise<void> {
+  const L = lanesOf(thread.town);
+  const who = tgName(thread.id) + tgTown(thread.town);
+  const idx = L ? L.pastIndexOf(thread.id, thread.session) : -1;
+  if (idx < 0) { await tg?.send(`Can't find that order of ${who}'s anymore — /orders lists what's there.`); return; }
+  if (idx !== index) log("tg", "past order moved in the archive since the reply — re-found by session id", { was: index, now: idx });
+  await runInTown(thread.town, { type: "resumePast", characterId: thread.id, index: idx, prompt: text });
+  const sent = await tg?.send(`▶️ Reopened that order for ${who} and told it: "${tgEsc(text.slice(0, 200))}"`);
+  tgRemember([sent ?? null], thread.town, thread.id); // the session is current now — remember it as such
 }
 
 async function handleTgCommand(cmd: string, args: string): Promise<void> {
   if (cmd === "start" || cmd === "help") {
-    await tg?.send("🍍 <b>Bikini Bottom</b>\n/town — who's doing what\n/new — hand out a new job\n/orders — past orders per character\n/cancel — stop a running job\nWhen someone needs you, I message you with buttons.");
+    await tg?.send("🍍 <b>Bikini Bottom</b>\n/town — who's doing what\n/new — hand out a new job\n/orders — past orders per character\n/cancel — stop a running job\nWhen someone needs you, I message you with buttons.\n<b>Reply</b> (swipe) to any started / finished / asks message to continue that same order.");
   } else if (cmd === "town" || cmd === "status") {
     await sendTgTown();
   } else if (cmd === "new") {
@@ -528,27 +576,99 @@ async function handleTgCommand(cmd: string, args: string): Promise<void> {
   }
 }
 
-async function handleTgText(text: string): Promise<void> {
-  if (!tgExpect) { await tg?.send("Not sure what that's for. Try /town or /new."); return; }
+async function handleTgText(text: string, ctx: TgTextCtx = { msgId: null, replyTo: null }): Promise<void> {
+  // A swipe-reply to a message about a session goes into THAT session —
+  // regardless of what the bot last asked for.
+  const thread = tgThreads.lookup(ctx.replyTo);
+  if (thread) { await handleTgReply(text, ctx.msgId, thread); return; }
+  if (ctx.replyTo != null) {
+    // Replied to something we don't remember (an older app run, a /town list…).
+    await tg?.send("I don't know which order that message belongs to (it may be from before the last relaunch). Reply to a 'started' / 'finished' / 'asks' message, or use /orders.");
+    return;
+  }
+  if (!tgExpect) { await tg?.send("Not sure what that's for. Reply to a character's message to continue that order, or try /town or /new."); return; }
   const { mode, id, town } = tgExpect; tgExpect = null;
   const who = tgName(id) + tgTown(town);
   if (mode === "answer") {
-    // A batch of questions → one reply line per question; a bare number picks
-    // that option. A single question → the whole text is the answer.
-    const qs = lanesOf(town)?.view(id).pendingChoice?.questions || [];
-    let answers = [text];
-    if (qs.length > 1) {
-      const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
-      answers = qs.map((q, qi) => {
-        const line = lines[qi] || "";
-        const n = /^\d+[.)]?$/.test(line) ? parseInt(line, 10) : 0;
-        return (n >= 1 && n <= q.options.length) ? q.options[n - 1].label : line;
-      });
-    }
+    const answers = tgAnswersFor(town, id, text);
     await runInTown(town, { type: "answerQuestion", characterId: id, answers });
-    await tg?.send(`✅ Told ${who}: "${tgEsc(answers.join(" · "))}"`);
+    tgRemember([ctx.msgId, await tg?.send(`✅ Told ${who}: "${tgEsc(answers.join(" · "))}"`) ?? null], town, id);
   }
-  else { await runInTown(town, { type: "handOutJob", characterId: id, prompt: text }); await tg?.send(`📋 Handed ${who} the job.`); }
+  else {
+    await runInTown(town, { type: "handOutJob", characterId: id, prompt: text });
+    // startJob has run synchronously up to its first await → the lane's
+    // taskStartedAt is the NEW job's; remember both messages against it.
+    tgRemember([ctx.msgId, await tg?.send(`📋 Handed ${who} the job.`) ?? null], town, id);
+  }
+}
+
+/** A batch of questions → one reply line per question; a bare number picks
+ *  that option. A single question → the whole text is the answer. */
+function tgAnswersFor(town: string, id: CharacterId, text: string): string[] {
+  const qs = lanesOf(town)?.view(id).pendingChoice?.questions || [];
+  if (qs.length <= 1) return [text];
+  const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  return qs.map((q, qi) => {
+    const line = lines[qi] || "";
+    const n = /^\d+[.)]?$/.test(line) ? parseInt(line, 10) : 0;
+    return (n >= 1 && n <= q.options.length) ? q.options[n - 1].label : line;
+  });
+}
+
+/** Reply-to-continue: the text goes into the session behind the replied-to
+ *  message. Current session → a follow-up (or the answer, if it's asking).
+ *  A past order → reopened with this text, after a "switch?" when the
+ *  character is busy with something else. */
+async function handleTgReply(text: string, msgId: number | null, thread: TgThread): Promise<void> {
+  const { town, id } = thread;
+  const L = lanesOf(town);
+  const who = tgName(id) + tgTown(town);
+  if (!L) { await tg?.send(`That town isn't open anymore.`); return; }
+  const route = routeReply(thread, {
+    terminal: TERMINAL_IDS.has(id),
+    working: L.isWorking(id),
+    asking: L.hasPendingChoice(id),
+    approving: L.hasPendingAsk(id),
+    session: L.sessionIdFor(id),
+    startedAt: L.view(id).taskStartedAt,
+    pastIndex: L.pastIndexOf(id, thread.session),
+  });
+  log("tg", `reply → ${route.kind}`, { id, town: townNameOf(town), session: thread.session });
+  switch (route.kind) {
+    case "terminal":
+      await tg?.send(`${who} works in a terminal — I can't type a reply into it from here. Use /${id} <task> for a new job.`);
+      return;
+    case "answer": {
+      tgExpect = null;
+      const answers = tgAnswersFor(town, id, text);
+      await runInTown(town, { type: "answerQuestion", characterId: id, answers });
+      tgRemember([msgId, await tg?.send(`✅ Told ${who}: "${tgEsc(answers.join(" · "))}"`) ?? null], town, id);
+      return;
+    }
+    case "approval":
+      await tg?.send(`${who} is waiting for a yes or no — tap Allow or Deny on that message; words don't answer it.`);
+      return;
+    case "followUp":
+      await runInTown(town, { type: "followUp", characterId: id, prompt: text });
+      tgRemember([msgId, await tg?.send(L.isWorking(id) ? `💬 Passed that to ${who} while it works.` : `💬 Told ${who} — it's picking the order back up.`) ?? null], town, id);
+      return;
+    case "resume":
+      await tgContinuePast(thread, route.index, text);
+      if (msgId != null) tgRemember([msgId], town, id);
+      return;
+    case "switch": {
+      tgSwitch = { text, thread, index: route.index };
+      const busyWith = L.hasPendingChoice(id) ? "is asking you something" : L.hasPendingAsk(id) ? "is waiting for your approval" : "is busy with another order";
+      await tg?.send(`${who} ${busyWith}. That reply belongs to an earlier order — switch to it? (stops the current one)`, [[
+        { text: "⏭ Switch", data: tgData("switch", id, "", town) },
+        { text: "✋ Keep current", data: tgData("keep", id, "", town) },
+      ]]);
+      return;
+    }
+    case "lost":
+      await tg?.send(`Can't find that order of ${who}'s anymore — /orders lists what's there.`);
+      return;
+  }
 }
 
 async function sendTgTown(): Promise<void> {
