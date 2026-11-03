@@ -128,19 +128,24 @@ export class TelegramBridge {
 
   private async dispatch(u: any): Promise<void> {
     // Button tap.
+    // Every update is logged with the route it takes (2026-11-03: three taps on
+    // a question vanished with no trace — nothing on this path wrote a line).
     if (u.callback_query) {
       const cq = u.callback_query;
-      if ((cq.message?.chat?.id ?? cq.from?.id) !== this.ownerChatId) return; // not the owner → ignore
+      const chat = cq.message?.chat?.id ?? cq.from?.id;
+      if (chat !== this.ownerChatId) { log("tg", "tap ignored — not the owner chat", { chat, update: u.update_id }); return; }
+      log("tg", "tap", { data: String(cq.data || ""), msg: cq.message?.message_id ?? null, update: u.update_id });
       await this.ackCallback(cq.id);
       await this.h.onTap(String(cq.data || ""));
       return;
     }
     // Message.
     const m = u.message || u.edited_message;
-    if (!m) return;
-    if (m.chat?.id !== this.ownerChatId) return; // locked to the owner
+    if (!m) { log("tg", "update ignored — no message", { keys: Object.keys(u), update: u.update_id }); return; }
+    if (m.chat?.id !== this.ownerChatId) { log("tg", "message ignored — not the owner chat", { chat: m.chat?.id, update: u.update_id }); return; }
     const text = (m.text || "").trim();
-    if (!text) return;
+    if (!text) { log("tg", "message ignored — no text (sticker/photo/voice?)", { keys: Object.keys(m), update: u.update_id }); return; }
+    log("tg", u.edited_message ? "edited text" : "text", { text: text.slice(0, 80), msg: m.message_id ?? null, replyTo: m.reply_to_message?.message_id ?? null, update: u.update_id });
     if (text.startsWith("/")) {
       const sp = text.indexOf(" ");
       const cmd = (sp === -1 ? text.slice(1) : text.slice(1, sp)).replace(/@\w+$/, "").toLowerCase(); // strip /cmd@bot

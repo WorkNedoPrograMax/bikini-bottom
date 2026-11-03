@@ -504,9 +504,14 @@ async function handleTgTap(data: string): Promise<void> {
   const L = lanesOf(townPath);
   const who = tgName(id) + tgTown(townPath);
   if (action === "ans") {
-    const opt = L?.view(id).pendingChoice?.questions?.[0]?.options?.[Number(extra)];
+    const choice = L?.view(id).pendingChoice ?? null;
+    const opt = choice?.questions?.[0]?.options?.[Number(extra)];
     if (opt) { tgExpect = null; await runInTown(townPath, { type: "answerQuestion", characterId: id, answers: [opt.label] }); await tg?.send(`✅ Told ${who}: "${tgEsc(opt.label)}"`); }
-    else await tg?.send("That question isn't waiting anymore.");
+    else {
+      // Say WHY on the log, so a lost tap can be traced (2026-11-03).
+      log("tg", "tap found no question to answer", { id, town: townNameOf(townPath), lane: !!L, pending: !!choice, options: choice?.questions?.[0]?.options?.length ?? 0, picked: extra, working: L?.isWorking(id) ?? null });
+      await tg?.send("That question isn't waiting anymore.");
+    }
   } else if (action === "perm") {
     tgExpect = null; await runInTown(townPath, { type: "answerPermission", characterId: id, allow: extra === "allow" });
     await tg?.send(extra === "allow" ? `✅ Allowed — ${who} continues.` : `🚫 Denied — told ${who}.`);
@@ -583,10 +588,11 @@ async function handleTgText(text: string, ctx: TgTextCtx = { msgId: null, replyT
   if (thread) { await handleTgReply(text, ctx.msgId, thread); return; }
   if (ctx.replyTo != null) {
     // Replied to something we don't remember (an older app run, a /town list…).
+    log("tg", "reply to a message I don't remember", { replyTo: ctx.replyTo, remembered: tgThreads.size });
     await tg?.send("I don't know which order that message belongs to (it may be from before the last relaunch). Reply to a 'started' / 'finished' / 'asks' message, or use /orders.");
     return;
   }
-  if (!tgExpect) { await tg?.send("Not sure what that's for. Reply to a character's message to continue that order, or try /town or /new."); return; }
+  if (!tgExpect) { log("tg", "text with nothing expected", { text: text.slice(0, 60) }); await tg?.send("Not sure what that's for. Reply to a character's message to continue that order, or try /town or /new."); return; }
   const { mode, id, town } = tgExpect; tgExpect = null;
   const who = tgName(id) + tgTown(town);
   if (mode === "answer") {
