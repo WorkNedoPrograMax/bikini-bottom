@@ -11,6 +11,7 @@ import { nativeImage } from "electron";
 import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats, Fuel, Gauge } from "../../shared/ipc";
 import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
+import { newEvidence, noteEvidence, openWindow, closeWindow, isClaimed, type PictureEvidence } from "../domain/pictureClaims";
 import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
 import { clearStrayApiKey } from "./claude";
 import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue, sanitizeStatus, statusAccepted, fallbackNote } from "./guards";
@@ -453,6 +454,10 @@ interface Lane {
   /** Pictures already shown in a bubble this job (path@mtime), so a reply that
    *  names the same file twice shows it once. */
   shownPictures: Set<string>;
+  /** What this lane's own stream named this turn — so a picture is claimed by
+   *  the character that made it, not by every character awake when it appeared
+   *  (the deliverables folder is one for all towns). */
+  pictureEvidence: PictureEvidence;
 }
 
 /** Adoption support (Scout & Runner): a character labels an existing lane.
@@ -778,7 +783,7 @@ export class LaneManager {
         limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null,
         note: cur?.note ?? null, noteAt: cur?.noteAt ?? 0,
         booth: null, phone: null, phoneLost: null, setupReport: null,
-        turnStartedAt: Date.now(), shownPictures: new Set(),
+        turnStartedAt: Date.now(), shownPictures: new Set(), pictureEvidence: newEvidence(),
       }).get(id)!;
       // Closed the app while waiting out a usage limit? Keep waiting — and keep
       // the promise to pick up by ourselves when it resets.
@@ -1054,6 +1059,7 @@ export class LaneManager {
     // 110s" the moment you send, which looks stuck but isn't.
     l.beatAt = Date.now();
     l.turnStartedAt = Date.now();
+    l.pictureEvidence = newEvidence();
     l.activity = "getting started…";
     // Turn attachments into image content blocks (inline vision) + saved files
     // (referenced by path so the character opens them with its tools — works for
@@ -1368,11 +1374,18 @@ export class LaneManager {
   }
 
   /** The pictures this character made for Maksym that he has not seen yet —
-   *  as bubble thumbnails — and mark them shown. Undefined when there are none. */
+   *  as bubble thumbnails — and mark them shown. Undefined when there are none.
+   *  Only pictures this lane's own work named (or made inside its own
+   *  deliverables-folder tool call) count: the folder is shared by every
+   *  character in every town, so "new since my turn started" alone handed
+   *  Patrick's screenshots to Bob (2026-11-04). */
   private async picturesFor(l: Lane, text: string): Promise<string[] | undefined> {
     let fresh: { file: string; mtime: number }[];
-    try { fresh = (await findPictures(l.turnStartedAt, text)).filter((p) => !l.shownPictures.has(`${p.file}@${p.mtime}`)); }
-    catch { return undefined; }
+    try {
+      fresh = (await findPictures(l.turnStartedAt, text))
+        .filter((p) => !l.shownPictures.has(`${p.file}@${p.mtime}`))
+        .filter((p) => isClaimed(l.pictureEvidence, p.file, p.mtime, text));
+    } catch { return undefined; }
     if (!fresh.length) return undefined;
     const out: string[] = [];
     for (const p of fresh.slice(-PICTURE_MAX_PER_BUBBLE)) {
@@ -2045,6 +2058,7 @@ export class LaneManager {
           if (au) { const c = (au.input_tokens || 0) + (au.cache_read_input_tokens || 0) + (au.cache_creation_input_tokens || 0); if (c > 0) l.lastCallCtx = c; }
           for (const block of msg.message.content) {
             if (block.type === "text" && block.text.trim()) {
+              noteEvidence(l.pictureEvidence, block.text);
               l.conversation.push({ from: "them", text: block.text.trim(), images: await this.picturesFor(l, block.text) });
               l.activity = "writing a reply…";
               // "You've hit your session limit · resets 1:40pm" arrives as plain
@@ -2053,6 +2067,10 @@ export class LaneManager {
               if (lim) l.limitSeen = { resetsAt: l.limitSeen?.resetsAt || lim.resetsAt, text: lim.text };
               log("lane", `${id} said`, block.text.replace(/\s+/g, " ").slice(0, 120));
             } else if (block.type === "tool_use") {
+              // Whatever this call names (a screenshot path, the deliverables
+              // folder) is this lane's claim on the pictures that follow.
+              noteEvidence(l.pictureEvidence, (block as any).input);
+              openWindow(l.pictureEvidence, block.id, (block as any).input, Date.now());
               // Sub-agents ("helpers") launch via the "Agent"/"Task" tool. Only
               // register here if the live task_started message didn't already
               // (dedup by id) — otherwise this buffered block double-counts.
@@ -2084,6 +2102,17 @@ export class LaneManager {
           // tool_result immediately ("running in the background") while it keeps
           // working, so removing it here caused a false "done" + early chime.
           // Helper completion is driven by task_completed / task_notification.
+          // A result that names a picture (an `ls`, a screenshot command's
+          // output, a helper's report) is this lane's claim on it; and it closes
+          // the window its tool call opened.
+          const content = (msg as any).message?.content;
+          if (Array.isArray(content)) {
+            for (const b of content) {
+              if (b?.type !== "tool_result") continue;
+              noteEvidence(l.pictureEvidence, b.content);
+              closeWindow(l.pictureEvidence, String(b.tool_use_id || ""), Date.now());
+            }
+          }
           this.onChange();
         } else if (msg.type === "result") {
           // One user message has been fully answered. The session STAYS OPEN for
