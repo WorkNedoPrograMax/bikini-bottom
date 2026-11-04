@@ -59,3 +59,19 @@ export function resolveHelperIcon(assetsDir: string, id: CharacterId): string | 
   }
   return null;
 }
+
+/** The Mailbox's two pictures: `mailbox-empty.png` (flag down, nothing for
+ *  you) and `mailbox-ready.png` (mail is in) — file:// URLs or null → stand-in. */
+export function resolveMailPictures(assetsDir: string): { empty: string | null; ready: string | null } {
+  const url = (name: string) => { const p = path.join(assetsDir, name); return existsSync(p) ? pathToFileURL(p).href : null; };
+  return { empty: url("mailbox-empty.png"), ready: url("mailbox-ready.png") };
+}
+
+/** The mail chime: any audio file whose name contains "mail" — or null (no sound). */
+export function resolveMailSound(soundsDir: string): string | null {
+  let files: string[];
+  try { files = readdirSync(soundsDir); } catch { return null; }
+  const m = files.filter((f) => /\.(mp3|wav|m4a|ogg|aac)$/i.test(f) && f.toLowerCase().includes("mail"));
+  if (!m.length) return null;
+  return pathToFileURL(path.join(soundsDir, m[Math.floor(Math.random() * m.length)])).href;
+}

@@ -2,7 +2,7 @@
 // the app config, First Run, and derives the snapshot pushed to the renderer.
 // The renderer never touches fs/git/SDK; it renders what it's handed (AD-4).
 
-import { app, BrowserWindow, ipcMain, dialog, Notification, nativeImage, powerSaveBlocker } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, Notification, nativeImage, powerSaveBlocker, shell } from "electron";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { EventLog } from "./domain/eventLog";
@@ -13,7 +13,9 @@ import { TgThreads, routeReply, type TgThread } from "./domain/tgThreads";
 import { AppConfig } from "./config/appConfig";
 import { prepareProject } from "./adapters/git";
 import { checkClaude, clearStrayApiKey } from "./adapters/claude";
-import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon } from "./adapters/assets";
+import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon, resolveMailPictures, resolveMailSound } from "./adapters/assets";
+import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, type GhThread } from "./domain/mail";
+import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull } from "./adapters/pulls";
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
@@ -24,7 +26,7 @@ import { seedSetup } from "./domain/laneSetup";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
-import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView } from "../shared/ipc";
+import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView, type MailView, type MailLine } from "../shared/ipc";
 import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
 const IDLE_PREP = { status: "idle" as const, message: "" };
@@ -141,6 +143,8 @@ async function openTown(projectPath: string): Promise<Town> {
   towns.set(projectPath, town);
   missingTowns.delete(projectPath);
   log("project", "opened", { projectPath, town: profile.name, landing: profile.landing, adoption: adopt ? Object.keys(profile.lanes || {}) : null, terminalChars: [...TERMINAL_IDS] });
+  // The Mailbox: pull requests on this town's GitHub repo (best effort, never blocks the town).
+  void startMail(projectPath, profile);
 
   // Resume (AD-11, NFR-1): any Character left mid-cook when the app quit is
   // paused — flip its dot on and offer Keep cooking / Scrap.
@@ -208,7 +212,142 @@ function townTabs(): TownTab[] {
     if (!t) return { path: p, name: townNameOf(p), missing: true, characters: [] };
     return { path: p, name: t.profile.name, characters: fold(t.log.all()).characters };
   });
-  return townTabsFor(inputs, currentTownPath);
+  const tabs = townTabsFor(inputs, currentTownPath);
+  for (const t of tabs) { const n = forYouCount(mails.get(t.path)?.lines ?? []); if (n) t.mail = n; }
+  return tabs;
+}
+
+// ───────────── The Mailbox: pull requests on the team repo ─────────────
+// One per town with a GitHub remote. Reads GitHub through `gh` every couple of
+// minutes (adapters/pulls), words the answers (domain/mail), and remembers which
+// "needs you" lines the phone was already told about (<project>/.bikini/mail-pings.json).
+interface TownMail {
+  repo: string; me: string; everySec: number; merge: "squash" | "merge";
+  lines: MailLine[]; threads: Record<number, GhThread[]>;
+  checkedAt: number; error: string | null;
+  timer: ReturnType<typeof setInterval> | null; busy: boolean;
+  pinged: Set<string>; merging: number | null;
+}
+const mails = new Map<string, TownMail>();
+let ghMe: string | null | undefined; // Maksym's GitHub login (undefined = not asked yet)
+
+function pingsFile(townPath: string): string { return path.join(townPath, ".bikini", "mail-pings.json"); }
+function loadPinged(townPath: string): Set<string> {
+  try { const a = JSON.parse(readFileSync(pingsFile(townPath), "utf8")); return new Set(Array.isArray(a) ? a.map(String) : []); } catch { return new Set(); }
+}
+function savePinged(townPath: string, set: Set<string>): void {
+  try { writeFileSync(pingsFile(townPath), JSON.stringify([...set].slice(-400)) + "\n", "utf8"); } catch (e) { log("mail", "pings not saved", { error: String(e) }); }
+}
+
+async function startMail(townPath: string, profile: TownProfile): Promise<void> {
+  if (profile.pulls?.off) { log("mail", "mailbox off by profile", { town: profile.name }); return; }
+  const repo = profile.pulls?.repo ?? await repoOf(townPath);
+  if (!repo) { log("mail", "no GitHub remote — no mailbox", { town: profile.name }); return; }
+  if (ghMe === undefined) ghMe = await ghLogin();
+  if (!ghMe) { log("mail", "gh not logged in — no mailbox", { town: profile.name, repo }); return; }
+  const m: TownMail = {
+    repo, me: ghMe, everySec: profile.pulls?.everySec ?? 120, merge: profile.pulls?.merge ?? "squash",
+    lines: [], threads: {}, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadPinged(townPath), merging: null,
+  };
+  mails.set(townPath, m);
+  log("mail", "mailbox up", { town: profile.name, repo, me: ghMe, everySec: m.everySec, merge: m.merge });
+  await pollMail(townPath);
+  m.timer = setInterval(() => void pollMail(townPath), m.everySec * 1000);
+}
+
+/** One look at GitHub: the open PRs and their threads → the paper's lines. New
+ *  "needs you" lines ring the chime and ping the phone, once each. */
+async function pollMail(townPath: string): Promise<void> {
+  const m = mails.get(townPath);
+  if (!m || m.busy) return;
+  m.busy = true;
+  const before = JSON.stringify(m.lines) + m.error;
+  try {
+    const { pulls, threads } = await fetchPulls(m.repo);
+    const lines = mailLines(pulls, threads, m.me);
+    const fresh = newPings(lines, m.pinged);
+    m.lines = lines; m.threads = threads; m.checkedAt = Date.now(); m.error = null;
+    if (fresh.length) {
+      for (const l of fresh) m.pinged.add(pingKey(l));
+      savePinged(townPath, m.pinged);
+      log("mail", "new mail for Maksym", { town: townNameOf(townPath), lines: fresh.map((l) => `#${l.number} ${l.word}`) });
+      if (winAlive()) win!.webContents.send(CHANNELS.sound, { characterId: "krabs", kind: "mail", url: resolveMailSound(SOUNDS_DIR) });
+      notifyTgMail(townPath, fresh);
+    }
+  } catch (e: any) {
+    m.error = e?.message || String(e);
+    log("mail", "look at GitHub failed", { town: townNameOf(townPath), repo: m.repo, error: m.error });
+  } finally {
+    m.busy = false;
+  }
+  if (JSON.stringify(m.lines) + m.error !== before) pushSnapshot();
+}
+
+/** The mailbox as the shown town's street draws it. */
+function mailViewFor(townPath: string | null, chars: TownSnapshot["characters"]): MailView | null {
+  const m = townPath ? mails.get(townPath) : null;
+  if (!m) return null;
+  const L = townPath ? lanesOf(townPath) : null;
+  const crew = chars.filter((x) => !x.isHomeBase).map((x) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) }));
+  return { repo: m.repo, checkedAt: m.checkedAt, forYou: forYouCount(m.lines), lines: m.lines, error: m.error, pictures: resolveMailPictures(ASSETS_DIR), crew, merging: m.merging };
+}
+
+/** Merge one of Maksym's PRs from the town — after asking GitHub once more
+ *  that it is still on a clean plate. `via` says where the click came from. */
+async function mergeFromTown(townPath: string, number: number, via: "street" | "tg"): Promise<void> {
+  const m = mails.get(townPath);
+  if (!m) return;
+  const say = async (text: string) => { toast(text); if (via === "tg") await tg?.send(tgEsc(text)); };
+  if (m.merging) { await say(`One merge at a time — #${m.merging} is still going.`); return; }
+  const line = m.lines.find((l) => l.number === number) ?? null;
+  const fresh = line && line.mine ? await viewPull(m.repo, number) : null;
+  const refusal = mergeRefusal(line, fresh);
+  if (refusal) { log("mail", "merge refused", { number, via, refusal }); await say(`Not merging — ${refusal}.`); return; }
+  m.merging = number; pushSnapshot();
+  const r = await ghMergePull(m.repo, number, m.merge);
+  m.merging = null;
+  log("mail", r.ok ? "merged" : "merge failed", { number, via, repo: m.repo, method: m.merge, message: r.message });
+  if (r.ok) {
+    toast(`✓ #${number} merged into ${line!.base} — branch deleted`);
+    await tg?.send(`✅ Merged <b>#${number}</b> into ${tgEsc(line!.base)}${tgEsc(tgTown(townPath))} — ${tgEsc(line!.title)}`);
+  } else {
+    await say(`Merge failed — ${r.message}`);
+  }
+  await pollMail(townPath);
+}
+
+/** Hand a PR to a character: the fix of a sent-back PR of Maksym's, or the
+ *  read-and-draft of a teammate's PR. The brief is the job; the Work Window opens. */
+async function handOffPull(townPath: string, number: number, characterId: CharacterId): Promise<void> {
+  const m = mails.get(townPath); const t = towns.get(townPath);
+  if (!m || !t || characterId === "krabs") return;
+  const line = m.lines.find((l) => l.number === number);
+  if (!line) { toast("That PR isn't on the paper anymore."); return; }
+  if (TERMINAL_IDS.has(characterId)) { toast(`${tgName(characterId)} works in a terminal — pick another character.`); return; }
+  if (t.lanes.isWorking(characterId)) { toast(`${tgName(characterId)} is busy — pick someone idle.`); return; }
+  const brief = briefFor(line, m.threads[number] || [], m.repo);
+  log("mail", "handed to a character", { number, word: line.word, characterId, town: townNameOf(townPath) });
+  if (townPath === currentTownPath) openWindowId = characterId;
+  await t.lanes.startJob(characterId, brief);
+  pushSnapshot();
+}
+
+/** The phone: one message per new "needs you" line (buttons: Merge it / Open),
+ *  or one list when many arrive at once (first look after a long sleep). */
+function notifyTgMail(townPath: string, fresh: MailLine[]): void {
+  if (!tg) return;
+  const where = tgTown(townPath);
+  if (fresh.length > 3) {
+    const body = fresh.map((l) => `• <b>#${l.number}</b> ${tgEsc(l.status)} — ${tgEsc(l.title)}\n   ↳ ${tgEsc(l.reason)}`).join("\n");
+    tgRemember(tg.send(`📬 <b>Mail${tgEsc(where)}</b> — ${fresh.length} pieces need you:\n${body}`), townPath, "krabs");
+    return;
+  }
+  for (const l of fresh) {
+    const buttons: TgButton[][] = [];
+    if (l.canMerge) buttons.push([{ text: "✅ Merge it", data: tgData("mailmerge", "krabs", l.number, townPath) }]);
+    buttons.push([{ text: "Open on GitHub", url: l.url }]);
+    tgRemember(tg.send(`📬 <b>#${l.number} · ${tgEsc(l.status)}</b>${tgEsc(where)} — ${tgEsc(l.title)}\n↳ ${tgEsc(l.reason)}`, buttons), townPath, "krabs");
+  }
 }
 
 /** A Lane finished → native macOS notification (FR-7). Clicking it opens that
@@ -540,6 +679,8 @@ async function handleTgTap(data: string): Promise<void> {
   } else if (action === "keep") {
     tgSwitch = null;
     await tg?.send(`👍 Kept ${who} on the current order — that reply was dropped.`);
+  } else if (action === "mailmerge") {
+    await mergeFromTown(townPath, Number(extra), "tg");
   }
 }
 
@@ -708,11 +849,19 @@ async function sendTgTown(): Promise<void> {
   // The reserve light, when lit: one line per lit window.
   const fuel = lanes.fuel();
   for (const w of [fuelWord(fuel.fiveHour, Date.now(), "Reserve"), fuelWord(fuel.sevenDay, Date.now(), "Weekly reserve")]) if (w) lines.push(`⛽ ${tgEsc(w)}`);
+  // The Mailbox: what needs you on the team repo, then how much else is on the paper.
+  const mail = currentTownPath ? mails.get(currentTownPath) : null;
+  if (mail) {
+    const need = mail.lines.filter((l) => l.forYou);
+    lines.push("", need.length ? `✉️ <b>Mail: ${need.length} for you</b>` : `✉️ Mail: nothing for you (${mail.lines.length} open)`);
+    for (const l of need.slice(0, 6)) lines.push(`   <b>#${l.number}</b> ${tgEsc(l.status)} — ${tgEsc(l.title.slice(0, 50))}\n     ↳ ${tgEsc(l.reason)}`);
+    if (mail.error) lines.push(`   ⚠️ last look failed: ${tgEsc(mail.error)}`);
+  }
   // The other towns, one line each — the ferry's view from the phone.
   const others = snap.towns.filter((t) => !t.current);
   if (others.length) {
     lines.push("");
-    for (const t of others) lines.push(`🛳 <b>${tgEsc(t.name)}</b>: ${t.missing ? "folder missing" : `${t.cooking} cooking, ${t.needsYou} need you`}`);
+    for (const t of others) lines.push(`🛳 <b>${tgEsc(t.name)}</b>: ${t.missing ? "folder missing" : `${t.cooking} cooking, ${t.needsYou} need you${t.mail ? `, ✉️ ${t.mail} mail` : ""}`}`);
   }
   const title = towns.size > 1 ? `🏙 <b>Town status · ${tgEsc(townNameOf(currentTownPath))}</b>` : "🏙 <b>Town status</b>";
   await tg.send(title + "\n" + lines.join("\n"));
@@ -817,6 +966,8 @@ function snapshot(): TownSnapshot {
   base.addingTown = fx?.addingTown ?? addingTown;
   // The Phone Booth prop (runtime state from the lane engine, never the event log).
   base.booth = boothView();
+  // The Mailbox (pull requests): runtime state from the town's mail reader.
+  base.mail = fx?.mail !== undefined ? fx.mail : mailViewFor(currentTownPath, base.characters);
   return base;
 }
 
@@ -825,7 +976,7 @@ function snapshot(): TownSnapshot {
 // character with a chalk line, a full Orders board) can be photographed with
 // `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
 // orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
-type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null };
+type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null };
 let fixture: Fixture | null | undefined;
 function loadFixture(): Fixture | null {
   if (fixture === undefined) {
@@ -1059,6 +1210,24 @@ async function handleIntent(intent: Intent): Promise<void> {
       }
       break;
     }
+
+    case "refreshMail":
+      if (currentTownPath) void pollMail(currentTownPath);
+      break;
+
+    case "openPull": {
+      const l = currentTownPath ? mails.get(currentTownPath)?.lines.find((x) => x.number === intent.number) : null;
+      if (l) void shell.openExternal(l.url);
+      break;
+    }
+
+    case "mergePull":
+      if (currentTownPath) await mergeFromTown(currentTownPath, intent.number, "street");
+      break;
+
+    case "handOffPull":
+      if (currentTownPath) await handOffPull(currentTownPath, intent.number, intent.characterId);
+      break;
 
     case "forgetTown": {
       // Only a MISSING town can be forgotten (its folder is gone — e.g. Scout &
@@ -1539,7 +1708,7 @@ app.on("before-quit", (e) => {
 
 // Real terminals are long-lived warm processes — they must survive a window
 // hide/close (the whole point). Only tear them down on a genuine quit.
-app.on("will-quit", () => { for (const t of towns.values()) t.terminals.killAll(); });
+app.on("will-quit", () => { for (const t of towns.values()) t.terminals.killAll(); for (const m of mails.values()) if (m.timer) clearInterval(m.timer); });
 
 // Graceful shutdown on a termination signal (this is how a restart reaches us).
 // Interrupt each terminal's Claude first and pause, so it can reach a checkpoint

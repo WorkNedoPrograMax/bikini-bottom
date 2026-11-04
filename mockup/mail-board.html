@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bikini Bottom — the Mailbox (PRs)</title>
+<style>
+  :root{ --disp:"Marker Felt","Chalkboard SE","Comic Sans MS",ui-rounded,system-ui,sans-serif; --body:ui-rounded,"SF Pro Rounded",-apple-system,system-ui,sans-serif; }
+  *{box-sizing:border-box}
+  body{margin:0;background:#04222f;font-family:var(--body);display:flex;flex-direction:column;min-height:100vh;align-items:center;justify-content:center;gap:10px;padding:14px;color:#fff}
+  .scene{position:relative;width:100%;max-width:1100px;line-height:0;border-radius:14px;overflow:hidden;box-shadow:0 20px 50px rgba(0,0,0,.5)}
+  .scene img.bg{width:100%;display:block}
+  .topright{position:absolute;top:14px;right:14px;z-index:8;display:flex;gap:8px}
+  .topbtn{font-family:var(--disp);font-size:15px;color:#f7e6c4;background:linear-gradient(#a0652b,#6e4116);border:2px solid #3c2308;border-radius:10px;padding:8px 14px;cursor:pointer;box-shadow:0 3px 0 #2a1605}
+  .topbtn.mail{position:relative}
+  .topbtn.mail .n{position:absolute;top:-9px;right:-9px;background:#ff5a3c;color:#fff;border:2px solid #fff;border-radius:999px;font-size:12px;padding:1px 6px;font-family:var(--body);font-weight:700}
+  /* characters */
+  .actor{position:absolute;transform:translate(-50%,-50%);text-align:center;z-index:6;line-height:1}
+  .actor img{height:clamp(64px,9vw,120px);display:block;filter:drop-shadow(0 4px 5px rgba(0,0,0,.5))}
+  .actor .label{position:absolute;top:100%;left:50%;transform:translateX(-50%);margin-top:4px;font-family:var(--disp);font-size:clamp(10px,1.3vw,14px);white-space:nowrap;text-shadow:0 1px 5px rgba(0,0,0,.9)}
+  /* THE MAILBOX prop — Maksym's two pictures: empty, and "mail's in" (flag up) */
+  .mailbox{position:absolute;left:64%;top:72.5%;transform:translate(-50%,-50%);z-index:7;cursor:pointer;text-align:center;line-height:1;transition:transform .15s}
+  .mailbox:hover{transform:translate(-50%,-50%) scale(1.06)}
+  .mailbox .pic{position:relative;display:inline-block}
+  .mailbox img{height:clamp(90px,12.5vw,160px);display:block;filter:drop-shadow(0 6px 8px rgba(0,0,0,.45))}
+  .mailbox img.ready{display:none}
+  .mailbox.up img.ready{display:block}.mailbox.up img.empty{display:none}
+  .mailbox .label{font-family:var(--disp);font-size:clamp(10px,1.3vw,14px);white-space:nowrap;text-shadow:0 1px 5px rgba(0,0,0,.9);margin-top:2px}
+  .mailbox .count{position:absolute;top:2px;right:-6px;background:#ff5a3c;color:#fff;border:2px solid #fff;border-radius:999px;font-size:13px;padding:1px 8px;font-weight:700;font-family:var(--body)}
+  .mailbox.quiet .count{display:none}
+  .cap{position:absolute;left:0;right:0;bottom:10px;text-align:center;font-size:15px;color:#e6eef2;text-shadow:0 1px 4px rgba(0,0,0,.8);margin:0;line-height:1.3}
+  /* THE MAIL board — same paper as Today's Orders */
+  .board-wrap{position:absolute;inset:0;z-index:17;display:flex;align-items:center;justify-content:center;background:rgba(4,25,34,.55);line-height:1.25}
+  .easel{width:min(94%,640px);transform:rotate(-1.2deg)}
+  .paper{position:relative;padding:22px 26px 24px;background:linear-gradient(178deg,#f3dfa2,#eed490 60%,#e6c67a);border-radius:7px 10px 6px 9px;color:#241d0e;font-family:var(--disp);box-shadow:0 18px 44px rgba(0,0,0,.55),inset 0 0 70px rgba(150,110,40,.28);max-height:88vh;overflow:auto}
+  .paper::before,.paper::after{content:"";position:absolute;top:10px;width:12px;height:12px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#9a9a9a,#3c3c3c);box-shadow:0 2px 3px rgba(0,0,0,.45)}
+  .paper::before{left:15px}.paper::after{right:15px}
+  .paper h3{margin:0 0 2px;text-align:center;font-size:38px;line-height:1;color:#8c1e12;letter-spacing:1px;text-transform:uppercase;text-shadow:1px 2px 0 rgba(60,10,5,.25);transform:rotate(-1deg)}
+  .paper .sub{text-align:center;font-size:12px;color:#7a5c26;margin-bottom:12px}
+  .paper .tabs{display:flex;justify-content:center;gap:14px;font-size:13px;color:#7a5c26;margin-bottom:12px}
+  .paper .tabs b{color:#241d0e;border-bottom:2px solid #8c1e12}
+  .paper h4{margin:12px 0 6px;font-size:13px;letter-spacing:1.2px;text-transform:uppercase;color:#7a5c26;border-bottom:2px dotted #c9ab62;padding-bottom:3px}
+  .paper h4.you{color:#8c1e12}
+  .paper ul{list-style:none;margin:0;padding:0;display:grid;gap:9px}
+  .paper li{display:flex;flex-direction:column;gap:2px;font-size:17px;font-weight:700;letter-spacing:.3px}
+  .paper li.faint{opacity:.55;font-weight:500}
+  .line{display:flex;align-items:baseline;gap:8px}
+  .d{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:56%;min-width:0}
+  .d small{font-weight:400;color:#7a5c26;font-size:12px;margin-right:4px}
+  .dots{flex:1;border-bottom:3px dotted #2a2213;transform:translateY(-4px);min-width:18px}
+  .s{flex:none;font-size:12.5px;text-transform:uppercase;letter-spacing:.6px;white-space:nowrap}
+  .s-fix,.s-again,.s-review{color:#8c1e12}.s-merge{color:#1f6b2a}.s-wait,.s-theirs{color:#6d6552}
+  .note{font-size:12px;font-weight:400;letter-spacing:0;color:#7a5c26;opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:4px}
+  .note.needs{color:#6b2a1e}
+  .acts{display:flex;gap:8px;padding-left:4px;margin-top:2px}
+  .btn{font-family:var(--disp);font-size:12px;padding:4px 10px;border-radius:8px;border:2px solid #3c2308;background:linear-gradient(#a0652b,#6e4116);color:#f7e6c4;cursor:pointer;box-shadow:0 2px 0 #2a1605}
+  .btn.go{background:linear-gradient(#49a35a,#2a7036);border-color:#1c4a24}
+  .btn.ghost{background:transparent;color:#7a5c26;border-color:#c9ab62;box-shadow:none}
+  /* the confirm card */
+  .card{position:absolute;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:rgba(4,25,34,.6)}
+  .card .wood{width:min(92%,460px);padding:22px 24px;border-radius:14px;background:linear-gradient(#b7762f,#7e4a16);border:3px solid #3c2308;color:#fff8e6;font-family:var(--disp);box-shadow:0 18px 44px rgba(0,0,0,.6);line-height:1.3;font-size:16px}
+  .card .wood h3{margin:0 0 8px;font-size:24px}
+  .card .wood p{margin:6px 0;font-size:15px}
+  .card .row{display:flex;gap:10px;margin-top:14px;justify-content:flex-end}
+  .card .btn{font-size:14px;padding:8px 14px}
+  .toast{position:absolute;left:50%;bottom:46px;transform:translateX(-50%);z-index:30;background:rgba(20,40,20,.92);border:2px solid #49a35a;border-radius:10px;padding:8px 14px;font-family:var(--disp);font-size:15px}
+  .hint{max-width:1100px;font-size:13px;color:#9fb6bf;line-height:1.4;text-align:center}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="scene" id="scene">
+  <img class="bg" src="conch-day.png" alt="Conch Street">
+  <div class="topright">
+    <button class="topbtn">📋 Orders</button>
+    <button class="topbtn">highcap-mobile ▾</button>
+  </div>
+
+  <div class="actor" style="left:15%;top:72%"><img src="assets/patrick-idle.png" alt=""><span class="label">Patrick · idle</span></div>
+  <div class="actor" style="left:46%;top:74%"><img src="assets/squidward-working.png" alt=""><span class="label">Squidward · working…</span></div>
+  <div class="actor" style="left:80%;top:72%"><img src="assets/spongebob-idle.png" alt=""><span class="label">SpongeBob · idle</span></div>
+
+  <!-- THE MAILBOX: flag up + count = something in the repo needs you -->
+  <div class="mailbox up" id="mailbox" onclick="openBoard()" title="The mail — press P">
+    <div class="pic"><img class="empty" src="assets/mailbox-empty.png" alt="mailbox, empty"><img class="ready" src="assets/mailbox-ready.png" alt="mailbox with mail in it"><span class="count">3</span></div>
+    <div class="label">Mail · 3 for you</div>
+  </div>
+
+  <p class="cap" id="cap">Click the mailbox (or press P). 3 pieces of mail need you. Press E to empty it.</p>
+
+  <!-- THE MAIL board -->
+  <div class="board-wrap" id="board" hidden onclick="if(event.target===this)closeBoard()">
+    <div class="easel"><div class="paper">
+      <h3>Today's Mail</h3>
+      <div class="sub">pull requests on highcap-mobile · checked 2 min ago · click a line to open it on GitHub · press P to close</div>
+      <div class="tabs"><b>For you (3)</b><span>Yours (3)</span><span>Everyone's (6)</span></div>
+
+      <h4 class="you">Fix it — your dishes sent back</h4>
+      <ul>
+        <li>
+          <div class="line"><span class="d"><small>#102</small>Runner who never chose a unit reads miles</span><span class="dots"></span><span class="s s-fix">Sent back · 2 h</span></div>
+          <span class="note needs">Anna asked for changes · 3 comments to answer · also collides with dev</span>
+          <div class="acts"><button class="btn" onclick="handOff(event,102)">Hand to a character</button><button class="btn ghost" onclick="event.stopPropagation()">Open on GitHub</button></div>
+        </li>
+        <li>
+          <div class="line"><span class="d"><small>#101</small>Weekly mileage: type an exact number</span><span class="dots"></span><span class="s s-fix">Sent back · 2 h</span></div>
+          <span class="note needs">Anna asked for changes · 4 comments to answer · also collides with dev</span>
+          <div class="acts"><button class="btn" onclick="handOff(event,101)">Hand to a character</button><button class="btn ghost" onclick="event.stopPropagation()">Open on GitHub</button></div>
+        </li>
+        <li>
+          <div class="line"><span class="d"><small>#87</small>Plan tab: training plan month calendar</span><span class="dots"></span><span class="s s-fix">Almost · 2 h</span></div>
+          <span class="note needs">Anna approved ✓ · but it collides with dev and 2 comments are still open — fix those, then it's yours to merge</span>
+          <div class="acts"><button class="btn" onclick="handOff(event,87)">Hand to a character</button><button class="btn ghost" onclick="event.stopPropagation()">Open on GitHub</button></div>
+        </li>
+      </ul>
+
+      <h4>Ready to merge — clean plate</h4>
+      <ul>
+        <li class="faint"><div class="line"><span class="d">nothing right now</span></div></li>
+      </ul>
+
+      <h4>Your turn to review — Anna's dishes</h4>
+      <ul>
+        <li class="faint"><div class="line"><span class="d">nothing right now — you looked at all three today</span></div></li>
+      </ul>
+
+      <h4>Nothing for you — just so you know</h4>
+      <ul>
+        <li class="faint"><div class="line"><span class="d"><small>#96</small>Rebuild the pre-run check-in base sheet</span><span class="dots"></span><span class="s s-theirs">You approved · hers</span></div><span class="note">Anna's · 9 of your comments still open — she can't merge until they're closed</span></li>
+        <li class="faint"><div class="line"><span class="d"><small>#98</small>Pre-run conditional follow-up questions</span><span class="dots"></span><span class="s s-theirs">You approved · hers</span></div><span class="note">Anna's · clean, waiting for her to merge</span></li>
+        <li class="faint"><div class="line"><span class="d"><small>#94</small>Allow up to 5 race goals, one primary</span><span class="dots"></span><span class="s s-theirs">You approved · hers</span></div><span class="note">Anna's · clean, waiting for her to merge</span></li>
+      </ul>
+
+      <h4 style="margin-top:18px">What the words mean · the demo</h4>
+      <ul>
+        <li class="faint" style="opacity:.8"><div class="line"><span class="d">SENT BACK</span><span class="dots"></span><span class="s s-fix">fix it</span></div><span class="note">the reviewer asked for changes, or it collides with dev, or the checks are red</span></li>
+        <li class="faint" style="opacity:.8"><div class="line"><span class="d">LOOK AGAIN</span><span class="dots"></span><span class="s s-again">re-review</span></div><span class="note">Anna changed her PR after you looked — your old review no longer counts</span></li>
+        <li class="faint" style="opacity:.8"><div class="line"><span class="d">YOUR TURN</span><span class="dots"></span><span class="s s-review">review it</span></div><span class="note">a teammate's PR nobody has reviewed yet</span></li>
+        <li style="opacity:.95"><div class="line"><span class="d"><small>#87</small>(how it will look once fixed)</span><span class="dots"></span><span class="s s-merge">Clean plate</span></div><span class="note">Anna approved ✓ · checks green ✓ · no collisions ✓</span>
+          <div class="acts"><button class="btn go" onclick="askMerge(event)">Merge it</button><button class="btn ghost" onclick="event.stopPropagation()">Open on GitHub</button></div></li>
+        <li class="faint" style="opacity:.8"><div class="line"><span class="d">WITH ANNA</span><span class="dots"></span><span class="s s-wait">waiting</span></div><span class="note">your PR is on her table — nothing for you to do</span></li>
+      </ul>
+    </div></div>
+  </div>
+
+  <!-- merge confirm card -->
+  <div class="card" id="mergeCard" hidden>
+    <div class="wood">
+      <h3>Merge #87 into dev?</h3>
+      <p>Plan tab: training plan month calendar.</p>
+      <p>Anna approved at 14:15 · checks green · no collisions · 13 comments, all closed.</p>
+      <p>The town will squash-merge it, the way this repo allows, and delete the branch.</p>
+      <div class="row"><button class="btn ghost" onclick="closeMerge()">Not yet</button><button class="btn go" onclick="doMerge()">Yes, merge it</button></div>
+    </div>
+  </div>
+
+  <!-- hand-off card -->
+  <div class="card" id="handCard" hidden>
+    <div class="wood">
+      <h3>Who takes it?</h3>
+      <p id="handText"></p>
+      <p style="opacity:.85;font-size:14px">The character gets the PR's branch, every open comment, and the order: answer each one, fix the collision with dev, push, and tell you when it's back on Anna's table.</p>
+      <div class="row"><button class="btn ghost" onclick="closeHand()">Cancel</button><button class="btn" onclick="pick('Patrick')">Patrick</button><button class="btn" onclick="pick('SpongeBob')">SpongeBob</button></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+</div>
+<p class="hint">Mockup, 2026-11-04 — every line is a real open PR on highcap-mobile right now, worded the way the town would word it. The mailbox is your two pictures: empty when nothing needs you, SpongeBob popping out when mail is in.</p>
+<script>
+  const board=document.getElementById('board'), mb=document.getElementById('mailbox'), toast=document.getElementById('toast');
+  function openBoard(){board.hidden=false}
+  function closeBoard(){board.hidden=true}
+  document.addEventListener('keydown',e=>{if(e.key==='e'||e.key==='E'){const up=mb.classList.toggle('up');mb.classList.toggle('quiet',!up);mb.querySelector('.label').textContent=up?'Mail · 3 for you':'Mail';document.getElementById('cap').textContent=up?'Click the mailbox (or press P). 3 pieces of mail need you. Press E to empty it.':'Nothing in the mail right now. Press E to fill it.'}if(e.key==='p'||e.key==='P'){board.hidden=!board.hidden}if(e.key==='Escape'){board.hidden=true;closeMerge();closeHand()}});
+  function askMerge(e){e.stopPropagation();document.getElementById('mergeCard').hidden=false}
+  function closeMerge(){document.getElementById('mergeCard').hidden=true}
+  function doMerge(){closeMerge();say('✓ #87 merged into dev · branch deleted · Anna gets a note');mb.classList.remove('up');mb.classList.add('quiet');mb.querySelector('.label').textContent='Mail';mb.querySelector('.count').textContent='2';setTimeout(()=>{mb.classList.add('up');mb.classList.remove('quiet');mb.querySelector('.label').textContent='Mail · 2 for you'},1500)}
+  let handN=0;
+  function handOff(e,n){e.stopPropagation();handN=n;document.getElementById('handText').textContent=`PR #${n}: answer Anna's comments and fix the collision with dev.`;document.getElementById('handCard').hidden=false}
+  function closeHand(){document.getElementById('handCard').hidden=true}
+  function pick(who){closeHand();closeBoard();say(`${who} took PR #${handN} — you'll see it on the Orders board as "FIXING #${handN}"`)}
+  function say(t){toast.textContent=t;toast.hidden=false;clearTimeout(say.t);say.t=setTimeout(()=>toast.hidden=true,3500)}
+</script>
+</body>
+</html>

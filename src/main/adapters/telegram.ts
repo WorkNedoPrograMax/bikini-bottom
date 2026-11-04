@@ -7,8 +7,9 @@
 
 import { log } from "../log";
 
-/** One row of inline buttons. `data` is the callback payload routed to onTap. */
-export type TgButton = { text: string; data: string };
+/** One row of inline buttons. `data` is the callback payload routed to onTap —
+ *  or `url` for a button that just opens a link (a PR on GitHub). */
+export type TgButton = { text: string; data: string; url?: string } | { text: string; url: string; data?: undefined };
 
 export interface TgHandlers {
   /** A button was tapped; `data` is its callback_data (e.g. "keep:bob"). */
@@ -56,7 +57,7 @@ export class TelegramBridge {
     };
     if (buttons && buttons.length) {
       params.reply_markup = {
-        inline_keyboard: buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data }))),
+        inline_keyboard: buttons.map((row) => row.map((b) => (b.url ? { text: b.text, url: b.url } : { text: b.text, callback_data: b.data }))),
       };
     }
     const r = await this.api("sendMessage", params);

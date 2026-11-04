@@ -321,6 +321,8 @@ export interface TownTab {
   missing?: boolean;
   /** Who is cooking (for "SpongeBob cooking" when it is one person). */
   cookingNames?: string[];
+  /** Pieces of mail that need you there (the Mailbox). */
+  mail?: number;
 }
 
 /** The "Add a town" card, while it is up. Null when nobody is adding a town.
@@ -360,6 +362,61 @@ export interface BoothView {
   doors?: { phone: "ios" | "android"; name: string; holder: CharacterId | null; since: number; asleep: boolean }[];
 }
 
+// ───────────── The Mailbox: pull requests on the team repo ─────────────
+/** The kitchen word for one pull request. sent-back · almost · clean-plate and
+ *  look-again · your-turn need Maksym; with-reviewer · theirs · draft do not. */
+export type MailWord = "sent-back" | "almost" | "clean-plate" | "your-turn" | "look-again" | "with-reviewer" | "theirs" | "draft";
+
+/** One line on the Today's Mail paper — one open pull request. */
+export interface MailLine {
+  number: number;
+  title: string;
+  url: string;
+  /** GitHub login of the author. */
+  author: string;
+  /** Maksym's own PR. */
+  mine: boolean;
+  draft: boolean;
+  word: MailWord;
+  /** The uppercase word on the right: "SENT BACK", "WITH ANNA"… */
+  status: string;
+  /** The one plain sentence under the title: what is going on and what to do. */
+  reason: string;
+  /** Counts on the flag, pings the phone. */
+  forYou: boolean;
+  /** The Merge button shows (own PR on a clean plate). */
+  canMerge: boolean;
+  /** "Hand to a character" shows. */
+  canHandOff: boolean;
+  /** Epoch ms the PR last changed (for "· 2 h"). */
+  since: number;
+  branch: string;
+  base: string;
+  /** Open (unresolved) review threads. */
+  unresolved: number;
+  conflicts: boolean;
+  checks: "green" | "red" | "pending" | "none";
+}
+
+/** The mailbox as the street draws it: null when the town has no GitHub repo. */
+export interface MailView {
+  /** "Owner/repo". */
+  repo: string;
+  /** Epoch ms of the last successful look at GitHub (0 = never yet). */
+  checkedAt: number;
+  /** Lines that need Maksym — the number on the flag. */
+  forYou: number;
+  lines: MailLine[];
+  /** One line when the last look failed (gh missing, offline…), else null. */
+  error: string | null;
+  /** The two pictures (file:// URLs) for the prop, or null → drawn stand-in. */
+  pictures: { empty: string | null; ready: string | null };
+  /** Who can take a hand-off right now (idle characters), for the face row. */
+  crew: { id: CharacterId; name: string; available: boolean }[];
+  /** A merge in flight: the PR number, so the paper can say "merging…". */
+  merging: number | null;
+}
+
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */
 export interface TownSnapshot {
   /** Monotonic sequence of the last event folded into this snapshot. */
@@ -388,6 +445,8 @@ export interface TownSnapshot {
   addingTown: AddingTown | null;
   /** The Phone Booth prop, or null when this town has no test phone. */
   booth: BoothView | null;
+  /** The Mailbox (pull requests), or null when this town has no GitHub repo. */
+  mail: MailView | null;
 }
 
 /** Renderer → main. Named intents only — never raw fs/git/SDK calls (AD-4). */
@@ -439,12 +498,18 @@ export type Intent =
   | { type: "cancelAddTown" }
   // Forget a town whose folder is gone (greyed "folder missing"): drops it from
   // the list and the config. A town that is open is never forgotten this way.
-  | { type: "forgetTown"; path: string };
+  | { type: "forgetTown"; path: string }
+  // The Mailbox: look at GitHub again now; merge an own PR on a clean plate;
+  // hand a PR's fix (or review) to a character; open a PR in the browser.
+  | { type: "refreshMail" }
+  | { type: "mergePull"; number: number }
+  | { type: "handOffPull"; number: number; characterId: CharacterId }
+  | { type: "openPull"; number: number };
 
 /** A one-shot sound cue (transient, view-only — like the token stream). */
 export interface SoundCue {
   characterId: CharacterId;
-  kind: "start" | "ready";
+  kind: "start" | "ready" | "mail";
   /** Resolved file:// URL of Maksym's clip, or null → fall back to a placeholder. */
   url: string | null;
 }

@@ -39,6 +39,19 @@ export interface DeviceSpec {
   sleepAfterMin?: number;
 }
 
+/** The Mailbox: how this town reads its pull requests. Absent = defaults
+ *  (the repo from the git remote, a look every 2 minutes, squash-merge). */
+export interface PullsSpec {
+  /** "Owner/repo" when the git remote is not the repo to watch. */
+  repo?: string;
+  /** Seconds between looks at GitHub (default 120, never under 30). */
+  everySec?: number;
+  /** How the Merge button merges (default squash). */
+  merge?: "squash" | "merge";
+  /** true = no mailbox in this town. */
+  off?: boolean;
+}
+
 export interface TownProfile {
   /** Shown on the sign. */
   name: string;
@@ -60,6 +73,8 @@ export interface TownProfile {
   /** What a fresh lane needs before building (git-ignored files to copy in,
    *  commands to run once). Absent = a lane is ready as checked out. */
   setup?: LaneSetup;
+  /** The Mailbox (pull requests), when the defaults are not right. */
+  pulls?: PullsSpec;
 }
 
 /** Where a project's profile lives. */
@@ -125,7 +140,21 @@ export function normalizeProfile(raw: unknown, projectPath: string): TownProfile
   if (dev && android && android.kind === "android-emulator" && dev.kind !== "android-emulator") out.android = android;
   const setup = normalizeSetup(r.setup);
   if (setup) out.setup = setup;
+  const pulls = normalizePulls(r.pulls);
+  if (pulls) out.pulls = pulls;
   return out;
+}
+
+/** A well-formed Mailbox spec, or null when absent/empty. Unknown fields dropped. */
+export function normalizePulls(raw: unknown): PullsSpec | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  const out: PullsSpec = {};
+  if (typeof p.repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(p.repo.trim())) out.repo = p.repo.trim();
+  if (typeof p.everySec === "number" && isFinite(p.everySec) && p.everySec > 0) out.everySec = Math.max(30, Math.round(p.everySec));
+  if (p.merge === "squash" || p.merge === "merge") out.merge = p.merge;
+  if (p.off === true) out.off = true;
+  return Object.keys(out).length ? out : null;
 }
 
 /** A well-formed phone, or null when the field is missing or malformed (a
