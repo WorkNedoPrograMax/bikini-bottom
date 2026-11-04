@@ -12,6 +12,7 @@ import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats, Fuel, G
 import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
 import { newEvidence, noteEvidence, openWindow, closeWindow, isClaimed, type PictureEvidence } from "../domain/pictureClaims";
+import { stampArchive, pruneArchive, ARCHIVE_KEEP_DAYS } from "../domain/archiveRetention";
 import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
 import { clearStrayApiKey } from "./claude";
 import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue, sanitizeStatus, statusAccepted, fallbackNote } from "./guards";
@@ -21,7 +22,7 @@ import { runSetup, setupDue, loadReport } from "./laneSetup";
 import { Switchboard, Bedtime, boothStep, phoneMatch, phoneTarget, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN, DEFAULT_SLEEP_AFTER_MIN, type PhoneKey } from "../domain/booth";
 import { wakeAndroid, wakeIos, sleepAndroid, sleepIos, androidSerial } from "./phone";
 import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../domain/stayInLane";
-import { log } from "../log";
+import { log, log as appLog } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
 // A character's live session is ONE long-lived process, like a terminal you
@@ -351,6 +352,10 @@ interface ArchivedSession {
   title: string;
   messages: ChatMessage[];
   sdkSessionId: string | null;
+  /** Epoch ms when this conversation was archived (a new order replaced it) —
+   *  it is dropped ARCHIVE_KEEP_DAYS later. Missing on files from before
+   *  2026-11-04; stamped at the first load. */
+  endedAt?: number;
 }
 
 /** What we persist per Character so a close/reopen keeps everything. */
@@ -565,6 +570,19 @@ export class LaneManager {
       for (const [id, v] of Object.entries(raw)) {
         this.loaded[id] = Array.isArray(v) ? { archive: v as ArchivedSession[] } : (v as PersistedLane);
       }
+      // Past orders older than a month go: stamp the undated (pre-2026-11-04)
+      // ones first so they get their month from today, never a guess.
+      const now = Date.now();
+      let dropped = 0;
+      for (const [id, pl] of Object.entries(this.loaded)) {
+        const arch = Array.isArray(pl.archive) ? pl.archive : [];
+        const stamped = stampArchive(arch, now);
+        const pruned = pruneArchive(arch, now);
+        pl.archive = pruned.kept;
+        dropped += pruned.dropped;
+        if (stamped || pruned.dropped) appLog("lane", `${id} past orders`, { kept: pruned.kept.length, dropped: pruned.dropped, stampedToday: stamped, keepDays: ARCHIVE_KEEP_DAYS });
+      }
+      if (dropped) void fs.writeFile(this.sessionsFile, JSON.stringify(this.loaded), "utf8").catch(() => {});
     } catch { this.loaded = {}; }
   }
 
@@ -894,10 +912,13 @@ export class LaneManager {
         title: (firstYou?.text || "a past order").replace(/\s+/g, " ").slice(0, 40),
         messages: l.conversation.slice(),
         sdkSessionId: l.sessionId,
+        endedAt: Date.now(),
       });
-      this.persist();
     }
-    l.viewing = null;
+    l.viewing = null; // (nothing is being viewed, so the indices may shift)
+    const pruned = pruneArchive(l.archive, Date.now());
+    if (pruned.dropped) { l.archive = pruned.kept; log("lane", `${id} past orders`, { kept: pruned.kept.length, dropped: pruned.dropped, keepDays: ARCHIVE_KEEP_DAYS }); }
+    this.persist();
     l.conversation = [{ from: "you", text: prompt, images: imageUrls(attachments), files: fileNames(attachments) }];
     l.sessionId = null; l.lastPrompt = prompt;
     l.todos = []; l.taskStartedAt = Date.now(); l.taskTokens = 0; // fresh job → fresh plan/timer/spend
@@ -1252,7 +1273,7 @@ export class LaneManager {
       const firstYou = l.conversation.find((m) => m.from === "you");
       l.archive.push({
         title: (firstYou?.text || "a past order").replace(/\s+/g, " ").slice(0, 40),
-        messages: l.conversation.slice(), sdkSessionId: l.sessionId,
+        messages: l.conversation.slice(), sdkSessionId: l.sessionId, endedAt: Date.now(),
       });
     }
     // Promote the chosen past order to current (remove it from the archive).
