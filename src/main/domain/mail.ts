@@ -208,6 +208,23 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
   };
 }
 
+/** Who is on which PR, read from REALITY rather than from the paper's own
+ *  bookkeeping: a character that is cooking with its lane checked out on the
+ *  PR's branch is on that PR — whether the order came from the paper or from
+ *  its chat window (Maksym, 2026-11-05: Patrick was on #101 from chat and the
+ *  paper still said SENT BACK). Hand-offs made from the paper (`handed`) win
+ *  when both say something. Pure. */
+export function inferOnIt(lines: readonly MailLine[], lanes: readonly { characterId: string; name: string; branch: string | null; working: boolean; since: number }[], handed: ReadonlyMap<number, { characterId: string; name: string; since: number }>): Map<number, { characterId: string; name: string; since: number }> {
+  const out = new Map<number, { characterId: string; name: string; since: number }>();
+  for (const l of lines) {
+    const h = handed.get(l.number);
+    if (h) { out.set(l.number, h); continue; }
+    const on = lanes.find((x) => x.working && x.branch && x.branch === l.branch);
+    if (on) out.set(l.number, { characterId: on.characterId, name: on.name, since: on.since || Date.now() });
+  }
+  return out;
+}
+
 /** A character is on a line (handed from the paper, still cooking): the line
  *  becomes "in progress" — not yours, no buttons, no ping — until the
  *  character finishes and the next look at GitHub says what came of it.

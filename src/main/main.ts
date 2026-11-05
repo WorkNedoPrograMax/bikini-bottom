@@ -14,8 +14,8 @@ import { AppConfig } from "./config/appConfig";
 import { prepareProject } from "./adapters/git";
 import { checkClaude, clearStrayApiKey } from "./adapters/claude";
 import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon, resolveMailPictures, resolveMailSound } from "./adapters/assets";
-import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, type GhThread } from "./domain/mail";
-import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview } from "./adapters/pulls";
+import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, inferOnIt, type GhThread } from "./domain/mail";
+import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview, branchAt } from "./adapters/pulls";
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
@@ -251,15 +251,22 @@ function loadOnIt(townPath: string): TownMail["onIt"] {
 function saveOnIt(townPath: string, m: TownMail): void {
   try { writeFileSync(onItFile(townPath), JSON.stringify([...m.onIt].map(([number, o]) => ({ number, ...o }))) + "\n", "utf8"); } catch (e) { log("mail", "on-it not saved", { error: String(e) }); }
 }
-/** The paper's lines with "X is on it" applied — and a mark whose character has
- *  stopped cooking (finished, or the app restarted mid-job) dropped. */
-function decorateMail(townPath: string, m: TownMail, lines: MailLine[]): MailLine[] {
+/** The paper's lines with "X is on it" applied — from the paper's own hand-offs
+ *  AND from what the lanes are really doing (a cooking character whose lane is
+ *  on the PR's branch). A hand-off mark whose character has stopped cooking
+ *  (finished, or the app restarted mid-job) is dropped. */
+async function decorateMail(townPath: string, m: TownMail, lines: MailLine[]): Promise<MailLine[]> {
   const L = lanesOf(townPath);
   const working = (id: string) => L?.isWorking(id as CharacterId) ?? false;
   let dropped = false;
   for (const [n, o] of m.onIt) if (!working(o.characterId)) { m.onIt.delete(n); dropped = true; }
   if (dropped) saveOnIt(townPath, m);
-  return markOnIt(lines, m.onIt, working);
+  const lanes: { characterId: string; name: string; branch: string | null; working: boolean; since: number }[] = [];
+  if (L) for (const r of ROSTER) {
+    if (r.isHomeBase || TERMINAL_IDS.has(r.id) || !L.isWorking(r.id)) continue;
+    lanes.push({ characterId: r.id, name: r.name, branch: await branchAt(L.worktreeDir(r.id)), working: true, since: L.view(r.id).taskStartedAt || Date.now() });
+  }
+  return markOnIt(lines, inferOnIt(lines, lanes, m.onIt), working);
 }
 let ghMe: string | null | undefined; // Maksym's GitHub login (undefined = not asked yet)
 
@@ -308,7 +315,7 @@ async function pollMail(townPath: string): Promise<void> {
   try {
     const { pulls, threads } = await fetchPulls(m.repo);
     const raw = mailLines(pulls, threads, m.me);
-    const lines = decorateMail(townPath, m, raw);
+    const lines = await decorateMail(townPath, m, raw);
     const fresh = newPings(lines, m.pinged);
     m.raw = raw; m.lines = lines; m.threads = threads; m.checkedAt = Date.now(); m.error = null;
     // A refusal is moot once the line is mergeable again, gone, or in a character's hands.
@@ -415,7 +422,7 @@ async function handOffPull(townPath: string, number: number, characterId: Charac
   m.onIt.set(number, { characterId, name: tgName(characterId), since: Date.now() });
   if (m.refused?.number === number) m.refused = null;
   saveOnIt(townPath, m);
-  m.lines = decorateMail(townPath, m, m.raw);
+  m.lines = await decorateMail(townPath, m, m.raw);
   pushSnapshot();
 }
 
@@ -447,11 +454,10 @@ function fireFinishNotification(townPath: string, id: CharacterId, summary: stri
   // A PR this character was on: the mark comes off and the paper looks at
   // GitHub right away, so the line says what came of the work, not "on it".
   const m = mails.get(townPath);
-  if (m && [...m.onIt.values()].some((o) => o.characterId === id)) {
+  if (m && ([...m.onIt.values()].some((o) => o.characterId === id) || m.lines.some((l) => l.onIt?.characterId === id))) {
     for (const [n, o] of m.onIt) if (o.characterId === id) { m.onIt.delete(n); log("mail", "character finished a PR — re-reading", { number: n, characterId: id, town: townNameOf(townPath) }); }
     saveOnIt(townPath, m);
-    m.lines = decorateMail(townPath, m, m.raw);
-    void pollMail(townPath);
+    void pollMail(townPath); // re-reads GitHub and re-paints who is on what
   }
   if (!cfg.data.notificationsWanted || !Notification.isSupported()) return;
   const here = townPath === currentTownPath;

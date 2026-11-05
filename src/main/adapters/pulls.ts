@@ -29,6 +29,12 @@ export async function ghLogin(): Promise<string | null> {
   return r.out;
 }
 
+/** The branch checked out in a folder (a character's lane), or null. */
+export async function branchAt(dir: string): Promise<string | null> {
+  const r = await run("git", ["branch", "--show-current"], dir, 10_000);
+  return r.ok && r.out ? r.out : null;
+}
+
 /** "Owner/repo" of the project's origin remote, or null (no remote, not GitHub). */
 export async function repoOf(projectPath: string): Promise<string | null> {
   const r = await run("git", ["remote", "get-url", "origin"], projectPath, 10_000);

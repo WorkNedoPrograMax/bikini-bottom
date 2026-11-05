@@ -5,7 +5,7 @@
 //   node scripts/check-mail.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt, touchesGitHub } = require("../dist/main/domain/mail.js");
+const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt, touchesGitHub, inferOnIt } = require("../dist/main/domain/mail.js");
 const { normalizePulls, normalizeProfile } = require("../dist/main/config/townProfile.js");
 
 let fails = 0;
@@ -146,6 +146,17 @@ ok(forYouCount(marked) === forYouCount([l102, l87]) - 1, "the flag counts one le
 ok(!newPings(marked, new Set()).some((l) => l.number === 102), "an on-it line never pings");
 const done = markOnIt([l102, l87], onIt, () => false);
 ok(done[0] === l102 && done[0].forYou === true, "Patrick finished (not working) → the raw line comes back as it was, yours again until the next look");
+
+console.log("inferOnIt — who is on what, read from the lanes (Maksym 2026-11-05: Patrick was on #101 from chat, the paper said SENT BACK):");
+const lanePat = { characterId: "pat", name: "Patrick", branch: "feature/x", working: true, since: 1762330000000 };
+const l87y = { ...l87, branch: "feature/y" }; // the fixtures all share "feature/x" — give #87 its own branch
+const laneBobIdle = { characterId: "bob", name: "SpongeBob", branch: "feature/y", working: false, since: 0 };
+const inf = inferOnIt([l102, l87y], [lanePat, laneBobIdle], new Map());
+ok(inf.get(102) && inf.get(102).characterId === "pat" && inf.get(102).since === 1762330000000, "a cooking lane on the PR's branch → that character is on it (no hand-off needed)");
+ok(!inf.has(87), "an idle lane on the PR's branch is not on it");
+const inf2 = inferOnIt([l102], [lanePat], new Map([[102, { characterId: "squid", name: "Squidward", since: 5 }]]));
+ok(inf2.get(102).characterId === "squid", "a hand-off made from the paper wins over the lane guess");
+ok(!inferOnIt([l102], [{ ...lanePat, branch: null }], new Map()).has(102), "a lane with no branch never matches");
 
 console.log("touchesGitHub — which tool calls make the paper re-read (Maksym 2026-11-05: a posted review showed as still due):");
 const bash = (command) => touchesGitHub("Bash", { command });
