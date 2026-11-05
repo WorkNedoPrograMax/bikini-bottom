@@ -715,6 +715,7 @@ html, body {
 .s-sent-back, .s-almost, .s-your-turn, .s-look-again { color: #8c1e12; }
 .s-clean-plate { color: #1f6b2a; }
 .s-with-reviewer, .s-theirs, .s-draft { color: #6d6552; }
+.mailboard .s-on-it { color: #6b4a12; }
 .mailboard .acts { display: flex; gap: 8px; padding-left: 4px; margin-top: 3px; flex-wrap: wrap; align-items: center; }
 .paper-btn {
   font-family: var(--disp); font-size: 12px; padding: 4px 10px; border-radius: 8px; border: 2px solid #3c2308;

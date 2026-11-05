@@ -5,7 +5,7 @@
 //   node scripts/check-mail.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName } = require("../dist/main/domain/mail.js");
+const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt } = require("../dist/main/domain/mail.js");
 const { normalizePulls, normalizeProfile } = require("../dist/main/config/townProfile.js");
 
 let fails = 0;
@@ -134,6 +134,18 @@ ok(mergeRefusal(l87b, pr({ number: 87, reviews: [rv(ANNA, "APPROVED", "2026-11-0
 ok(mergeRefusal(l87b, pr({ number: 87, statusCheckRollup: [{ status: "IN_PROGRESS" }], reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z")] })).includes("still running"), "checks running refuses");
 ok(mergeRefusal(l87b, pr({ number: 87, mergeStateStatus: "BLOCKED", reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z")] })).includes("blocked"), "BLOCKED on GitHub (open threads) refuses");
 ok(mergeRefusal(l87b, pr({ number: 87, reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z")] })) === null, "own PR, approved, green, clean → allowed");
+
+console.log("markOnIt — a character is on it (Maksym 2026-11-05: in progress, not stuck as not-done):");
+const onIt = new Map([[102, { characterId: "pat", name: "Patrick", since: 1762330000000 }]]);
+const marked = markOnIt([l102, l87], onIt, (id) => id === "pat");
+ok(marked[0].onIt && marked[0].onIt.characterId === "pat" && !marked[0].forYou && !marked[0].canHandOff && !marked[0].canMerge && !marked[0].askBack.length, "#102 handed to Patrick → on it, not for you, no buttons");
+ok(marked[0].status === "PATRICK IS ON IT" && marked[0].reason.startsWith("Patrick is on it · was: Anna asked for changes"), `#102 on-it line: "${marked[0].status}" / "${marked[0].reason}"`);
+ok(marked[0].word === "sent-back", "the word underneath stays (the ping key does not change)");
+ok(marked[1].onIt === null && marked[1].forYou === l87.forYou, "#87, not handed → untouched");
+ok(forYouCount(marked) === forYouCount([l102, l87]) - 1, "the flag counts one less while Patrick is on it");
+ok(!newPings(marked, new Set()).some((l) => l.number === 102), "an on-it line never pings");
+const done = markOnIt([l102, l87], onIt, () => false);
+ok(done[0] === l102 && done[0].forYou === true, "Patrick finished (not working) → the raw line comes back as it was, yours again until the next look");
 
 console.log("briefFor — the character's order:");
 const b = briefFor(l102, [th(ANNA, false, "Rename this to miles"), th(ANNA, true, "done")], "EmpatDevelopment/highcap-mobile");

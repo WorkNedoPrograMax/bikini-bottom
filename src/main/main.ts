@@ -14,7 +14,7 @@ import { AppConfig } from "./config/appConfig";
 import { prepareProject } from "./adapters/git";
 import { checkClaude, clearStrayApiKey } from "./adapters/claude";
 import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon, resolveMailPictures, resolveMailSound } from "./adapters/assets";
-import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, type GhThread } from "./domain/mail";
+import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, type GhThread } from "./domain/mail";
 import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview } from "./adapters/pulls";
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
@@ -223,12 +223,39 @@ function townTabs(): TownTab[] {
 // "needs you" lines the phone was already told about (<project>/.bikini/mail-pings.json).
 interface TownMail {
   repo: string; me: string; everySec: number; merge: "squash" | "merge";
+  /** The lines as GitHub says them, before "X is on it" is painted on. */
+  raw: MailLine[];
   lines: MailLine[]; threads: Record<number, GhThread[]>;
   checkedAt: number; error: string | null;
   timer: ReturnType<typeof setInterval> | null; busy: boolean;
   pinged: Set<string>; merging: number | null;
+  /** PR number → the character cooking it (handed from the paper). */
+  onIt: Map<number, { characterId: CharacterId; name: string; since: number }>;
 }
 const mails = new Map<string, TownMail>();
+
+function onItFile(townPath: string): string { return path.join(townPath, ".bikini", "mail-on-it.json"); }
+function loadOnIt(townPath: string): TownMail["onIt"] {
+  const out: TownMail["onIt"] = new Map();
+  try {
+    const a = JSON.parse(readFileSync(onItFile(townPath), "utf8"));
+    if (Array.isArray(a)) for (const e of a) if (e && typeof e.number === "number" && typeof e.characterId === "string") out.set(e.number, { characterId: e.characterId, name: String(e.name || tgName(e.characterId)), since: Number(e.since) || Date.now() });
+  } catch { /* none yet */ }
+  return out;
+}
+function saveOnIt(townPath: string, m: TownMail): void {
+  try { writeFileSync(onItFile(townPath), JSON.stringify([...m.onIt].map(([number, o]) => ({ number, ...o }))) + "\n", "utf8"); } catch (e) { log("mail", "on-it not saved", { error: String(e) }); }
+}
+/** The paper's lines with "X is on it" applied — and a mark whose character has
+ *  stopped cooking (finished, or the app restarted mid-job) dropped. */
+function decorateMail(townPath: string, m: TownMail, lines: MailLine[]): MailLine[] {
+  const L = lanesOf(townPath);
+  const working = (id: string) => L?.isWorking(id as CharacterId) ?? false;
+  let dropped = false;
+  for (const [n, o] of m.onIt) if (!working(o.characterId)) { m.onIt.delete(n); dropped = true; }
+  if (dropped) saveOnIt(townPath, m);
+  return markOnIt(lines, m.onIt, working);
+}
 let ghMe: string | null | undefined; // Maksym's GitHub login (undefined = not asked yet)
 
 function pingsFile(townPath: string): string { return path.join(townPath, ".bikini", "mail-pings.json"); }
@@ -247,7 +274,8 @@ async function startMail(townPath: string, profile: TownProfile): Promise<void> 
   if (!ghMe) { log("mail", "gh not logged in — no mailbox", { town: profile.name, repo }); return; }
   const m: TownMail = {
     repo, me: ghMe, everySec: profile.pulls?.everySec ?? 120, merge: profile.pulls?.merge ?? "squash",
-    lines: [], threads: {}, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadPinged(townPath), merging: null,
+    raw: [], lines: [], threads: {}, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadPinged(townPath), merging: null,
+    onIt: loadOnIt(townPath),
   };
   mails.set(townPath, m);
   log("mail", "mailbox up", { town: profile.name, repo, me: ghMe, everySec: m.everySec, merge: m.merge });
@@ -264,9 +292,10 @@ async function pollMail(townPath: string): Promise<void> {
   const before = JSON.stringify(m.lines) + m.error;
   try {
     const { pulls, threads } = await fetchPulls(m.repo);
-    const lines = mailLines(pulls, threads, m.me);
+    const raw = mailLines(pulls, threads, m.me);
+    const lines = decorateMail(townPath, m, raw);
     const fresh = newPings(lines, m.pinged);
-    m.lines = lines; m.threads = threads; m.checkedAt = Date.now(); m.error = null;
+    m.raw = raw; m.lines = lines; m.threads = threads; m.checkedAt = Date.now(); m.error = null;
     if (fresh.length) {
       for (const l of fresh) m.pinged.add(pingKey(l));
       savePinged(townPath, m.pinged);
@@ -351,6 +380,10 @@ async function handOffPull(townPath: string, number: number, characterId: Charac
   log("mail", "handed to a character", { number, word: line.word, characterId, town: townNameOf(townPath) });
   if (townPath === currentTownPath) openWindowId = characterId;
   await t.lanes.startJob(characterId, brief);
+  // The line is in progress now: "<name> is on it", not yours, until they finish.
+  m.onIt.set(number, { characterId, name: tgName(characterId), since: Date.now() });
+  saveOnIt(townPath, m);
+  m.lines = decorateMail(townPath, m, m.raw);
   pushSnapshot();
 }
 
@@ -379,6 +412,15 @@ function notifyTgMail(townPath: string, fresh: MailLine[]): void {
  *  is not the one on screen: "SpongeBob finished! · Rock Bottom". */
 function fireFinishNotification(townPath: string, id: CharacterId, summary: string): void {
   notifyTgDone(townPath, id, summary); // phone always gets the "finished" ping (not gated by focus/desktop-notif prefs)
+  // A PR this character was on: the mark comes off and the paper looks at
+  // GitHub right away, so the line says what came of the work, not "on it".
+  const m = mails.get(townPath);
+  if (m && [...m.onIt.values()].some((o) => o.characterId === id)) {
+    for (const [n, o] of m.onIt) if (o.characterId === id) { m.onIt.delete(n); log("mail", "character finished a PR — re-reading", { number: n, characterId: id, town: townNameOf(townPath) }); }
+    saveOnIt(townPath, m);
+    m.lines = decorateMail(townPath, m, m.raw);
+    void pollMail(townPath);
+  }
   if (!cfg.data.notificationsWanted || !Notification.isSupported()) return;
   const here = townPath === currentTownPath;
   if (here && win?.isFocused() && openWindowId === id) return; // already watching

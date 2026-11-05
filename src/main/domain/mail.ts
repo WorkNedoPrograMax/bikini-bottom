@@ -8,7 +8,7 @@
 // 2026-11-04). The words are derived from the latest review per person, the
 // last push time, the open comment threads and the collision state.
 
-import type { MailLine, MailWord } from "../../shared/ipc";
+import type { MailLine, MailWord, CharacterId } from "../../shared/ipc";
 
 /** One open pull request as `gh pr list --json …` prints it (the fields we read). */
 export interface GhPull {
@@ -203,9 +203,21 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
     : WORD_TEXT[word];
   return {
     number: pr.number, title: pr.title, url: pr.url, author, mine, draft: !!pr.isDraft,
-    word, status, reason, forYou, canMerge, canHandOff, askBack, reviewers, since, branch: pr.headRefName, base: pr.baseRefName,
+    word, status, reason, forYou, canMerge, canHandOff, askBack, reviewers, onIt: null, since, branch: pr.headRefName, base: pr.baseRefName,
     unresolved, conflicts, checks,
   };
+}
+
+/** A character is on a line (handed from the paper, still cooking): the line
+ *  becomes "in progress" — not yours, no buttons, no ping — until the
+ *  character finishes and the next look at GitHub says what came of it.
+ *  Pure: `onIt` maps PR number → who, `working` says whether they still are. */
+export function markOnIt(lines: readonly MailLine[], onIt: ReadonlyMap<number, { characterId: string; name: string; since: number }>, working: (characterId: string) => boolean): MailLine[] {
+  return lines.map((l) => {
+    const o = onIt.get(l.number);
+    if (!o || !working(o.characterId)) return l;
+    return { ...l, onIt: { characterId: o.characterId as CharacterId, name: o.name, since: o.since }, forYou: false, canMerge: false, canHandOff: false, askBack: [], status: `${o.name.toUpperCase()} IS ON IT`, reason: `${o.name} is on it · was: ${l.reason}` };
+  });
 }
 
 /** The whole paper: lines with what needs you first. */

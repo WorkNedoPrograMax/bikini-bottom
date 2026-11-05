@@ -394,6 +394,9 @@ export interface MailLine {
   askBack: string[];
   /** Everyone who looked at this PR (a verdict or a thread) — the brief names them. */
   reviewers: string[];
+  /** A character is on it right now (handed from the paper, still cooking):
+   *  the line is in progress, not yours, until that character finishes. */
+  onIt: { characterId: CharacterId; name: string; since: number } | null;
   /** Epoch ms the PR last changed (for "· 2 h"). */
   since: number;
   branch: string;
