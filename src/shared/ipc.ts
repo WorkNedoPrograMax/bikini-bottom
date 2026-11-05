@@ -450,6 +450,10 @@ export interface JiraView {
   /** How many open tickets are his in all. */
   open: number;
   error: string | null;
+  /** Who can be handed the sweep (idle, not a terminal character). */
+  crew: { id: CharacterId; name: string; available: boolean }[];
+  /** A character is sweeping the board right now. */
+  sweeping: { characterId: CharacterId; name: string; since: number } | null;
 }
 
 /** The mailbox as the street draws it: null when the town has no GitHub repo. */
@@ -567,6 +571,7 @@ export type Intent =
   | { type: "openJira"; key: string; url?: string }
   | { type: "saveJira"; email: string; token: string; site: string }
   | { type: "jiraSeen" }
+  | { type: "sweepJira"; characterId: CharacterId }
   | { type: "mergePull"; number: number }
   | { type: "askReview"; number: number }
   | { type: "handOffPull"; number: number; characterId: CharacterId }

@@ -199,6 +199,62 @@ export function plateCounts(issues: readonly JiraRawIssue[], me: string): { stat
   return [...counts].map(([status, count]) => ({ status, count })).sort((a, b) => order(a.status) - order(b.status) || a.status.localeCompare(b.status));
 }
 
+/** The ticket a PR belongs to, from its branch ("feature/HIGHCAP-275-plan-view")
+ *  or its title ("[HIGHCAP-275] Plan tab…"); null when neither names one. */
+export function ticketKeyOf(branch: string, title: string, project?: string): string | null {
+  const re = project ? new RegExp(`\\b(${project}-\\d+)\\b`) : /\b([A-Z][A-Z0-9]+-\d+)\b/;
+  const m = branch.match(re) || title.match(re);
+  return m ? m[1] : null;
+}
+
+/** The board's moves, by the transition names Jira offers (measured 2026-11-05 on
+ *  HIGHCAP: strict and linear). A move is allowed only from its one column. */
+export const MOVES = {
+  start: { from: "To Do", to: "In Progress", transition: "Start work" },
+  review: { from: "In Progress", to: "Code Review", transition: "To review" },
+  approved: { from: "Code Review", to: "Review Completed", transition: "Review approved" },
+  changes: { from: "Code Review", to: "In Progress", transition: "Changes requested" },
+} as const;
+
+/** After Maksym merged a PR from the town: the ticket, if it still sits in
+ *  Code Review, moves to Review Completed (the merge IS the approval). From any
+ *  other column: nothing — "Deployed, ready for QA" is the deploy's step, never
+ *  the town's. Returns the move to make, or the one-line reason there is none. */
+export function moveAfterMerge(status: string | null | undefined): { ok: true; move: typeof MOVES.approved } | { ok: false; why: string } {
+  const s = String(status || "").trim();
+  if (!s) return { ok: false, why: "the ticket could not be read" };
+  if (s.toLowerCase() === MOVES.approved.from.toLowerCase()) return { ok: true, move: MOVES.approved };
+  if (columnIndex(s) > columnIndex(MOVES.approved.from)) return { ok: false, why: `already past Code Review (${s})` };
+  return { ok: false, why: `not in Code Review (${s}) — the PR was merged before the ticket was sent to review` };
+}
+
+/** The sweep: a character's order to check that every ticket of Maksym's sits
+ *  where the work says it should, propose the moves in ONE question, apply his
+ *  picks. Pure text; the character does the reading and the moving. */
+export function sweepBrief(input: { project: string; site: string; plate: readonly { status: string; count: number }[]; open: number; repos: readonly string[] }): string {
+  const { project, site, plate, open, repos } = input;
+  const counts = plate.map((p) => `${p.status} ${p.count}`).join(" · ") || "none";
+  return `Sweep the Jira board for me: project ${project} on ${site}. I have ${open} open tickets (${counts}). Check that each one sits where the work says it should, then ask me ONCE what to move.
+
+How the board works (strict, these are the only moves, by their transition names): To Do —"Start work"→ In Progress —"To review"→ Code Review —"Review approved"→ Review Completed —"Deployed, ready for QA"→ Ready for QA; Code Review —"Changes requested"→ In Progress. "Deployed, ready for QA", In QA, Done and Release Ready are never yours to move; never change assignees; never create tickets.
+
+Do, in this order:
+1. Read my open tickets with the Atlassian MCP: JQL \`project = ${project} AND assignee = currentUser() AND statusCategory != Done\` (key, summary, status, links, sub-tasks, parent, last updated).
+2. For each, find the work behind it on GitHub${repos.length ? ` (${repos.join(", ")})` : ""}: \`gh pr list -R <repo> --state all --search "<KEY>" --json number,state,isDraft,mergedAt,reviewDecision,headRefName\` and \`git branch -r | grep <KEY>\`.
+3. Apply the rules and collect proposals:
+   - In To Do, but a branch or PR with its key exists → propose In Progress (or Code Review when a non-draft PR is open).
+   - In Progress, a non-draft PR open for review → propose Code Review.
+   - In Code Review, but the PR is merged → propose Review Completed.
+   - In Code Review, but the PR has changes requested and nothing pushed since → say so (the mailbox already shows it; no move).
+   - In Progress with no commit and no comment for 3+ days → ask: still on it, or park it (back to To Do)?
+   - Blocked by an unfinished linked ticket ("is blocked by" link, or a [BE] sibling sub-task of an [FE] one that is not past Code Review) → propose flagging it (the Impediment flag / a one-line comment "blocked by KEY"), no column move.
+   - Every sub-task Done or past the parent's column, parent behind → propose moving the parent along.
+   Nothing to propose for a ticket → leave it out.
+4. Ask me ONCE with ask_maksym: the story = the board in 3–5 plain sentences (how many tickets, how many look fine, what is out of place and why); one question per proposal, short, with the options "Move it" / "Leave it" (and "Flag as blocked" where that applies), the ticket named in the question. No proposals at all → no question: say "the board is in order" and stop.
+5. Apply exactly what I picked: \`getTransitionsForJiraIssue\` → the transition whose name matches → \`transitionJiraIssue\`; one short comment on each moved ticket saying why (the PR, the merge, the sweep). A transition that is not offered: skip it and tell me in one line.
+6. Finish with one short message: what moved, what was flagged, what you left.`;
+}
+
 /** "HIGHCAP" from a lifecycle config's projectKeys, or null. */
 export function projectFromLifecycle(raw: unknown): string | null {
   const keys = (raw as { jira?: { projectKeys?: unknown } } | null)?.jira?.projectKeys;

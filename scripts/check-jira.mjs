@@ -5,7 +5,7 @@
 //   node scripts/check-jira.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { jiraLines, jiraForYou, newJiraPings, plateCounts, adfMentions, adfText, columnIndex, firstName, projectFromLifecycle } = require("../dist/main/domain/jira.js");
+const { jiraLines, jiraForYou, newJiraPings, plateCounts, adfMentions, adfText, columnIndex, firstName, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, MOVES } = require("../dist/main/domain/jira.js");
 const { normalizeJira, normalizeProfile } = require("../dist/main/config/townProfile.js");
 
 let fails = 0;
@@ -80,6 +80,27 @@ ok(batched[0].url.startsWith("https://empat.atlassian.net/issues/?jql=") && deco
 ok(batched[0].id === "assigned-batch:Alona:2026-11-05", "one id per person per day — one ping, one seen");
 const few = jiraLines({ issues: many.slice(0, 3), comments: {}, me: ME, now: NOW, seen: new Set(), site: SITE });
 ok(few.length === 3 && few.every((l) => l.word === "assigned" && l.key.startsWith("HIGHCAP-")), "three or fewer stay separate lines");
+
+console.log("ticketKeyOf / moveAfterMerge — the ticket follows the merge (measured transitions, 2026-11-05):");
+ok(ticketKeyOf("feature/HIGHCAP-275-plan-view", "[HIGHCAP-275] Plan tab", "HIGHCAP") === "HIGHCAP-275", "the key from the branch");
+ok(ticketKeyOf("fix/miles-when-unset", "fix(HIGHCAP-233): a Runner who never chose a unit", "HIGHCAP") === "HIGHCAP-233", "the key from the title when the branch has none");
+ok(ticketKeyOf("chore/harness-x", "tidy", "HIGHCAP") === null && ticketKeyOf("feature/OTHER-1-x", "x", "HIGHCAP") === null, "no key, or another project's key → null");
+const ok1 = moveAfterMerge("Code Review");
+ok(ok1.ok && ok1.move.transition === "Review approved" && ok1.move.to === "Review Completed", "merged while in Code Review → \"Review approved\" → Review Completed");
+ok(!moveAfterMerge("Review Completed").ok && moveAfterMerge("Review Completed").why.includes("already past"), "already Review Completed → nothing");
+ok(!moveAfterMerge("Ready for QA").ok && !moveAfterMerge("In QA").ok, "past the review columns → nothing (Ready for QA is the deploy's step, never the town's)");
+ok(!moveAfterMerge("In Progress").ok && moveAfterMerge("In Progress").why.includes("not in Code Review"), "merged straight from In Progress → nothing, says why");
+ok(!moveAfterMerge(null).ok && !moveAfterMerge("").ok, "unreadable ticket → nothing");
+ok(MOVES.start.transition === "Start work" && MOVES.review.transition === "To review" && MOVES.changes.to === "In Progress", "the board's moves by their real transition names");
+
+console.log("sweepBrief — the character's order for the sweep:");
+const sb = sweepBrief({ project: "HIGHCAP", site: "https://empat.atlassian.net", plate: [{ status: "To Do", count: 25 }, { status: "Code Review", count: 4 }], open: 29, repos: ["EmpatDevelopment/highcap-mobile", "EmpatDevelopment/highcap-backend"] });
+ok(sb.includes("29 open tickets (To Do 25 · Code Review 4)") && sb.includes("project = HIGHCAP AND assignee = currentUser()"), "names the board and the JQL");
+ok(sb.includes("\"Start work\"") && sb.includes("\"To review\"") && sb.includes("\"Review approved\"") && sb.includes("\"Changes requested\""), "the only moves, by transition name");
+ok(sb.includes("never yours to move") && sb.includes("never create tickets") && sb.includes("never change assignees"), "the never-list");
+ok(sb.includes("Ask me ONCE with ask_maksym") && sb.includes("\"Move it\" / \"Leave it\"") && sb.includes("Flag as blocked"), "one question, Move/Leave/Flag per proposal");
+ok(sb.includes("gh pr list -R <repo>") && sb.includes("highcap-mobile, EmpatDevelopment/highcap-backend"), "the work is read from both repos");
+ok(sb.includes("the board is in order"), "nothing to propose → no question");
 
 console.log("profile — the jira spec:");
 ok(normalizeJira({ project: "HIGHCAP" }).project === "HIGHCAP" && normalizeJira({ project: "bad key" }) === null && normalizeJira({ off: true }).off === true && normalizeJira({}) === null, "project key validated, off kept, empty dropped");

@@ -67,6 +67,26 @@ export class JiraClient {
     }
     return { issues, comments };
   }
+
+  /** The current column of a ticket. */
+  async status(key: string): Promise<string | null> {
+    const j = await this.call("GET", `/rest/api/3/issue/${key}?fields=status`, undefined, 20_000);
+    return j?.fields?.status?.name ? String(j.fields.status.name) : null;
+  }
+
+  /** THE one write the town makes with the token: after Maksym's own merge,
+   *  the ticket moves by the named transition, with a one-line comment. Any
+   *  other move stays with the characters. */
+  async move(key: string, transitionName: string, comment: string): Promise<{ ok: boolean; message: string }> {
+    const j = await this.call("GET", `/rest/api/3/issue/${key}/transitions`, undefined, 20_000);
+    const t = (j?.transitions || []).find((x: any) => String(x?.name || "").toLowerCase() === transitionName.toLowerCase());
+    if (!t) return { ok: false, message: `Jira does not offer "${transitionName}" on ${key} right now` };
+    await this.call("POST", `/rest/api/3/issue/${key}/transitions`, { transition: { id: String(t.id) } }, 20_000).catch((e: any) => { throw new Error(`the move failed — ${e?.message || e}`); });
+    try {
+      await this.call("POST", `/rest/api/3/issue/${key}/comment`, { body: { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text: comment }] }] } }, 20_000);
+    } catch (e: any) { log("jira", "moved, but the comment failed", { key, error: String(e?.message || e) }); }
+    return { ok: true, message: `${key} → ${t.to?.name || transitionName}` };
+  }
 }
 
 function httpReason(status: number): string {

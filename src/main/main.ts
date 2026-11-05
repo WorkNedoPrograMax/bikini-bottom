@@ -17,7 +17,7 @@ import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHe
 import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, inferOnIt, type GhThread } from "./domain/mail";
 import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview, branchAt } from "./adapters/pulls";
 import { JiraClient } from "./adapters/jira";
-import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
+import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
@@ -292,6 +292,8 @@ interface JiraBoard {
   checkedAt: number; error: string | null;
   timer: ReturnType<typeof setInterval> | null; busy: boolean;
   pinged: Set<string>; seen: Set<string>;
+  /** A character sweeping this board (handed from the page), until it finishes. */
+  sweeping: { characterId: CharacterId; name: string; since: number; townPath: string } | null;
 }
 const jiras = new Map<string, JiraBoard>();
 const townJira = new Map<string, string>(); // town path → project key
@@ -325,8 +327,8 @@ async function startJira(townPath: string, profile: TownProfile): Promise<void> 
   if (!jiraConfigured()) { log("jira", "no token yet — the page shows the paste box", { town: profile.name, project }); return; }
   if (!jiraClient) jiraClient = new JiraClient(jiraSite(), cfg.data.jiraEmail!, cfg.data.jiraToken!);
   let me: { accountId: string; displayName: string };
-  try { me = await jiraClient.myself(); } catch (e: any) { log("jira", "token check failed", { project, error: String(e?.message || e) }); jiras.set(project, { project, me: "", meName: "", raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: String(e?.message || e), timer: null, busy: false, pinged: new Set(), seen: new Set() }); pushSnapshot(); return; }
-  const b: JiraBoard = { project, me: me.accountId, meName: me.displayName, raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadJiraSet("pings", project), seen: loadJiraSet("seen", project) };
+  try { me = await jiraClient.myself(); } catch (e: any) { log("jira", "token check failed", { project, error: String(e?.message || e) }); jiras.set(project, { project, me: "", meName: "", raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: String(e?.message || e), timer: null, busy: false, pinged: new Set(), seen: new Set(), sweeping: null }); pushSnapshot(); return; }
+  const b: JiraBoard = { project, me: me.accountId, meName: me.displayName, raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadJiraSet("pings", project), seen: loadJiraSet("seen", project), sweeping: null };
   jiras.set(project, b);
   log("jira", "board up", { project, me: me.displayName, everySec: JIRA_EVERY_SEC });
   await pollJira(project);
@@ -376,12 +378,53 @@ function jiraSeenNow(townPath: string | null): void {
   pushSnapshot();
 }
 
-function jiraViewFor(townPath: string | null): JiraView | null {
+function jiraViewFor(townPath: string | null, chars: TownSnapshot["characters"]): JiraView | null {
   const project = townPath ? townJira.get(townPath) : null;
   if (!project) return null;
+  const L = townPath ? lanesOf(townPath) : null;
+  const crew = chars.filter((x) => !x.isHomeBase).map((x) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) }));
   const b = jiras.get(project);
-  if (!b) return { project, site: jiraSite(), configured: jiraConfigured(), email: cfg.data.jiraEmail, checkedAt: 0, checking: false, forYou: 0, lines: [], plate: [], open: 0, error: null };
-  return { project, site: jiraSite(), configured: true, email: cfg.data.jiraEmail, checkedAt: b.checkedAt, checking: b.busy, forYou: jiraForYou(b.lines), lines: b.lines, plate: b.plate, open: b.open, error: b.error };
+  if (!b) return { project, site: jiraSite(), configured: jiraConfigured(), email: cfg.data.jiraEmail, checkedAt: 0, checking: false, forYou: 0, lines: [], plate: [], open: 0, error: null, crew, sweeping: null };
+  const sw = b.sweeping && (L?.isWorking(b.sweeping.characterId) ?? false) ? { characterId: b.sweeping.characterId, name: b.sweeping.name, since: b.sweeping.since } : null;
+  if (b.sweeping && !sw) b.sweeping = null; // stopped cooking (finished, or the app restarted mid-sweep)
+  return { project, site: jiraSite(), configured: true, email: cfg.data.jiraEmail, checkedAt: b.checkedAt, checking: b.busy, forYou: jiraForYou(b.lines), lines: b.lines, plate: b.plate, open: b.open, error: b.error, crew, sweeping: sw };
+}
+
+/** After Maksym merged a PR from the town: its ticket moves to Review Completed
+ *  when it still sits in Code Review — the one write the town makes with the
+ *  token (the merge IS the approval). Anything else stays with the characters. */
+async function moveTicketAfterMerge(townPath: string, line: MailLine): Promise<void> {
+  const project = townJira.get(townPath);
+  if (!project || !jiraClient) return;
+  const key = ticketKeyOf(line.branch, line.title, project);
+  if (!key) { log("jira", "merged PR names no ticket", { number: line.number, branch: line.branch }); return; }
+  try {
+    const status = await jiraClient.status(key);
+    const d = moveAfterMerge(status);
+    if (!d.ok) { log("jira", "ticket left where it is after the merge", { key, status, why: d.why }); toast(`Jira: ${key} stays in ${status || "?"} — ${d.why}`); return; }
+    const r = await jiraClient.move(key, d.move.transition, `Merged PR #${line.number} into ${line.base} — moved to ${d.move.to} from Bikini Bottom on Maksym's click.`);
+    log("jira", r.ok ? "ticket moved after the merge" : "ticket move failed", { key, number: line.number, message: r.message });
+    toast(r.ok ? `Jira: ${r.message} ✓` : `Jira: ${key} not moved — ${r.message}`);
+    if (r.ok) await tg?.send(`📋 ${tgEsc(r.message)} (merged #${line.number})`);
+    void pollJira(project);
+  } catch (e: any) { log("jira", "ticket move failed", { key, error: String(e?.message || e) }); toast(`Jira: ${key} not moved — ${String(e?.message || e)}`); }
+}
+
+/** Hand the sweep to a character: it reads the board, proposes the moves in one
+ *  question, applies Maksym's picks. The page says who is on it meanwhile. */
+async function sweepFromTown(townPath: string, characterId: CharacterId): Promise<void> {
+  const b = jiraOf(townPath); const t = towns.get(townPath);
+  if (!b || !t || characterId === "krabs") return;
+  if (TERMINAL_IDS.has(characterId)) { toast(`${tgName(characterId)} works in a terminal — pick another character.`); return; }
+  if (t.lanes.isWorking(characterId)) { toast(`${tgName(characterId)} is busy — pick someone idle.`); return; }
+  if (b.sweeping && (lanesOf(b.sweeping.townPath)?.isWorking(b.sweeping.characterId) ?? false)) { toast(`${b.sweeping.name} is already sweeping the board.`); return; }
+  const repos = [...new Set([...towns.keys()].filter((p) => townJira.get(p) === b.project).map((p) => mails.get(p)?.repo).filter((r): r is string => !!r))];
+  const brief = sweepBrief({ project: b.project, site: jiraSite(), plate: b.plate, open: b.open, repos });
+  log("jira", "sweep handed to a character", { project: b.project, characterId, town: townNameOf(townPath) });
+  if (townPath === currentTownPath) openWindowId = characterId;
+  await t.lanes.startJob(characterId, brief);
+  b.sweeping = { characterId, name: tgName(characterId), since: Date.now(), townPath };
+  pushSnapshot();
 }
 
 /** The paste box: the token is saved to the town's settings and every town's board starts. */
@@ -510,6 +553,7 @@ async function mergeFromTown(townPath: string, number: number, via: "street" | "
   if (r.ok) {
     toast(`✓ #${number} merged into ${line!.base} — branch deleted`);
     await tg?.send(`✅ Merged <b>#${number}</b> into ${tgEsc(line!.base)}${tgEsc(tgTown(townPath))} — ${tgEsc(line!.title)}`);
+    void moveTicketAfterMerge(townPath, line!); // the ticket follows the work (Jira page policy)
   } else {
     await say(`Merge failed — ${r.message}`);
   }
@@ -586,6 +630,7 @@ function fireFinishNotification(townPath: string, id: CharacterId, summary: stri
   notifyTgDone(townPath, id, summary); // phone always gets the "finished" ping (not gated by focus/desktop-notif prefs)
   // A PR this character was on: the mark comes off and the paper looks at
   // GitHub right away, so the line says what came of the work, not "on it".
+  for (const b of jiras.values()) if (b.sweeping && b.sweeping.characterId === id && b.sweeping.townPath === townPath) { b.sweeping = null; log("jira", "sweep finished — re-reading the board", { project: b.project, characterId: id }); void pollJira(b.project); }
   const m = mails.get(townPath);
   if (m && ([...m.onIt.values()].some((o) => o.characterId === id) || m.lines.some((l) => l.onIt?.characterId === id))) {
     for (const [n, o] of m.onIt) if (o.characterId === id) { m.onIt.delete(n); log("mail", "character finished a PR — re-reading", { number: n, characterId: id, town: townNameOf(townPath) }); }
@@ -1223,7 +1268,7 @@ function snapshot(): TownSnapshot {
   base.booth = boothView();
   // The Mailbox (pull requests): runtime state from the town's mail reader.
   base.mail = fx?.mail !== undefined ? fx.mail : mailViewFor(currentTownPath, base.characters);
-  base.jira = fx?.jira !== undefined ? fx.jira : jiraViewFor(currentTownPath);
+  base.jira = fx?.jira !== undefined ? fx.jira : jiraViewFor(currentTownPath, base.characters);
   return base;
 }
 
@@ -1489,6 +1534,10 @@ async function handleIntent(intent: Intent): Promise<void> {
 
     case "jiraSeen":
       jiraSeenNow(currentTownPath);
+      break;
+
+    case "sweepJira":
+      if (currentTownPath) await sweepFromTown(currentTownPath, intent.characterId);
       break;
 
     case "openPull": {
