@@ -427,6 +427,8 @@ export interface MailView {
   /** The last merge the guard refused — the paper turns it into "who fixes
    *  it?" with the faces, instead of leaving a dead end (Maksym, 2026-11-05). */
   refused: { number: number; reason: string } | null;
+  /** A look at GitHub is running right now (the "Check now" button says so). */
+  checking: boolean;
 }
 
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */

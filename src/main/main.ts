@@ -311,6 +311,7 @@ async function pollMail(townPath: string): Promise<void> {
   const m = mails.get(townPath);
   if (!m || m.busy) return;
   m.busy = true;
+  pushSnapshot(); // the paper says "checking…" while the look runs
   const before = JSON.stringify(m.lines) + m.error;
   try {
     const { pulls, threads } = await fetchPulls(m.repo);
@@ -333,7 +334,8 @@ async function pollMail(townPath: string): Promise<void> {
   } finally {
     m.busy = false;
   }
-  if (JSON.stringify(m.lines) + m.error !== before) pushSnapshot();
+  pushSnapshot(); // always: "checked just now" and the button come back even when nothing changed
+  void before;
 }
 
 /** The mailbox as the shown town's street draws it. */
@@ -342,7 +344,7 @@ function mailViewFor(townPath: string | null, chars: TownSnapshot["characters"])
   if (!m) return null;
   const L = townPath ? lanesOf(townPath) : null;
   const crew = chars.filter((x) => !x.isHomeBase).map((x) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) }));
-  return { repo: m.repo, checkedAt: m.checkedAt, forYou: forYouCount(m.lines), lines: m.lines, error: m.error, pictures: resolveMailPictures(ASSETS_DIR), crew, merging: m.merging, refused: m.refused };
+  return { repo: m.repo, checkedAt: m.checkedAt, forYou: forYouCount(m.lines), lines: m.lines, error: m.error, pictures: resolveMailPictures(ASSETS_DIR), crew, merging: m.merging, refused: m.refused, checking: m.busy };
 }
 
 /** Merge one of Maksym's PRs from the town — after asking GitHub once more
