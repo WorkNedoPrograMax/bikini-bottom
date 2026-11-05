@@ -47,7 +47,7 @@ const PR_NODE = `
     ... on StatusContext { context state }
   } } } } } }
   reviews(last: 60) { nodes { author { login } state submittedAt } }
-  reviewThreads(first: 100) { nodes { isResolved isOutdated comments(first: 4) { nodes { author { login } body path line } } } }`;
+  reviewThreads(first: 100) { nodes { isResolved isOutdated comments(first: 10) { nodes { author { login } body path line } } } }`;
 
 const MERGE_INFO = "Accept: application/vnd.github.merge-info-preview+json";
 

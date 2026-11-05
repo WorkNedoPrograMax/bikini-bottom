@@ -49,6 +49,31 @@ ok(lw.word === "with-reviewer" && !lw.forYou && lw.status === "WAITING", "no rev
 // Anna only commented (no verdict) and left 2 threads → SENT BACK (comments to answer)
 const lc = mailLineFor(pr({ number: 3, reviews: [rv(ANNA, "COMMENTED", "2026-11-04T14:00:00Z")] }), [th(ANNA), th(ANNA)], ME);
 ok(lc.word === "sent-back" && lc.forYou && lc.reason.startsWith("2 comments to answer"), `comments without a verdict → SENT BACK: "${lc.reason}"`);
+// 2026-11-05 #87 for real: Anna's approval dismissed by a push, then she COMMENTED,
+// two open threads — each answered by me (last word mine) → WITH ANNA, not for you
+const thA = (last, resolved = false) => ({ isResolved: resolved, isOutdated: true, comments: [{ author: ANNA, body: "Non-blocking. _pairs reads…", path: "lib/a.dart", line: 63 }, { author: last, body: "Fixed in 2de540c", path: "lib/a.dart", line: 63 }] });
+const l87r = mailLineFor(pr({ number: 87, reviews: [rv(ANNA, "DISMISSED", "2026-11-04T14:15:20Z"), rv(ANNA, "COMMENTED", "2026-11-04T14:23:49Z"), rv(ME, "COMMENTED", "2026-11-05T06:00:46Z")], commits: [{ committedDate: "2026-11-04T22:38:27Z" }] }), [thA(ME), thA(ME)], ME);
+ok(l87r.word === "with-reviewer" && !l87r.forYou && l87r.status === "WITH ANNA", `#87 real 2026-11-05: both threads answered by me → WITH ANNA, nothing for you (was: SENT BACK · 2 to answer)`);
+ok(l87r.reason === "2 comments answered · waiting for Anna to close them and look again", `#87 reason: "${l87r.reason}"`);
+// one answered, one not → SENT BACK, "1 comment to answer · 1 answered"
+const lmix = mailLineFor(pr({ number: 88, reviews: [rv(ANNA, "COMMENTED", "2026-11-04T14:23:49Z")] }), [thA(ME), thA(ANNA)], ME);
+ok(lmix.word === "sent-back" && lmix.forYou && lmix.reason === "1 comment to answer · 1 answered, waiting to be closed", `one of two still Anna's → SENT BACK: "${lmix.reason}"`);
+// Anna's "changes requested" stands, every thread answered but NOTHING pushed since her look → still SENT BACK, says "push"
+const lcr = mailLineFor(pr({ number: 89, reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:23:49Z")] }), [thA(ME)], ME);
+ok(lcr.word === "sent-back" && lcr.reason === "Anna asked for changes · all 1 comment answered · push the fix so Anna looks again", `changes requested, answered, not pushed → SENT BACK: "${lcr.reason}"`);
+// 2026-11-05 #102 for real: changes requested 14:36, pushed 22:50, 3 threads answered 23:09 → WITH ANNA (a push does not dismiss "changes requested")
+const l102r = mailLineFor(pr({ number: 102, reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:36:31Z"), rv(ME, "COMMENTED", "2026-11-04T23:09:04Z")], commits: [{ committedDate: "2026-11-04T22:50:00Z" }] }), [thA(ME), thA(ME), thA(ME)], ME);
+ok(l102r.word === "with-reviewer" && !l102r.forYou && l102r.status === "WITH ANNA", "#102 real 2026-11-05: pushed after her verdict, all answered → WITH ANNA (was: SENT BACK)");
+ok(l102r.reason === "Anna asked for changes · fixed and pushed · 3 comments answered · waiting for Anna to look again", `#102 reason: "${l102r.reason}"`);
+// pushed after her verdict but one thread still hers → SENT BACK, no "push" nag
+const l102h = mailLineFor(pr({ number: 103, reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:36:31Z")], commits: [{ committedDate: "2026-11-04T22:50:00Z" }] }), [thA(ME), thA(ANNA)], ME);
+ok(l102h.word === "sent-back" && l102h.reason === "Anna asked for changes · 1 comment to answer", `pushed, one thread still hers → SENT BACK: "${l102h.reason}"`);
+// pushed after her verdict, answered, but collides with dev → SENT BACK for the collision
+const l102c = mailLineFor(pr({ number: 104, mergeable: "CONFLICTING", reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:36:31Z")], commits: [{ committedDate: "2026-11-04T22:50:00Z" }] }), [thA(ME)], ME);
+ok(l102c.word === "sent-back" && l102c.reason === "Anna asked for changes · all 1 comment answered · also collides with dev", `pushed, answered, colliding → SENT BACK: "${l102c.reason}"`);
+// a thread I answered, approved → still ALMOST (the repo wants threads closed)
+const lap = mailLineFor(pr({ number: 90, reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:23:49Z")] }), [thA(ME)], ME);
+ok(lap.word === "almost" && lap.forYou && lap.reason.includes("1 comment still open"), `approved with an answered-but-open thread → ALMOST: "${lap.reason}"`);
 // a collision with no review yet → SENT BACK, "fix it before anyone looks"
 const lx = mailLineFor(pr({ number: 4, mergeable: "CONFLICTING" }), [], ME);
 ok(lx.word === "sent-back" && lx.forYou && lx.reason.includes("collides with dev") && lx.reason.includes("before anyone looks"), `collision, unreviewed → SENT BACK: "${lx.reason}"`);

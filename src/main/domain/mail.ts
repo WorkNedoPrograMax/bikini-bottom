@@ -107,6 +107,12 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
   const open = threads.filter((t) => !t.isResolved);
   const unresolved = open.length;
   const mineOpen = open.filter((t) => t.comments[0]?.author === me).length;
+  // A thread is "to answer" only while someone ELSE had the last word. One I
+  // answered is still open on GitHub (the repo wants every thread resolved
+  // before merge) but the ball is with the reviewer — measured 2026-11-05 on
+  // #87: two of Anna's threads, both replied to, were read as "2 to answer".
+  const toAnswer = open.filter((t) => t.comments.length && t.comments[t.comments.length - 1]?.author !== me).length;
+  const answered = unresolved - toAnswer;
   const checks = checksWord(pr.statusCheckRollup);
   const conflicts = pr.mergeable === "CONFLICTING";
   const verdicts = latestVerdicts(pr.reviews, author);
@@ -121,10 +127,21 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
     word = "draft"; reason = mine ? "your draft — not sent out yet" : `${firstName(author)}'s draft — not sent out yet`;
   } else if (mine) {
     const blocks = blockers(pr, checks, unresolved);
-    if (changesBy.length) {
+    // "Changes requested" stands on GitHub until the reviewer looks again — a
+    // push does NOT dismiss it (only approvals go stale). So it is sent back
+    // only until the fix is pushed after her look and every thread answered;
+    // then the ball is on her table (measured 2026-11-05 on #102).
+    const lastLook = Math.max(0, ...changesBy.map((w) => verdicts.get(w)?.lookedAt || 0));
+    const pushedAfterVerdict = pushedAt > lastLook;
+    const hard = blocks.filter((b) => !b.endsWith("still open"));
+    if (changesBy.length && pushedAfterVerdict && !toAnswer && !hard.length) {
+      word = "with-reviewer";
+      reason = `${names(changesBy)} asked for changes · fixed and pushed` + (answered ? ` · ${plural(answered, "comment", "comments")} answered` : "") + ` · waiting for ${names(changesBy)} to look again`;
+    } else if (changesBy.length) {
       word = "sent-back"; forYou = true; canHandOff = true;
-      const rest = blocks.filter((b) => !b.startsWith(String(unresolved))); // comments are said as "to answer"
-      reason = `${names(changesBy)} asked for changes` + (unresolved ? ` · ${plural(unresolved, "comment", "comments")} to answer` : "") + (rest.length ? ` · also ${rest.join(", ")}` : "");
+      const talk = toAnswer ? ` · ${plural(toAnswer, "comment", "comments")} to answer` : answered ? ` · all ${plural(answered, "comment", "comments")} answered` : "";
+      const push = !pushedAfterVerdict && !toAnswer ? ` · push the fix so ${names(changesBy)} looks again` : "";
+      reason = `${names(changesBy)} asked for changes` + talk + (hard.length ? ` · also ${hard.join(", ")}` : "") + push;
     } else if (approvedBy.length && blocks.length) {
       word = "almost"; forYou = true; canHandOff = true;
       reason = `${names(approvedBy)} approved ✓ · but it ${blocks.join(" and ")} — fix that, then it's yours to merge`;
@@ -133,14 +150,16 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
     } else if (approvedBy.length) {
       word = "clean-plate"; forYou = true; canMerge = true;
       reason = `${names(approvedBy)} approved ✓` + (checks === "green" ? " · checks green ✓" : "") + ` · no collisions ✓`;
-    } else if (blocks.length) {
+    } else if (toAnswer || conflicts || checks === "red") {
       word = "sent-back"; forYou = true; canHandOff = true;
       const looked = [...verdicts.keys()];
-      reason = (unresolved ? `${plural(unresolved, "comment", "comments")} to answer` : "") + (unresolved && blocks.length > 1 ? " · also " : "") + blocks.filter((b) => !b.endsWith("still open")).join(", ") + (looked.length ? "" : " — fix it before anyone looks");
+      reason = (toAnswer ? `${plural(toAnswer, "comment", "comments")} to answer` : "") + (toAnswer && hard.length ? " · also " : "") + hard.join(", ")
+        + (answered ? ` · ${answered} answered, waiting to be closed` : "") + (looked.length ? "" : " — fix it before anyone looks");
     } else {
       word = "with-reviewer";
       const looked = [...verdicts.keys()];
-      reason = looked.length ? `on ${names(looked)}'s table — nothing for you` : "waiting for a review — nothing for you";
+      reason = answered ? `${plural(answered, "comment", "comments")} answered · waiting for ${looked.length ? names(looked) : "the reviewer"} to close them and look again`
+        : looked.length ? `on ${names(looked)}'s table — nothing for you` : "waiting for a review — nothing for you";
     }
   } else {
     const my = verdicts.get(me) || null;
