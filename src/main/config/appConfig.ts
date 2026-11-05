@@ -28,6 +28,11 @@ export interface AppConfigData {
    *  must be set for the bridge to run; kept in local config, never in source. */
   telegramToken: string | null;
   telegramChatId: number | null;
+  /** The Jira page of the mailbox: Maksym's Atlassian email + API token (read
+   *  only; pasted once on the page), and the site. Local config, never source. */
+  jiraEmail: string | null;
+  jiraToken: string | null;
+  jiraSite: string | null;
   /** "Point at it": the last Desktop / Phone choice per lane (desktop when unset). */
   pointerView: Partial<Record<CharacterId, "desktop" | "phone">>;
 }
@@ -43,6 +48,9 @@ const DEFAULTS: AppConfigData = {
   srDryRun: true,
   telegramToken: null,
   telegramChatId: null,
+  jiraEmail: null,
+  jiraToken: null,
+  jiraSite: null,
   pointerView: {},
 };
 

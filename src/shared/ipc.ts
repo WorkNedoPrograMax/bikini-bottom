@@ -323,6 +323,8 @@ export interface TownTab {
   cookingNames?: string[];
   /** Pieces of mail that need you there (the Mailbox). */
   mail?: number;
+  /** Jira lines waiting for Maksym in that town (absent when none / no Jira). */
+  jira?: number;
 }
 
 /** The "Add a town" card, while it is up. Null when nobody is adding a town.
@@ -407,6 +409,49 @@ export interface MailLine {
   checks: "green" | "red" | "pending" | "none";
 }
 
+// ───────────── The Jira page of the Mailbox ─────────────
+/** tagged · sent-back · assigned need Maksym (until he looks); moved · quiet do not. */
+export type JiraWord = "tagged" | "sent-back" | "assigned" | "moved" | "quiet";
+
+export interface JiraLine {
+  /** Unique per event: "tagged:<commentId>", "sent-back:<key>:<historyId>", "quiet:<key>"… */
+  id: string;
+  key: string;
+  title: string;
+  url: string;
+  status: string;
+  word: JiraWord;
+  /** The uppercase word on the right. */
+  label: string;
+  /** The one plain sentence: who did what. */
+  reason: string;
+  /** Counts on the flag and pings the phone — until Maksym has looked at the page. */
+  forYou: boolean;
+  since: number;
+  /** First name of who did it ("" for quiet). */
+  who: string;
+  mine: boolean;
+}
+
+/** The Jira page: null when the town has no Jira project. `configured` false =
+ *  no token yet — the page shows the one-time paste box. */
+export interface JiraView {
+  project: string;
+  site: string;
+  configured: boolean;
+  /** Prefilled from the settings when known. */
+  email: string | null;
+  checkedAt: number;
+  checking: boolean;
+  forYou: number;
+  lines: JiraLine[];
+  /** Maksym's open tickets per column, board order. */
+  plate: { status: string; count: number }[];
+  /** How many open tickets are his in all. */
+  open: number;
+  error: string | null;
+}
+
 /** The mailbox as the street draws it: null when the town has no GitHub repo. */
 export interface MailView {
   /** "Owner/repo". */
@@ -461,6 +506,8 @@ export interface TownSnapshot {
   booth: BoothView | null;
   /** The Mailbox (pull requests), or null when this town has no GitHub repo. */
   mail: MailView | null;
+  /** The Jira page of the mailbox (null: no Jira project for this town). */
+  jira: JiraView | null;
 }
 
 /** Renderer → main. Named intents only — never raw fs/git/SDK calls (AD-4). */
@@ -516,6 +563,10 @@ export type Intent =
   // The Mailbox: look at GitHub again now; merge an own PR on a clean plate;
   // hand a PR's fix (or review) to a character; open a PR in the browser.
   | { type: "refreshMail" }
+  | { type: "refreshJira" }
+  | { type: "openJira"; key: string; url?: string }
+  | { type: "saveJira"; email: string; token: string; site: string }
+  | { type: "jiraSeen" }
   | { type: "mergePull"; number: number }
   | { type: "askReview"; number: number }
   | { type: "handOffPull"; number: number; characterId: CharacterId }

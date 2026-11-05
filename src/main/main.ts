@@ -16,6 +16,8 @@ import { checkClaude, clearStrayApiKey } from "./adapters/claude";
 import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon, resolveMailPictures, resolveMailSound } from "./adapters/assets";
 import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, inferOnIt, type GhThread } from "./domain/mail";
 import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview, branchAt } from "./adapters/pulls";
+import { JiraClient } from "./adapters/jira";
+import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
@@ -26,7 +28,7 @@ import { seedSetup } from "./domain/laneSetup";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
-import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView, type MailView, type MailLine } from "../shared/ipc";
+import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView, type MailView, type MailLine, type JiraView, type JiraLine } from "../shared/ipc";
 import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
 const IDLE_PREP = { status: "idle" as const, message: "" };
@@ -145,6 +147,8 @@ async function openTown(projectPath: string): Promise<Town> {
   log("project", "opened", { projectPath, town: profile.name, landing: profile.landing, adoption: adopt ? Object.keys(profile.lanes || {}) : null, terminalChars: [...TERMINAL_IDS] });
   // The Mailbox: pull requests on this town's GitHub repo (best effort, never blocks the town).
   void startMail(projectPath, profile);
+  // Its Jira page: the project's tickets, with the token from the settings (best effort too).
+  void startJira(projectPath, profile);
 
   // Resume (AD-11, NFR-1): any Character left mid-cook when the app quit is
   // paused — flip its dot on and offer Keep cooking / Scrap.
@@ -213,7 +217,7 @@ function townTabs(): TownTab[] {
     return { path: p, name: t.profile.name, characters: fold(t.log.all()).characters };
   });
   const tabs = townTabsFor(inputs, currentTownPath);
-  for (const t of tabs) { const n = forYouCount(mails.get(t.path)?.lines ?? []); if (n) t.mail = n; }
+  for (const t of tabs) { const n = forYouCount(mails.get(t.path)?.lines ?? []); if (n) t.mail = n; const j = jiraOf(t.path); if (j && jiraForYou(j.lines)) t.jira = jiraForYou(j.lines); }
   return tabs;
 }
 
@@ -276,6 +280,133 @@ function loadPinged(townPath: string): Set<string> {
 }
 function savePinged(townPath: string, set: Set<string>): void {
   try { writeFileSync(pingsFile(townPath), JSON.stringify([...set].slice(-400)) + "\n", "utf8"); } catch (e) { log("mail", "pings not saved", { error: String(e) }); }
+}
+
+// ───────────── The Jira page of the Mailbox ─────────────
+// One board per Jira PROJECT, shared by every town that points at it (both
+// highcap towns read HIGHCAP): one look, one set of pings, one "seen" state.
+interface JiraBoard {
+  project: string; me: string; meName: string;
+  raw: { issues: JiraRawIssue[]; comments: Record<string, JiraRawComment[]> };
+  lines: JiraLine[]; plate: { status: string; count: number }[]; open: number;
+  checkedAt: number; error: string | null;
+  timer: ReturnType<typeof setInterval> | null; busy: boolean;
+  pinged: Set<string>; seen: Set<string>;
+}
+const jiras = new Map<string, JiraBoard>();
+const townJira = new Map<string, string>(); // town path → project key
+let jiraClient: JiraClient | null = null;
+const JIRA_EVERY_SEC = 180;
+
+function jiraStateFile(kind: "pings" | "seen", project: string): string { return path.join(app.getPath("userData"), `jira-${kind}-${project}.json`); }
+function loadJiraSet(kind: "pings" | "seen", project: string): Set<string> {
+  try { const a = JSON.parse(readFileSync(jiraStateFile(kind, project), "utf8")); return new Set(Array.isArray(a) ? a.map(String) : []); } catch { return new Set(); }
+}
+function saveJiraSet(kind: "pings" | "seen", project: string, set: Set<string>): void {
+  try { writeFileSync(jiraStateFile(kind, project), JSON.stringify([...set].slice(-600)) + "\n", "utf8"); } catch (e) { log("jira", `${kind} not saved`, { error: String(e) }); }
+}
+function jiraOf(townPath: string | null): JiraBoard | null { const k = townPath ? townJira.get(townPath) : null; return k ? jiras.get(k) ?? null : null; }
+function jiraConfigured(): boolean { return !!(cfg.data.jiraEmail && cfg.data.jiraToken && cfg.data.jiraSite); }
+function jiraSite(): string { return (cfg.data.jiraSite || "https://empat.atlassian.net").replace(/\/+$/, ""); }
+
+/** Which Jira project a town's tickets live in: its profile, else the plugin's
+ *  lifecycle config, else none (Rock Bottom has no Jira). */
+function jiraProjectFor(townPath: string, profile: TownProfile): string | null {
+  if (profile.jira?.off) return null;
+  if (profile.jira?.project) return profile.jira.project;
+  try { return projectFromLifecycle(JSON.parse(readFileSync(path.join(townPath, ".claude", "lifecycle", "config.json"), "utf8"))); } catch { return null; }
+}
+
+async function startJira(townPath: string, profile: TownProfile): Promise<void> {
+  const project = jiraProjectFor(townPath, profile);
+  if (!project) { log("jira", "no Jira project — no Jira page", { town: profile.name }); return; }
+  townJira.set(townPath, project);
+  if (jiras.has(project)) return; // another town already reads this board
+  if (!jiraConfigured()) { log("jira", "no token yet — the page shows the paste box", { town: profile.name, project }); return; }
+  if (!jiraClient) jiraClient = new JiraClient(jiraSite(), cfg.data.jiraEmail!, cfg.data.jiraToken!);
+  let me: { accountId: string; displayName: string };
+  try { me = await jiraClient.myself(); } catch (e: any) { log("jira", "token check failed", { project, error: String(e?.message || e) }); jiras.set(project, { project, me: "", meName: "", raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: String(e?.message || e), timer: null, busy: false, pinged: new Set(), seen: new Set() }); pushSnapshot(); return; }
+  const b: JiraBoard = { project, me: me.accountId, meName: me.displayName, raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadJiraSet("pings", project), seen: loadJiraSet("seen", project) };
+  jiras.set(project, b);
+  log("jira", "board up", { project, me: me.displayName, everySec: JIRA_EVERY_SEC });
+  await pollJira(project);
+  b.timer = setInterval(() => void pollJira(project), JIRA_EVERY_SEC * 1000);
+}
+
+/** Lines from the last raw answer (after a look, or after Maksym looked at the page). */
+function relineJira(b: JiraBoard): void {
+  b.lines = jiraLines({ issues: b.raw.issues, comments: b.raw.comments, me: b.me, now: Date.now(), seen: b.seen, site: jiraSite() });
+  b.plate = plateCounts(b.raw.issues, b.me);
+  b.open = b.raw.issues.filter((i) => (i.fields.assignee?.accountId || "") === b.me).length;
+}
+
+/** One look at Jira: tickets + comments → lines. New "for you" lines ring and ping, once each. */
+async function pollJira(project: string): Promise<void> {
+  const b = jiras.get(project);
+  if (!b || b.busy || !jiraClient) return;
+  b.busy = true; pushSnapshot();
+  try {
+    b.raw = await jiraClient.board(project, b.me);
+    relineJira(b);
+    b.checkedAt = Date.now(); b.error = null;
+    const fresh = newJiraPings(b.lines, b.pinged);
+    if (fresh.length) {
+      for (const l of fresh) b.pinged.add(l.id);
+      saveJiraSet("pings", project, b.pinged);
+      log("jira", "new notes for Maksym", { project, lines: fresh.map((l) => `${l.key} ${l.word}`) });
+      if (winAlive()) win!.webContents.send(CHANNELS.sound, { characterId: "krabs", kind: "mail", url: resolveMailSound(SOUNDS_DIR) });
+      notifyTgJira(fresh);
+    }
+  } catch (e: any) {
+    b.error = e?.message || String(e);
+    log("jira", "look at Jira failed", { project, error: b.error });
+  } finally { b.busy = false; }
+  pushSnapshot();
+}
+
+/** Maksym looked at the page: everything on it is seen — the flag drops. */
+function jiraSeenNow(townPath: string | null): void {
+  const b = jiraOf(townPath);
+  if (!b) return;
+  let changed = false;
+  for (const l of b.lines) if (l.forYou && !b.seen.has(l.id)) { b.seen.add(l.id); changed = true; }
+  if (!changed) return;
+  saveJiraSet("seen", b.project, b.seen);
+  relineJira(b);
+  pushSnapshot();
+}
+
+function jiraViewFor(townPath: string | null): JiraView | null {
+  const project = townPath ? townJira.get(townPath) : null;
+  if (!project) return null;
+  const b = jiras.get(project);
+  if (!b) return { project, site: jiraSite(), configured: jiraConfigured(), email: cfg.data.jiraEmail, checkedAt: 0, checking: false, forYou: 0, lines: [], plate: [], open: 0, error: null };
+  return { project, site: jiraSite(), configured: true, email: cfg.data.jiraEmail, checkedAt: b.checkedAt, checking: b.busy, forYou: jiraForYou(b.lines), lines: b.lines, plate: b.plate, open: b.open, error: b.error };
+}
+
+/** The paste box: the token is saved to the town's settings and every town's board starts. */
+async function saveJiraSettings(email: string, token: string, site: string): Promise<void> {
+  const e = email.trim(), t = token.trim(), s = (site.trim() || "https://empat.atlassian.net").replace(/\/+$/, "");
+  if (!e || !t) { toast("Both the email and the token are needed."); return; }
+  const probe = new JiraClient(s, e, t);
+  try { const me = await probe.myself(); toast(`Jira knows this token as ${me.displayName}. Saved.`); } catch (err: any) { toast(`Jira did not accept it — ${String(err?.message || err)}. Nothing saved.`); return; }
+  await cfg.save({ jiraEmail: e, jiraToken: t, jiraSite: s });
+  jiraClient = probe;
+  for (const b of jiras.values()) if (b.timer) clearInterval(b.timer);
+  jiras.clear();
+  for (const [p, t] of towns) await startJira(p, t.profile);
+  log("jira", "token saved from the page", { site: s });
+}
+
+/** The phone: one message per new note (buttons open Jira), a list when many. */
+function notifyTgJira(fresh: JiraLine[]): void {
+  if (!tg) return;
+  if (fresh.length > 3) {
+    const body = fresh.map((l) => `• <b>${tgEsc(l.key)}</b> ${tgEsc(l.label)} — ${tgEsc(l.title.slice(0, 60))}\n   ↳ ${tgEsc(l.reason)}`).join("\n");
+    void tg.send(`📋 <b>Jira</b> — ${fresh.length} notes for you:\n${body}`);
+    return;
+  }
+  for (const l of fresh) void tg.send(`📋 <b>${tgEsc(l.key)} · ${tgEsc(l.label)}</b> — ${tgEsc(l.title)}\n↳ ${tgEsc(l.reason)}`, [[{ text: "Open on Jira", url: l.url }]]);
 }
 
 async function startMail(townPath: string, profile: TownProfile): Promise<void> {
@@ -967,6 +1098,15 @@ async function sendTgTown(): Promise<void> {
     for (const l of need.slice(0, 6)) lines.push(`   <b>#${l.number}</b> ${tgEsc(l.status)} — ${tgEsc(l.title.slice(0, 50))}\n     ↳ ${tgEsc(l.reason)}`);
     if (mail.error) lines.push(`   ⚠️ last look failed: ${tgEsc(mail.error)}`);
   }
+  // The Jira page: notes waiting for you, then the plate.
+  const jb = jiraOf(currentTownPath);
+  if (jb) {
+    const need = jb.lines.filter((l) => l.forYou);
+    lines.push("", need.length ? `📋 <b>Jira: ${need.length} for you</b>` : `📋 Jira: nothing new (${jb.open} open tickets of yours)`);
+    for (const l of need.slice(0, 6)) lines.push(`   <b>${tgEsc(l.key)}</b> ${tgEsc(l.label)} — ${tgEsc(l.title.slice(0, 50))}\n     ↳ ${tgEsc(l.reason)}`);
+    if (jb.plate.length) lines.push(`   ${tgEsc(jb.plate.map((p) => `${p.status} ${p.count}`).join(" · "))}`);
+    if (jb.error) lines.push(`   ⚠️ last look failed: ${tgEsc(jb.error)}`);
+  }
   // The other towns, one line each — the ferry's view from the phone.
   const others = snap.towns.filter((t) => !t.current);
   if (others.length) {
@@ -1083,6 +1223,7 @@ function snapshot(): TownSnapshot {
   base.booth = boothView();
   // The Mailbox (pull requests): runtime state from the town's mail reader.
   base.mail = fx?.mail !== undefined ? fx.mail : mailViewFor(currentTownPath, base.characters);
+  base.jira = fx?.jira !== undefined ? fx.jira : jiraViewFor(currentTownPath);
   return base;
 }
 
@@ -1091,7 +1232,7 @@ function snapshot(): TownSnapshot {
 // character with a chalk line, a full Orders board) can be photographed with
 // `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
 // orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
-type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null };
+type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null; jira?: JiraView | null };
 let fixture: Fixture | null | undefined;
 function loadFixture(): Fixture | null {
   if (fixture === undefined) {
@@ -1328,6 +1469,26 @@ async function handleIntent(intent: Intent): Promise<void> {
 
     case "refreshMail":
       if (currentTownPath) void pollMail(currentTownPath);
+      break;
+
+    case "refreshJira": {
+      const k = currentTownPath ? townJira.get(currentTownPath) : null;
+      if (k && jiras.has(k)) void pollJira(k);
+      else if (k && jiraConfigured() && currentTownPath) void startJira(currentTownPath, towns.get(currentTownPath)!.profile);
+      break;
+    }
+
+    case "openJira":
+      if (/^[A-Z][A-Z0-9]+-\d+$/.test(intent.key)) void shell.openExternal(`${jiraSite()}/browse/${intent.key}`);
+      else if (intent.url && intent.url.startsWith(jiraSite() + "/")) void shell.openExternal(intent.url); // a batch line: a Jira search over its tickets
+      break;
+
+    case "saveJira":
+      await saveJiraSettings(String(intent.email || ""), String(intent.token || ""), String(intent.site || ""));
+      break;
+
+    case "jiraSeen":
+      jiraSeenNow(currentTownPath);
       break;
 
     case "openPull": {
@@ -1827,7 +1988,7 @@ app.on("before-quit", (e) => {
 
 // Real terminals are long-lived warm processes — they must survive a window
 // hide/close (the whole point). Only tear them down on a genuine quit.
-app.on("will-quit", () => { for (const t of towns.values()) t.terminals.killAll(); for (const m of mails.values()) { if (m.timer) clearInterval(m.timer); if (m.nudge) clearTimeout(m.nudge); } });
+app.on("will-quit", () => { for (const t of towns.values()) t.terminals.killAll(); for (const m of mails.values()) { if (m.timer) clearInterval(m.timer); if (m.nudge) clearTimeout(m.nudge); } for (const b of jiras.values()) if (b.timer) clearInterval(b.timer); });
 
 // Graceful shutdown on a termination signal (this is how a restart reaches us).
 // Interrupt each terminal's Claude first and pause, so it can reach a checkpoint

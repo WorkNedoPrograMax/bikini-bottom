@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("town", {
   initialTownMenu: process.env.BIKINI_TOWNS === "1",
   // Dev/screenshot hook only: open Today's Mail on launch.
   initialMail: process.env.BIKINI_MAIL === "1",
+  initialJira: process.env.BIKINI_JIRA === "1",
 });
 
 // Real-terminal bridge for terminal-mode characters (squid). The renderer's

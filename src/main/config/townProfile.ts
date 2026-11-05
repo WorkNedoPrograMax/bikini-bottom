@@ -54,6 +54,15 @@ export interface PullsSpec {
   off?: boolean;
 }
 
+/** The Jira page: which project this town's tickets live in. Absent = the
+ *  project of `.claude/lifecycle/config.json` (jira.projectKeys[0]), else none. */
+export interface JiraSpec {
+  /** "HIGHCAP". */
+  project?: string;
+  /** true = no Jira page in this town. */
+  off?: boolean;
+}
+
 export interface TownProfile {
   /** Shown on the sign. */
   name: string;
@@ -77,6 +86,8 @@ export interface TownProfile {
   setup?: LaneSetup;
   /** The Mailbox (pull requests), when the defaults are not right. */
   pulls?: PullsSpec;
+  /** The Jira page, when the lifecycle config does not say the project. */
+  jira?: JiraSpec;
 }
 
 /** Where a project's profile lives. */
@@ -144,7 +155,19 @@ export function normalizeProfile(raw: unknown, projectPath: string): TownProfile
   if (setup) out.setup = setup;
   const pulls = normalizePulls(r.pulls);
   if (pulls) out.pulls = pulls;
+  const jira = normalizeJira(r.jira);
+  if (jira) out.jira = jira;
   return out;
+}
+
+/** A well-formed Jira spec, or null when absent/empty. */
+export function normalizeJira(raw: unknown): JiraSpec | null {
+  if (!raw || typeof raw !== "object") return null;
+  const j = raw as Record<string, unknown>;
+  const out: JiraSpec = {};
+  if (typeof j.project === "string" && /^[A-Z][A-Z0-9]+$/.test(j.project.trim())) out.project = j.project.trim();
+  if (j.off === true) out.off = true;
+  return Object.keys(out).length ? out : null;
 }
 
 /** A well-formed Mailbox spec, or null when absent/empty. Unknown fields dropped. */
