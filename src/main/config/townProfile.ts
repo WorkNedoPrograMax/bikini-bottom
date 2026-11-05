@@ -40,11 +40,13 @@ export interface DeviceSpec {
 }
 
 /** The Mailbox: how this town reads its pull requests. Absent = defaults
- *  (the repo from the git remote, a look every 2 minutes, squash-merge). */
+ *  (the repo from the git remote, a look every minute — plus one right after
+ *  a character writes to GitHub — squash-merge). */
 export interface PullsSpec {
   /** "Owner/repo" when the git remote is not the repo to watch. */
   repo?: string;
-  /** Seconds between looks at GitHub (default 120, never under 30). */
+  /** Seconds between looks at GitHub (default 60, never under 30). One look
+   *  costs ~20 of GitHub's 5000 points an hour (measured 2026-11-05). */
   everySec?: number;
   /** How the Merge button merges (default squash). */
   merge?: "squash" | "merge";

@@ -5,7 +5,7 @@
 //   node scripts/check-mail.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt } = require("../dist/main/domain/mail.js");
+const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt, touchesGitHub } = require("../dist/main/domain/mail.js");
 const { normalizePulls, normalizeProfile } = require("../dist/main/config/townProfile.js");
 
 let fails = 0;
@@ -146,6 +146,15 @@ ok(forYouCount(marked) === forYouCount([l102, l87]) - 1, "the flag counts one le
 ok(!newPings(marked, new Set()).some((l) => l.number === 102), "an on-it line never pings");
 const done = markOnIt([l102, l87], onIt, () => false);
 ok(done[0] === l102 && done[0].forYou === true, "Patrick finished (not working) → the raw line comes back as it was, yours again until the next look");
+
+console.log("touchesGitHub — which tool calls make the paper re-read (Maksym 2026-11-05: a posted review showed as still due):");
+const bash = (command) => touchesGitHub("Bash", { command });
+ok(bash("gh pr review 121 -R EmpatDevelopment/highcap-backend --approve -b 'ok'"), "gh pr review → re-read");
+ok(bash("git push origin HEAD:feature/x") && bash("cd lane && git push"), "git push → re-read");
+ok(bash("gh pr edit 87 -R o/r --add-reviewer AnnaPinchukO") && bash("gh pr comment 87 -b hi") && bash("gh pr merge 140 --squash"), "gh pr edit / comment / merge → re-read");
+ok(bash("gh api -X POST repos/o/r/pulls/1/requested_reviewers -f 'reviewers[]=anna'") && bash("gh api repos/o/r/pulls/1/reviews -f event=APPROVE"), "gh api writes (-X POST, -f) → re-read");
+ok(!bash("gh pr view 87 --json mergeable") && !bash("gh api repos/o/r/pulls/87") && !bash("git status") && !bash("gh pr list"), "reads never re-read");
+ok(!touchesGitHub("Read", { file_path: "gh pr review" }) && !touchesGitHub("Bash", null), "only Bash with a command counts");
 
 console.log("briefFor — the character's order:");
 const b = briefFor(l102, [th(ANNA, false, "Rename this to miles"), th(ANNA, true, "done")], "EmpatDevelopment/highcap-mobile");

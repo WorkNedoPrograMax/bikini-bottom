@@ -2,6 +2,7 @@
 // that Character's worktree. It owns the trust layer (Epic 3): Risky-vs-Safe
 // permission asks (AD-6), a liveness watchdog (AD-10), cancel + burned + resume.
 
+import { touchesGitHub } from "../domain/mail";
 import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import path from "node:path";
@@ -536,7 +537,7 @@ export class LaneManager {
     /** Reserve light (Orca plan, Job 1): where to persist the town-wide usage
      *  windows (<userData>/fuel.json) and whom to tell the first time the 5-hour
      *  tank lights up. Both optional — tests and the smoke path run without. */
-    private fuelOpts: { fuelFile?: string; onFuelWarning?: (g: Gauge) => void } = {},
+    private fuelOpts: { fuelFile?: string; onFuelWarning?: (g: Gauge) => void; onGitHubWrite?: (id: CharacterId) => void } = {},
     /** The Ferry: how finishing behaves in THIS town. "none" (the default) means
      *  Bikini never touches git when a character finishes; "auto" is the Epic 5
      *  serveJob landing onto the project's main line. */
@@ -1949,7 +1950,12 @@ export class LaneManager {
             }],
             // A phone command finished (well or badly): the holder's grace clock
             // starts. Never release here — the next command may be seconds away.
-            PostToolUse: [{ hooks: [async (input: any): Promise<any> => { const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.board.touch(id); return {}; }] }],
+            PostToolUse: [{ hooks: [async (input: any): Promise<any> => {
+              const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.board.touch(id);
+              // A review posted, a push, a PR edited: the town's paper re-reads GitHub.
+              if (touchesGitHub(input.tool_name, input.tool_input)) { try { this.fuelOpts.onGitHubWrite?.(id); } catch { /* never let the paper break the lane */ } }
+              return {};
+            }] }],
             PostToolUseFailure: [{ hooks: [async (input: any): Promise<any> => { const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.board.touch(id); return {}; }] }],
           },
         },

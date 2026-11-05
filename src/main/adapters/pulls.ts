@@ -41,14 +41,19 @@ export async function repoOf(projectPath: string): Promise<string | null> {
 const PR_NODE = `
   number title url isDraft headRefName baseRefName createdAt updatedAt mergeable mergeStateStatus
   author { login }
-  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 30) { nodes {
+  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 20) { nodes {
     __typename
     ... on CheckRun { name status conclusion }
     ... on StatusContext { context state }
   } } } } } }
-  reviews(last: 60) { nodes { author { login } state submittedAt } }
-  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } }
-  reviewThreads(first: 100) { nodes { isResolved isOutdated comments(first: 10) { nodes { author { login } body path line } } } }`;
+  reviews(last: 40) { nodes { author { login } state submittedAt } }
+  reviewRequests(first: 10) { nodes { requestedReviewer { __typename ... on User { login } } } }
+  reviewThreads(first: 60) { nodes { isResolved isOutdated
+    opening: comments(first: 1) { nodes { id author { login } body path line } }
+    tail: comments(last: 4) { nodes { id author { login } body path line } } } }`;
+// One look costs ~20 rate-limit points of GitHub's 5000/hour (measured 2026-11-05;
+// the fuller shape — 50 PRs, 100 threads, 10 comments each — cost 53). The thread's
+// OPENING comment says who asked; its TAIL says who had the last word.
 
 const MERGE_INFO = "Accept: application/vnd.github.merge-info-preview+json";
 
@@ -56,7 +61,7 @@ const MERGE_INFO = "Accept: application/vnd.github.merge-info-preview+json";
 export async function fetchPulls(repo: string): Promise<{ pulls: GhPull[]; threads: Record<number, GhThread[]> }> {
   const [owner, name] = repo.split("/");
   const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
-    pullRequests(first: 50, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${PR_NODE} } } } }`;
+    pullRequests(first: 30, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${PR_NODE} } } } }`;
   const r = await run("gh", ["api", "graphql", "-H", MERGE_INFO, "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`], undefined, 45_000);
   if (!r.ok) throw new Error(ghReason(r.err));
   let j: any;
@@ -93,10 +98,13 @@ function fromNode(n: any): { pull: GhPull; thr: GhThread[] } {
     commits: commit?.committedDate ? [{ committedDate: commit.committedDate }] : [],
     requested: (n.reviewRequests?.nodes || []).map((q: any) => q?.requestedReviewer?.login).filter((x: unknown): x is string => typeof x === "string" && !!x),
   };
-  const thr: GhThread[] = (n.reviewThreads?.nodes || []).map((t: any) => ({
-    isResolved: !!t.isResolved, isOutdated: !!t.isOutdated,
-    comments: (t.comments?.nodes || []).map((c: any) => ({ author: c?.author?.login || "", body: String(c?.body || ""), path: c?.path ?? null, line: c?.line ?? null })),
-  }));
+  const thr: GhThread[] = (n.reviewThreads?.nodes || []).map((t: any) => {
+    const asComment = (c: any) => ({ author: c?.author?.login || "", body: String(c?.body || ""), path: c?.path ?? null, line: c?.line ?? null });
+    const opening: any[] = t.opening?.nodes || []; const tail: any[] = t.tail?.nodes || [];
+    // The opening comment, then the tail — the opening not twice when the thread is short.
+    const all = opening.concat(tail.filter((c) => !opening.some((o) => o?.id && o.id === c?.id)));
+    return { isResolved: !!t.isResolved, isOutdated: !!t.isOutdated, comments: all.map(asComment) };
+  });
   return { pull, thr };
 }
 

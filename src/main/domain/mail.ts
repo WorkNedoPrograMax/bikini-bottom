@@ -220,6 +220,19 @@ export function markOnIt(lines: readonly MailLine[], onIt: ReadonlyMap<number, {
   });
 }
 
+/** Did this tool call WRITE to GitHub (a review, a push, a PR edit, a comment,
+ *  a merge)? The paper re-reads GitHub a few seconds after one, so a review a
+ *  character just posted never shows as still due (Maksym, 2026-11-05). Reads
+ *  (`gh pr view`, `gh api` GET) do not count. */
+export function touchesGitHub(toolName: string, input: unknown): boolean {
+  if (toolName !== "Bash" || !input || typeof input !== "object") return false;
+  const cmd = String((input as { command?: unknown }).command || "");
+  if (/\bgit\s+push\b/.test(cmd)) return true;
+  if (/\bgh\s+pr\s+(review|edit|merge|create|ready|comment|close|reopen|checks\s+--watch)\b/.test(cmd)) return true;
+  if (/\bgh\s+api\b/.test(cmd) && (/\s(-X|--method)\s*(POST|PATCH|PUT|DELETE)\b/i.test(cmd) || /\s(-f|-F|--field|--raw-field|--input)\b/.test(cmd))) return true;
+  return false;
+}
+
 /** The whole paper: lines with what needs you first. */
 export function mailLines(pulls: GhPull[], threadsByNumber: Record<number, GhThread[]>, me: string): MailLine[] {
   const lines = pulls.map((pr) => mailLineFor(pr, threadsByNumber[pr.number] || [], me));

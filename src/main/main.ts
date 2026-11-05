@@ -121,7 +121,7 @@ async function openTown(projectPath: string): Promise<Town> {
     (id, kind) => emitSoundCue(projectPath, id, kind),
     () => cfg.data.bypassPermissions, adopt,
     // One account, one fuel file: two towns sharing it is fine (same numbers).
-    { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning },
+    { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning, onGitHubWrite: (id) => nudgeMail(projectPath, id) },
     profile.landing, profile.device ?? null, profile.setup ?? null, profile.android ?? null);
   // The Phone Booth: only LOOK at the town's phones on open — the iPhone and the
   // Android phone both sleep until a job aims a command at one, then the town
@@ -229,6 +229,8 @@ interface TownMail {
   checkedAt: number; error: string | null;
   timer: ReturnType<typeof setInterval> | null; busy: boolean;
   pinged: Set<string>; merging: number | null;
+  /** A re-read a few seconds after a character wrote to GitHub (debounced). */
+  nudge: ReturnType<typeof setTimeout> | null;
   /** PR number → the character cooking it (handed from the paper). */
   onIt: Map<number, { characterId: CharacterId; name: string; since: number }>;
 }
@@ -273,14 +275,24 @@ async function startMail(townPath: string, profile: TownProfile): Promise<void> 
   if (ghMe === undefined) ghMe = await ghLogin();
   if (!ghMe) { log("mail", "gh not logged in — no mailbox", { town: profile.name, repo }); return; }
   const m: TownMail = {
-    repo, me: ghMe, everySec: profile.pulls?.everySec ?? 120, merge: profile.pulls?.merge ?? "squash",
+    repo, me: ghMe, everySec: profile.pulls?.everySec ?? 60, merge: profile.pulls?.merge ?? "squash",
     raw: [], lines: [], threads: {}, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadPinged(townPath), merging: null,
-    onIt: loadOnIt(townPath),
+    nudge: null, onIt: loadOnIt(townPath),
   };
   mails.set(townPath, m);
   log("mail", "mailbox up", { town: profile.name, repo, me: ghMe, everySec: m.everySec, merge: m.merge });
   await pollMail(townPath);
   m.timer = setInterval(() => void pollMail(townPath), m.everySec * 1000);
+}
+
+/** A character just wrote to GitHub (review, push, PR edit…): look again in a
+ *  few seconds — one look for a burst of commands — so the paper never shows a
+ *  review as still due right after it was posted (Maksym, 2026-11-05). */
+function nudgeMail(townPath: string, id: CharacterId): void {
+  const m = mails.get(townPath);
+  if (!m) return;
+  if (m.nudge) clearTimeout(m.nudge);
+  m.nudge = setTimeout(() => { m.nudge = null; log("mail", "a character wrote to GitHub — re-reading", { town: townNameOf(townPath), characterId: id }); void pollMail(townPath); }, 6_000);
 }
 
 /** One look at GitHub: the open PRs and their threads → the paper's lines. New
@@ -1784,7 +1796,7 @@ app.on("before-quit", (e) => {
 
 // Real terminals are long-lived warm processes — they must survive a window
 // hide/close (the whole point). Only tear them down on a genuine quit.
-app.on("will-quit", () => { for (const t of towns.values()) t.terminals.killAll(); for (const m of mails.values()) if (m.timer) clearInterval(m.timer); });
+app.on("will-quit", () => { for (const t of towns.values()) t.terminals.killAll(); for (const m of mails.values()) { if (m.timer) clearInterval(m.timer); if (m.nudge) clearTimeout(m.nudge); } });
 
 // Graceful shutdown on a termination signal (this is how a restart reaches us).
 // Interrupt each terminal's Claude first and pause, so it can reach a checkpoint
