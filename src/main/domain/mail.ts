@@ -28,6 +28,8 @@ export interface GhPull {
   statusCheckRollup?: { conclusion?: string | null; state?: string | null; status?: string | null; name?: string; context?: string }[] | null;
   reviews?: { author: { login: string }; state: string; submittedAt: string }[] | null;
   commits?: { committedDate: string }[] | null;
+  /** Logins with a review request PENDING right now (cleared when they review). */
+  requested?: string[] | null;
 }
 
 /** An open (unresolved) review thread, from GraphQL. */
@@ -113,6 +115,12 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
   // #87: two of Anna's threads, both replied to, were read as "2 to answer".
   const toAnswer = open.filter((t) => t.comments.length && t.comments[t.comments.length - 1]?.author !== me).length;
   const answered = unresolved - toAnswer;
+  // Answering and pushing is not enough: the reviewer must be ASKED again, or
+  // the PR sits unnoticed (Maksym, 2026-11-05). "Asked" = a review request
+  // pending for them on GitHub (it clears when they submit a review).
+  const requested = new Set(pr.requested || []);
+  const asked = (w: string) => requested.has(w);
+  const answeredBy = [...new Set(open.filter((t) => t.comments.length && t.comments[t.comments.length - 1]?.author === me).map((t) => t.comments[0]?.author).filter((w): w is string => !!w && w !== me))];
   const checks = checksWord(pr.statusCheckRollup);
   const conflicts = pr.mergeable === "CONFLICTING";
   const verdicts = latestVerdicts(pr.reviews, author);
@@ -122,7 +130,7 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
   const names = (list: string[]) => list.map(firstName).join(" and ");
   const since = Math.max(0, Date.parse(pr.updatedAt) || Date.parse(pr.createdAt) || 0);
 
-  let word: MailWord; let reason: string; let forYou = false; let canMerge = false; let canHandOff = false;
+  let word: MailWord; let reason: string; let forYou = false; let canMerge = false; let canHandOff = false; let askBack: string[] = [];
   if (pr.isDraft) {
     word = "draft"; reason = mine ? "your draft — not sent out yet" : `${firstName(author)}'s draft — not sent out yet`;
   } else if (mine) {
@@ -134,9 +142,13 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
     const lastLook = Math.max(0, ...changesBy.map((w) => verdicts.get(w)?.lookedAt || 0));
     const pushedAfterVerdict = pushedAt > lastLook;
     const hard = blocks.filter((b) => !b.endsWith("still open"));
-    if (changesBy.length && pushedAfterVerdict && !toAnswer && !hard.length) {
+    const notAsked = changesBy.filter((w) => !asked(w));
+    if (changesBy.length && pushedAfterVerdict && !toAnswer && !hard.length && !notAsked.length) {
       word = "with-reviewer";
-      reason = `${names(changesBy)} asked for changes · fixed and pushed` + (answered ? ` · ${plural(answered, "comment", "comments")} answered` : "") + ` · waiting for ${names(changesBy)} to look again`;
+      reason = `${names(changesBy)} asked for changes · fixed and pushed` + (answered ? ` · ${plural(answered, "comment", "comments")} answered` : "") + ` · ${names(changesBy)} asked to look again ✓`;
+    } else if (changesBy.length && pushedAfterVerdict && !toAnswer && !hard.length) {
+      word = "sent-back"; forYou = true; canHandOff = true; askBack = notAsked;
+      reason = `${names(changesBy)} asked for changes · fixed and pushed` + (answered ? ` · ${plural(answered, "comment", "comments")} answered` : "") + ` · but ${names(notAsked)} ${notAsked.length > 1 ? "weren't" : "wasn't"} asked to look again`;
     } else if (changesBy.length) {
       word = "sent-back"; forYou = true; canHandOff = true;
       const talk = toAnswer ? ` · ${plural(toAnswer, "comment", "comments")} to answer` : answered ? ` · all ${plural(answered, "comment", "comments")} answered` : "";
@@ -155,10 +167,13 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
       const looked = [...verdicts.keys()];
       reason = (toAnswer ? `${plural(toAnswer, "comment", "comments")} to answer` : "") + (toAnswer && hard.length ? " · also " : "") + hard.join(", ")
         + (answered ? ` · ${answered} answered, waiting to be closed` : "") + (looked.length ? "" : " — fix it before anyone looks");
+    } else if (answered && answeredBy.some((w) => !asked(w))) {
+      word = "sent-back"; forYou = true; canHandOff = true; askBack = answeredBy.filter((w) => !asked(w));
+      reason = `${plural(answered, "comment", "comments")} answered · but ${names(askBack)} ${askBack.length > 1 ? "weren't" : "wasn't"} asked to look again`;
     } else {
       word = "with-reviewer";
       const looked = [...verdicts.keys()];
-      reason = answered ? `${plural(answered, "comment", "comments")} answered · waiting for ${looked.length ? names(looked) : "the reviewer"} to close them and look again`
+      reason = answered ? `${plural(answered, "comment", "comments")} answered · ${names(answeredBy.length ? answeredBy : looked)} asked to look again ✓ — nothing for you`
         : looked.length ? `on ${names(looked)}'s table — nothing for you` : "waiting for a review — nothing for you";
     }
   } else {
@@ -181,12 +196,14 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
       reason = `you asked for changes · waiting on ${firstName(author)}`;
     }
   }
-  const status = word === "with-reviewer" && verdicts.size ? `WITH ${firstName([...verdicts.keys()][0]).toUpperCase()}`
+  const reviewers = [...new Set([...verdicts.keys(), ...open.map((t) => t.comments[0]?.author).filter((w): w is string => !!w && w !== author)])];
+  const status = word === "sent-back" && askBack.length ? `ASK ${firstName(askBack[0]).toUpperCase()}`
+    : word === "with-reviewer" && verdicts.size ? `WITH ${firstName([...verdicts.keys()][0]).toUpperCase()}`
     : word === "theirs" && forYou ? "YOUR COMMENTS" // approved, but your own open threads hold it — the word says so
     : WORD_TEXT[word];
   return {
     number: pr.number, title: pr.title, url: pr.url, author, mine, draft: !!pr.isDraft,
-    word, status, reason, forYou, canMerge, canHandOff, since, branch: pr.headRefName, base: pr.baseRefName,
+    word, status, reason, forYou, canMerge, canHandOff, askBack, reviewers, since, branch: pr.headRefName, base: pr.baseRefName,
     unresolved, conflicts, checks,
   };
 }
@@ -245,7 +262,10 @@ export function briefFor(line: MailLine, threads: GhThread[], repo: string): str
     if (open.length) todo.push(`answer every open review comment below — fix what it asks, or reply on the thread saying why not; resolve each thread you fixed`);
     if (line.conflicts) todo.push(`bring the branch up to date with ${line.base} and resolve the collision`);
     if (line.checks === "red") todo.push("make the checks green");
-    todo.push("push, then tell me in one short message what changed and that it is back on the reviewer's table");
+    const who = line.reviewers.length ? line.reviewers : line.askBack;
+    if (who.length) todo.push(`push, then ASK the reviewer to look again — \`gh pr edit ${line.number} -R ${repo} --add-reviewer ${who.join(",")}\` — this is the one GitHub write besides the push and the thread replies, and it is never skipped: an answered PR nobody was asked to re-review sits unnoticed`);
+    else todo.push("push");
+    todo.push("then tell me in one short message what changed and that it is back on the reviewer's table");
     return `${head}\n\nThis is my PR and it was sent back. Get its branch into your lane first — \`git fetch origin ${line.branch} && git checkout -B ${line.branch} origin/${line.branch}\` (if git says the branch is checked out elsewhere, use \`git checkout --detach origin/${line.branch}\` and push with \`git push origin HEAD:${line.branch}\`). Never start from ${line.base}. Then:\n${todo.map((t, i) => `${i + 1}. ${t}`).join("\n")}\n\nNever merge it, never push to ${line.base}, never close the PR.` +
       (open.length ? `\n\nOpen review comments (${open.length}):\n${open.map(quote).join("\n")}` : "");
   }

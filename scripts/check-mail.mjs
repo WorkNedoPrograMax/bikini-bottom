@@ -52,9 +52,14 @@ ok(lc.word === "sent-back" && lc.forYou && lc.reason.startsWith("2 comments to a
 // 2026-11-05 #87 for real: Anna's approval dismissed by a push, then she COMMENTED,
 // two open threads — each answered by me (last word mine) → WITH ANNA, not for you
 const thA = (last, resolved = false) => ({ isResolved: resolved, isOutdated: true, comments: [{ author: ANNA, body: "Non-blocking. _pairs reads…", path: "lib/a.dart", line: 63 }, { author: last, body: "Fixed in 2de540c", path: "lib/a.dart", line: 63 }] });
-const l87r = mailLineFor(pr({ number: 87, reviews: [rv(ANNA, "DISMISSED", "2026-11-04T14:15:20Z"), rv(ANNA, "COMMENTED", "2026-11-04T14:23:49Z"), rv(ME, "COMMENTED", "2026-11-05T06:00:46Z")], commits: [{ committedDate: "2026-11-04T22:38:27Z" }] }), [thA(ME), thA(ME)], ME);
-ok(l87r.word === "with-reviewer" && !l87r.forYou && l87r.status === "WITH ANNA", `#87 real 2026-11-05: both threads answered by me → WITH ANNA, nothing for you (was: SENT BACK · 2 to answer)`);
-ok(l87r.reason === "2 comments answered · waiting for Anna to close them and look again", `#87 reason: "${l87r.reason}"`);
+const l87r = mailLineFor(pr({ number: 87, reviews: [rv(ANNA, "DISMISSED", "2026-11-04T14:15:20Z"), rv(ANNA, "COMMENTED", "2026-11-04T14:23:49Z"), rv(ME, "COMMENTED", "2026-11-05T06:00:46Z")], commits: [{ committedDate: "2026-11-04T22:38:27Z" }], requested: [ANNA] }), [thA(ME), thA(ME)], ME);
+ok(l87r.word === "with-reviewer" && !l87r.forYou && l87r.status === "WITH ANNA" && !l87r.askBack.length, `#87 real 2026-11-05: both threads answered by me, Anna re-asked → WITH ANNA, nothing for you (was: SENT BACK · 2 to answer)`);
+ok(l87r.reason === "2 comments answered · Anna asked to look again ✓ — nothing for you", `#87 reason: "${l87r.reason}"`);
+// the same #87 with NO pending request → ASK ANNA, for you, the button names her (Maksym 2026-11-05: never answered-and-pushed without a re-review ask)
+const l87n = mailLineFor(pr({ number: 87, reviews: [rv(ANNA, "COMMENTED", "2026-11-04T14:23:49Z")], commits: [{ committedDate: "2026-11-04T22:38:27Z" }], requested: [] }), [thA(ME), thA(ME)], ME);
+ok(l87n.word === "sent-back" && l87n.forYou && l87n.status === "ASK ANNA" && l87n.askBack.length === 1 && l87n.askBack[0] === ANNA, `#87 answered but Anna not re-asked → ASK ANNA, for you, askBack=[Anna]`);
+ok(l87n.reason === "2 comments answered · but Anna wasn't asked to look again", `#87 not-asked reason: "${l87n.reason}"`);
+ok(l87n.reviewers.includes(ANNA), "reviewers lists Anna (she opened the threads)");
 // one answered, one not → SENT BACK, "1 comment to answer · 1 answered"
 const lmix = mailLineFor(pr({ number: 88, reviews: [rv(ANNA, "COMMENTED", "2026-11-04T14:23:49Z")] }), [thA(ME), thA(ANNA)], ME);
 ok(lmix.word === "sent-back" && lmix.forYou && lmix.reason === "1 comment to answer · 1 answered, waiting to be closed", `one of two still Anna's → SENT BACK: "${lmix.reason}"`);
@@ -62,9 +67,15 @@ ok(lmix.word === "sent-back" && lmix.forYou && lmix.reason === "1 comment to ans
 const lcr = mailLineFor(pr({ number: 89, reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:23:49Z")] }), [thA(ME)], ME);
 ok(lcr.word === "sent-back" && lcr.reason === "Anna asked for changes · all 1 comment answered · push the fix so Anna looks again", `changes requested, answered, not pushed → SENT BACK: "${lcr.reason}"`);
 // 2026-11-05 #102 for real: changes requested 14:36, pushed 22:50, 3 threads answered 23:09 → WITH ANNA (a push does not dismiss "changes requested")
-const l102r = mailLineFor(pr({ number: 102, reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:36:31Z"), rv(ME, "COMMENTED", "2026-11-04T23:09:04Z")], commits: [{ committedDate: "2026-11-04T22:50:00Z" }] }), [thA(ME), thA(ME), thA(ME)], ME);
-ok(l102r.word === "with-reviewer" && !l102r.forYou && l102r.status === "WITH ANNA", "#102 real 2026-11-05: pushed after her verdict, all answered → WITH ANNA (was: SENT BACK)");
-ok(l102r.reason === "Anna asked for changes · fixed and pushed · 3 comments answered · waiting for Anna to look again", `#102 reason: "${l102r.reason}"`);
+const l102r = mailLineFor(pr({ number: 102, reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:36:31Z"), rv(ME, "COMMENTED", "2026-11-04T23:09:04Z")], commits: [{ committedDate: "2026-11-04T22:50:00Z" }], requested: [ANNA] }), [thA(ME), thA(ME), thA(ME)], ME);
+ok(l102r.word === "with-reviewer" && !l102r.forYou && l102r.status === "WITH ANNA", "#102 real 2026-11-05: pushed after her verdict, all answered, Anna re-asked → WITH ANNA (was: SENT BACK)");
+ok(l102r.reason === "Anna asked for changes · fixed and pushed · 3 comments answered · Anna asked to look again ✓", `#102 reason: "${l102r.reason}"`);
+// #102 without the re-ask → ASK ANNA
+const l102n = mailLineFor(pr({ number: 102, reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:36:31Z")], commits: [{ committedDate: "2026-11-04T22:50:00Z" }] }), [thA(ME), thA(ME), thA(ME)], ME);
+ok(l102n.word === "sent-back" && l102n.forYou && l102n.status === "ASK ANNA" && l102n.askBack[0] === ANNA, "#102 pushed + answered but Anna not re-asked → ASK ANNA");
+ok(l102n.reason === "Anna asked for changes · fixed and pushed · 3 comments answered · but Anna wasn't asked to look again", `#102 not-asked reason: "${l102n.reason}"`);
+// a thread still to answer never shows the ask button (answer first)
+ok(!mailLineFor(pr({ number: 105, reviews: [rv(ANNA, "COMMENTED", "2026-11-04T14:23:49Z")] }), [thA(ANNA)], ME).askBack.length, "a thread still hers → no ask button yet");
 // pushed after her verdict but one thread still hers → SENT BACK, no "push" nag
 const l102h = mailLineFor(pr({ number: 103, reviews: [rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T14:36:31Z")], commits: [{ committedDate: "2026-11-04T22:50:00Z" }] }), [thA(ME), thA(ANNA)], ME);
 ok(l102h.word === "sent-back" && l102h.reason === "Anna asked for changes · 1 comment to answer", `pushed, one thread still hers → SENT BACK: "${l102h.reason}"`);
@@ -127,6 +138,7 @@ ok(mergeRefusal(l87b, pr({ number: 87, reviews: [rv(ANNA, "APPROVED", "2026-11-0
 console.log("briefFor — the character's order:");
 const b = briefFor(l102, [th(ANNA, false, "Rename this to miles"), th(ANNA, true, "done")], "EmpatDevelopment/highcap-mobile");
 ok(b.includes("#102") && b.includes("git fetch origin feature/x") && b.includes("Never merge it"), "a sent-back PR: the branch, the fetch, the never-merge rule");
+ok(b.includes(`gh pr edit 102 -R EmpatDevelopment/highcap-mobile --add-reviewer ${ANNA}`) && b.includes("never skipped"), "the fix brief orders the re-review ask after the push");
 ok(b.includes("Open review comments (1)") && b.includes("Rename this to miles") && !b.includes("done"), "only OPEN threads are quoted");
 ok(b.includes("collision") , "the collision with dev is a task");
 const br = briefFor(lt, [], "EmpatDevelopment/highcap-mobile");

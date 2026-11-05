@@ -388,6 +388,12 @@ export interface MailLine {
   canMerge: boolean;
   /** "Hand to a character" shows. */
   canHandOff: boolean;
+  /** Reviewers who must be ASKED to look again (fix pushed, comments answered,
+   *  no re-review request pending for them). Non-empty = the "Ask X to look
+   *  again" button shows and the line is for you. */
+  askBack: string[];
+  /** Everyone who looked at this PR (a verdict or a thread) — the brief names them. */
+  reviewers: string[];
   /** Epoch ms the PR last changed (for "· 2 h"). */
   since: number;
   branch: string;
@@ -503,6 +509,7 @@ export type Intent =
   // hand a PR's fix (or review) to a character; open a PR in the browser.
   | { type: "refreshMail" }
   | { type: "mergePull"; number: number }
+  | { type: "askReview"; number: number }
   | { type: "handOffPull"; number: number; characterId: CharacterId }
   | { type: "openPull"; number: number };
 

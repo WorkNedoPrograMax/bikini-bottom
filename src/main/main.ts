@@ -15,7 +15,7 @@ import { prepareProject } from "./adapters/git";
 import { checkClaude, clearStrayApiKey } from "./adapters/claude";
 import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon, resolveMailPictures, resolveMailSound } from "./adapters/assets";
 import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, type GhThread } from "./domain/mail";
-import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull } from "./adapters/pulls";
+import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview } from "./adapters/pulls";
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
@@ -316,6 +316,28 @@ async function mergeFromTown(townPath: string, number: number, via: "street" | "
   await pollMail(townPath);
 }
 
+/** Ask the reviewer(s) to look again at one of Maksym's PRs — the line's
+ *  askBack list, as the paper showed it. Refused on anyone else's PR. */
+async function askReviewFromTown(townPath: string, number: number, via: "street" | "tg"): Promise<void> {
+  const m = mails.get(townPath);
+  if (!m) return;
+  const say = async (text: string) => { toast(text); if (via === "tg") await tg?.send(tgEsc(text)); };
+  const line = m.lines.find((l) => l.number === number) ?? null;
+  if (!line) { await say("That PR isn't on the paper anymore."); return; }
+  if (!line.mine) { await say(`#${number} is ${line.author}'s — not yours to send around.`); return; }
+  const who = line.askBack.length ? line.askBack : line.reviewers;
+  if (!who.length) { await say(`#${number}: nobody to ask — no reviewer has looked yet.`); return; }
+  const r = await requestReview(m.repo, number, who);
+  log("mail", r.ok ? "asked to look again" : "ask failed", { number, via, repo: m.repo, who, message: r.message });
+  if (r.ok) {
+    toast(`✓ #${number}: asked ${who.join(", ")} to look again`);
+    await tg?.send(`🙋 <b>#${number}</b>${tgEsc(tgTown(townPath))}: asked ${tgEsc(who.join(", "))} to look again`);
+  } else {
+    await say(`Couldn't ask — ${r.message}`);
+  }
+  await pollMail(townPath);
+}
+
 /** Hand a PR to a character: the fix of a sent-back PR of Maksym's, or the
  *  read-and-draft of a teammate's PR. The brief is the job; the Work Window opens. */
 async function handOffPull(townPath: string, number: number, characterId: CharacterId): Promise<void> {
@@ -345,6 +367,7 @@ function notifyTgMail(townPath: string, fresh: MailLine[]): void {
   for (const l of fresh) {
     const buttons: TgButton[][] = [];
     if (l.canMerge) buttons.push([{ text: "✅ Merge it", data: tgData("mailmerge", "krabs", l.number, townPath) }]);
+    if (l.askBack.length) buttons.push([{ text: `🙋 Ask ${l.askBack.join(", ")} to look again`, data: tgData("mailask", "krabs", l.number, townPath) }]);
     buttons.push([{ text: "Open on GitHub", url: l.url }]);
     tgRemember(tg.send(`📬 <b>#${l.number} · ${tgEsc(l.status)}</b>${tgEsc(where)} — ${tgEsc(l.title)}\n↳ ${tgEsc(l.reason)}`, buttons), townPath, "krabs");
   }
@@ -681,6 +704,8 @@ async function handleTgTap(data: string): Promise<void> {
     await tg?.send(`👍 Kept ${who} on the current order — that reply was dropped.`);
   } else if (action === "mailmerge") {
     await mergeFromTown(townPath, Number(extra), "tg");
+  } else if (action === "mailask") {
+    await askReviewFromTown(townPath, Number(extra), "tg");
   }
 }
 
@@ -1223,6 +1248,10 @@ async function handleIntent(intent: Intent): Promise<void> {
 
     case "mergePull":
       if (currentTownPath) await mergeFromTown(currentTownPath, intent.number, "street");
+      break;
+
+    case "askReview":
+      if (currentTownPath) await askReviewFromTown(currentTownPath, intent.number, "street");
       break;
 
     case "handOffPull":

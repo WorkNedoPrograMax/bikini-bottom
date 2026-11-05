@@ -47,6 +47,7 @@ const PR_NODE = `
     ... on StatusContext { context state }
   } } } } } }
   reviews(last: 60) { nodes { author { login } state submittedAt } }
+  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } }
   reviewThreads(first: 100) { nodes { isResolved isOutdated comments(first: 10) { nodes { author { login } body path line } } } }`;
 
 const MERGE_INFO = "Accept: application/vnd.github.merge-info-preview+json";
@@ -90,6 +91,7 @@ function fromNode(n: any): { pull: GhPull; thr: GhThread[] } {
     statusCheckRollup: rollup,
     reviews: (n.reviews?.nodes || []).map((r: any) => ({ author: { login: r.author?.login || "" }, state: r.state, submittedAt: r.submittedAt })),
     commits: commit?.committedDate ? [{ committedDate: commit.committedDate }] : [],
+    requested: (n.reviewRequests?.nodes || []).map((q: any) => q?.requestedReviewer?.login).filter((x: unknown): x is string => typeof x === "string" && !!x),
   };
   const thr: GhThread[] = (n.reviewThreads?.nodes || []).map((t: any) => ({
     isResolved: !!t.isResolved, isOutdated: !!t.isOutdated,
@@ -102,6 +104,14 @@ function fromNode(n: any): { pull: GhPull; thr: GhThread[] } {
 export async function mergePull(repo: string, number: number, method: "squash" | "merge"): Promise<{ ok: boolean; message: string }> {
   const r = await run("gh", ["pr", "merge", String(number), "-R", repo, method === "merge" ? "--merge" : "--squash", "--delete-branch"], undefined, 90_000);
   if (r.ok) return { ok: true, message: `#${number} merged` };
+  return { ok: false, message: ghReason(r.err) };
+}
+
+/** Ask reviewers to look again (a pending review request on the PR). The
+ *  second GitHub write; main.ts allows it only on Maksym's own PR. */
+export async function requestReview(repo: string, number: number, logins: string[]): Promise<{ ok: boolean; message: string }> {
+  const r = await run("gh", ["pr", "edit", String(number), "-R", repo, "--add-reviewer", logins.join(",")], undefined, 45_000);
+  if (r.ok) return { ok: true, message: `asked ${logins.join(", ")}` };
   return { ok: false, message: ghReason(r.err) };
 }
 
