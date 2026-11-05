@@ -154,7 +154,8 @@ ok(b.includes(`gh pr edit 102 -R EmpatDevelopment/highcap-mobile --add-reviewer 
 ok(b.includes("Open review comments (1)") && b.includes("Rename this to miles") && !b.includes("done"), "only OPEN threads are quoted");
 ok(b.includes("collision") , "the collision with dev is a task");
 const br = briefFor(lt, [], "EmpatDevelopment/highcap-mobile");
-ok(br.includes("my turn to review") && br.includes("Post NOTHING on GitHub"), "a teammate's PR: read and draft, never post");
+ok(br.includes("my turn to review") && br.includes(`gh pr review ${lt.number} -R EmpatDevelopment/highcap-mobile --approve`) && br.includes("Never save a draft anywhere"), "a teammate's PR: read, then POST the verdict on GitHub — no drafts (Maksym 2026-11-05)");
+ok(br.includes("NEVER a reason to request changes") && br.includes("needs a rebase"), "a collision with the base alone → approve, say it needs a rebase");
 
 console.log("repoFromRemote / firstName / profile pulls:");
 ok(repoFromRemote("git@github.com:EmpatDevelopment/highcap-mobile.git") === "EmpatDevelopment/highcap-mobile", "ssh remote → Owner/repo");
