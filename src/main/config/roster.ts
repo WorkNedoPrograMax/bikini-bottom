@@ -16,6 +16,6 @@ export interface RosterEntry {
 export const ROSTER: RosterEntry[] = [
   { id: "pat", name: "Patrick", role: "the easy lane", accent: "#f072a6", pos: { leftPct: 16, topPct: 74 }, isHomeBase: false },
   { id: "squid", name: "Squidward", role: "the grumpy lane", accent: "#4fb0a0", pos: { leftPct: 47, topPct: 76 }, isHomeBase: false },
-  { id: "krabs", name: "Mr. Krabs", role: "home base", accent: "#c0392b", pos: { leftPct: 63, topPct: 79 }, isHomeBase: true },
+  { id: "krabs", name: "Mr. Krabs", role: "home base", accent: "#c0392b", pos: { leftPct: 58, topPct: 79 }, isHomeBase: true },
   { id: "bob", name: "SpongeBob", role: "the eager lane", accent: "#f7b500", pos: { leftPct: 80, topPct: 74 }, isHomeBase: false },
 ];

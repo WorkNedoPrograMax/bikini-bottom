@@ -971,7 +971,12 @@ function snapshot(): TownSnapshot {
   if (lanes) for (const c of base.characters) { if (!c.isHomeBase) { const v = lanes.view(c.id); c.note = v.note; c.noteAt = v.noteAt; c.attention = attentionFor(c.id, c.state); c.booth = v.booth; } }
   applyFixture(base); // dev/screenshot hook only (BIKINI_FIXTURE) — a no-op in normal runs
   // Resolve every visual through the Asset Slot resolver (AD-7).
-  for (const c of base.characters) c.picture = resolvePicture(ASSETS_DIR, c.id, c.state);
+  for (const c of base.characters) {
+    c.picture = resolvePicture(ASSETS_DIR, c.id, c.state);
+    // Where someone stands is the roster's call, not the town log's: the log
+    // registered them once (with that day's spot) and a move must reach every town.
+    c.pos = ROSTER.find((r) => r.id === c.id)?.pos ?? c.pos;
+  }
   base.background = resolveBackground(ASSETS_DIR, base.background) ?? base.background;
   base.firstRun = firstRun;
   base.openWindow = buildWindow(base.characters);
