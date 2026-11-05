@@ -229,6 +229,9 @@ interface TownMail {
   checkedAt: number; error: string | null;
   timer: ReturnType<typeof setInterval> | null; busy: boolean;
   pinged: Set<string>; merging: number | null;
+  /** The last merge the guard refused (PR number + why), until it is handed
+   *  off, merged, or goes clean. */
+  refused: { number: number; reason: string } | null;
   /** A re-read a few seconds after a character wrote to GitHub (debounced). */
   nudge: ReturnType<typeof setTimeout> | null;
   /** PR number → the character cooking it (handed from the paper). */
@@ -277,7 +280,7 @@ async function startMail(townPath: string, profile: TownProfile): Promise<void> 
   const m: TownMail = {
     repo, me: ghMe, everySec: profile.pulls?.everySec ?? 60, merge: profile.pulls?.merge ?? "squash",
     raw: [], lines: [], threads: {}, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadPinged(townPath), merging: null,
-    nudge: null, onIt: loadOnIt(townPath),
+    nudge: null, refused: null, onIt: loadOnIt(townPath),
   };
   mails.set(townPath, m);
   log("mail", "mailbox up", { town: profile.name, repo, me: ghMe, everySec: m.everySec, merge: m.merge });
@@ -308,6 +311,8 @@ async function pollMail(townPath: string): Promise<void> {
     const lines = decorateMail(townPath, m, raw);
     const fresh = newPings(lines, m.pinged);
     m.raw = raw; m.lines = lines; m.threads = threads; m.checkedAt = Date.now(); m.error = null;
+    // A refusal is moot once the line is mergeable again, gone, or in a character's hands.
+    if (m.refused) { const l = lines.find((x) => x.number === m.refused!.number); if (!l || l.canMerge || l.onIt) m.refused = null; }
     if (fresh.length) {
       for (const l of fresh) m.pinged.add(pingKey(l));
       savePinged(townPath, m.pinged);
@@ -330,7 +335,7 @@ function mailViewFor(townPath: string | null, chars: TownSnapshot["characters"])
   if (!m) return null;
   const L = townPath ? lanesOf(townPath) : null;
   const crew = chars.filter((x) => !x.isHomeBase).map((x) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) }));
-  return { repo: m.repo, checkedAt: m.checkedAt, forYou: forYouCount(m.lines), lines: m.lines, error: m.error, pictures: resolveMailPictures(ASSETS_DIR), crew, merging: m.merging };
+  return { repo: m.repo, checkedAt: m.checkedAt, forYou: forYouCount(m.lines), lines: m.lines, error: m.error, pictures: resolveMailPictures(ASSETS_DIR), crew, merging: m.merging, refused: m.refused };
 }
 
 /** Merge one of Maksym's PRs from the town — after asking GitHub once more
@@ -343,7 +348,21 @@ async function mergeFromTown(townPath: string, number: number, via: "street" | "
   const line = m.lines.find((l) => l.number === number) ?? null;
   const fresh = line && line.mine ? await viewPull(m.repo, number) : null;
   const refusal = mergeRefusal(line, fresh);
-  if (refusal) { log("mail", "merge refused", { number, via, refusal }); await say(`Not merging — ${refusal}.`); return; }
+  if (!refusal) m.refused = null;
+  if (refusal) {
+    log("mail", "merge refused", { number, via, refusal });
+    m.refused = { number, reason: refusal };
+    toast(`Not merging — ${refusal}.`);
+    if (via === "tg") {
+      // The phone gets the faces too: one tap hands the fix to a character.
+      const t = towns.get(townPath);
+      const faces: TgButton[] = ROSTER.filter((r) => !r.isHomeBase && !TERMINAL_IDS.has(r.id) && !(t?.lanes.isWorking(r.id) ?? true)).map((r) => ({ text: `${r.name} fixes it`, data: tgData("mailhand", r.id, number, townPath) }));
+      await tg?.send(`Not merging — ${tgEsc(refusal)}.${faces.length ? " Who fixes it?" : ""}`, faces.length ? [faces] : undefined);
+    }
+    await pollMail(townPath); // the line turns ALMOST / SENT BACK with its Hand button, right now
+    pushSnapshot();
+    return;
+  }
   m.merging = number; pushSnapshot();
   const r = await ghMergePull(m.repo, number, m.merge);
   m.merging = null;
@@ -394,6 +413,7 @@ async function handOffPull(townPath: string, number: number, characterId: Charac
   await t.lanes.startJob(characterId, brief);
   // The line is in progress now: "<name> is on it", not yours, until they finish.
   m.onIt.set(number, { characterId, name: tgName(characterId), since: Date.now() });
+  if (m.refused?.number === number) m.refused = null;
   saveOnIt(townPath, m);
   m.lines = decorateMail(townPath, m, m.raw);
   pushSnapshot();
@@ -760,6 +780,9 @@ async function handleTgTap(data: string): Promise<void> {
     await mergeFromTown(townPath, Number(extra), "tg");
   } else if (action === "mailask") {
     await askReviewFromTown(townPath, Number(extra), "tg");
+  } else if (action === "mailhand") {
+    await handOffPull(townPath, Number(extra), id);
+    await tg?.send(`🍳 ${tgName(id)} is on <b>#${Number(extra)}</b>${tgEsc(tgTown(townPath))}.`);
   }
 }
 

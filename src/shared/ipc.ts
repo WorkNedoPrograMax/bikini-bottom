@@ -424,6 +424,9 @@ export interface MailView {
   crew: { id: CharacterId; name: string; available: boolean }[];
   /** A merge in flight: the PR number, so the paper can say "merging…". */
   merging: number | null;
+  /** The last merge the guard refused — the paper turns it into "who fixes
+   *  it?" with the faces, instead of leaving a dead end (Maksym, 2026-11-05). */
+  refused: { number: number; reason: string } | null;
 }
 
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */
