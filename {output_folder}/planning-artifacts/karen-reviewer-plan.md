@@ -1,5 +1,9 @@
 # Karen, the reviewer (plan, 2026-11-06)
 
+**Status 2026-11-06:** Job 1 + the face-row routing of Job 2 BUILT and COMMITTED (054d770 on
+feat/phone-booth), checks green, NOT live (relaunch needs Maksym's OK). Left of Job 2: the Telegram
+"Karen reviews it" button and the reviewer tooling in her brief. Picture/sounds: Maksym, later.
+
 Maksym's ask (2026-11-06): "a separate lane just for reviewing PRs — specialising in that, no other
 lane does PR review, only that one. Not fixing PRs, simply reviewing others' PRs." Then: "maybe we
 don't even need a lane for that — simply using the main repo is ok?" and "a character, maybe Karen
