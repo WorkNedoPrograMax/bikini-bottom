@@ -6,6 +6,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "postbuild": "node scripts/check-lane-states.mjs",
     "start": "npm run build && electron .",
     "smoke": "npm run build && BIKINI_SMOKE=1 electron .",
     "rebuild": "electron-rebuild -w node-pty",

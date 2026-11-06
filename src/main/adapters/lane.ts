@@ -923,6 +923,30 @@ export class LaneManager {
     if (l.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = null; }
   }
 
+  /** The character's OWN model call arrived (a message with no parent tool —
+   *  a helper's frames carry one) while the street shows him idle or done:
+   *  he resumed by himself after the bell (a backgrounded helper that outlived
+   *  the grace window re-invokes the main agent with no new order). Flip him
+   *  back to working so the picture tells the truth and the next result settles
+   *  and rings ONCE more, as a finish — not "idle while still cooking" then a
+   *  surprise second bell (2026-11-06; the oldest Bikini bug). Returns true when
+   *  it woke him. Never wakes a character who is waiting on Maksym (a question,
+   *  a permission, a pause): those are real stops, not a lull. */
+  wakeIfResumed(id: CharacterId, msg: { type?: string; parent_tool_use_id?: string | null }): boolean {
+    const l = this.lane(id);
+    if (l.working || l.awaitingIdle) return false;              // already shown as working
+    if (l.pending || l.pendingChoice || l.paused || l.burned) return false; // a real stop
+    if (msg.type !== "assistant" || msg.parent_tool_use_id) return false;  // only his own call
+    l.working = true;
+    l.activity = "back at it…";
+    this.setPhase(l, "working");
+    this.armWatchdog(id);
+    void this.log.append({ type: "CharacterStateChanged", id, state: "working" });
+    log("lane", `${id} resumed by himself after the bell — back to working`);
+    this.onChange();
+    return true;
+  }
+
   async startJob(id: CharacterId, prompt: string, attachments?: Attachment[]): Promise<void> {
     const l = this.lane(id);
     // Any pending question/permission from the OLD job must be cleared, or it
@@ -1993,6 +2017,7 @@ export class LaneManager {
       l.sdkQuery = q;
 
       for await (const msg of q) {
+        if (l.pump === pump) this.wakeIfResumed(id, msg as any); // his own call after the bell → working again
         if (l.working) this.armWatchdog(id); // progress → reset the stall timer
         if (l.awaitingIdle) this.bumpIdle(id); // activity → not done yet, keep waiting
         const mtype = (msg as any).type as string;
