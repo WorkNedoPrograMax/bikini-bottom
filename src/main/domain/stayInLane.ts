@@ -17,12 +17,12 @@ export const STAY_IN_LANE_NOTE =
   " STAY IN YOUR LANE: the folder you start in is your one and only workspace, and the town only ever looks there. Never create another worktree or copy of the repo — no `git worktree add`, no `claude --worktree`, no EnterWorktree tool, no worktree-isolated subagent; the town refuses them. To work on another branch, switch to it inside this folder (`git switch <branch>`) and switch back when done. If you find a stray worktree left by an earlier job, say so to Maksym rather than using it.";
 
 /** Pipe/chain-aware split of a shell line, so `cd x && git worktree add` is seen. */
-function segments(command: string): string[] {
+export function segments(command: string): string[] {
   return command.split(/\s*(?:&&|\|\||;|\|)\s*/).map((s) => s.trim()).filter(Boolean);
 }
 
 /** Strips env assignments and wrappers (sudo, env, fvm…) in front of the binary. */
-function words(segment: string): string[] {
+export function words(segment: string): string[] {
   const w = segment.split(/\s+/);
   while (w.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0]) || ["sudo", "env", "nice", "nohup", "time"].includes(w[0]))) w.shift();
   return w;

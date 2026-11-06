@@ -6,15 +6,15 @@ import { app, BrowserWindow, ipcMain, dialog, Notification, nativeImage, powerSa
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { EventLog } from "./domain/eventLog";
-import { fold, emptyTown } from "./domain/snapshot";
-import { ROSTER } from "./config/roster";
+import { fold, emptyTown, visibleOnStreet } from "./domain/snapshot";
+import { ROSTER, REVIEWER_IDS } from "./config/roster";
 import { TelegramBridge, type TgButton, type TgTextCtx } from "./adapters/telegram";
 import { TgThreads, routeReply, type TgThread } from "./domain/tgThreads";
 import { AppConfig } from "./config/appConfig";
 import { prepareProject } from "./adapters/git";
 import { checkClaude, clearStrayApiKey } from "./adapters/claude";
 import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon, resolveMailPictures, resolveMailSound } from "./adapters/assets";
-import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, inferOnIt, type GhThread } from "./domain/mail";
+import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, inferOnIt, canTake, type GhThread } from "./domain/mail";
 import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview, branchAt } from "./adapters/pulls";
 import { JiraClient } from "./adapters/jira";
 import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, markJiraOnIt, canHandJira, townForTicket, jiraBrief, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
@@ -84,8 +84,11 @@ function townNameOf(townPath: string | null): string {
 }
 
 async function seedTownIfEmpty(log: EventLog): Promise<void> {
-  if (log.all().length > 0) return;
+  // An existing town registers only the roster entries it does not have yet
+  // (Karen joined on 2026-11-06; the towns' logs predate her).
+  const have = new Set(fold(log.all()).characters.map((c) => c.id));
   for (const c of ROSTER) {
+    if (have.has(c.id)) continue;
     await log.append({
       type: "CharacterRegistered",
       id: c.id, name: c.name, role: c.role, accent: c.accent, pos: c.pos, isHomeBase: c.isHomeBase,
@@ -408,7 +411,7 @@ function jiraViewFor(townPath: string | null, chars: TownSnapshot["characters"])
   const project = townPath ? townJira.get(townPath) : null;
   if (!project) return null;
   const L = townPath ? lanesOf(townPath) : null;
-  const crew = chars.filter((x) => !x.isHomeBase).map((x) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) }));
+  const crew = chars.filter((x) => !x.isHomeBase && !x.reviewer).map((x) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) }));
   const b = jiras.get(project);
   if (!b) return { project, site: jiraSite(), configured: jiraConfigured(), email: cfg.data.jiraEmail, checkedAt: 0, checking: false, forYou: 0, lines: [], plate: [], open: 0, error: null, crew, sweeping: null };
   const sw = b.sweeping && (L?.isWorking(b.sweeping.characterId) ?? false) ? { characterId: b.sweeping.characterId, name: b.sweeping.name, since: b.sweeping.since } : null;
@@ -459,6 +462,7 @@ async function sweepFromTown(townPath: string, characterId: CharacterId): Promis
 async function handOffJira(townPath: string, id: string, characterId: CharacterId): Promise<void> {
   const b = jiraOf(townPath); const t = towns.get(townPath);
   if (!b || !t || characterId === "krabs") return;
+  if (REVIEWER_IDS.has(characterId)) { toast("Karen only reviews pull requests — pick someone else for this."); return; }
   const line = b.lines.find((l) => l.id === id);
   if (!line) { toast("That note isn't on the page anymore."); return; }
   if (!canHandJira(line)) { toast("Nothing to hand over on that line."); return; }
@@ -507,7 +511,7 @@ function notifyTgJira(project: string, fresh: JiraLine[]): void {
     const townPath = canHandJira(l) ? jiraTownFor(project, l.title) : null;
     if (townPath) {
       const t = towns.get(townPath);
-      const faces: TgButton[] = ROSTER.filter((r) => !r.isHomeBase && !TERMINAL_IDS.has(r.id) && !(t?.lanes.isWorking(r.id) ?? true)).map((r) => ({ text: `${r.name} handles it`, data: tgData("jirahand", r.id, l.id.replace(/:/g, "~"), townPath) }));
+      const faces: TgButton[] = ROSTER.filter((r) => !r.isHomeBase && !r.reviewer && !TERMINAL_IDS.has(r.id) && !(t?.lanes.isWorking(r.id) ?? true)).map((r) => ({ text: `${r.name} handles it`, data: tgData("jirahand", r.id, l.id.replace(/:/g, "~"), townPath) }));
       if (faces.length) buttons.push(faces);
     }
     buttons.push([{ text: "Open on Jira", url: l.url }]);
@@ -580,8 +584,10 @@ function mailViewFor(townPath: string | null, chars: TownSnapshot["characters"])
   const m = townPath ? mails.get(townPath) : null;
   if (!m) return null;
   const L = townPath ? lanesOf(townPath) : null;
-  const crew = chars.filter((x) => !x.isHomeBase).map((x) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) }));
-  return { repo: m.repo, checkedAt: m.checkedAt, forYou: forYouCount(m.lines), lines: m.lines, error: m.error, pictures: resolveMailPictures(ASSETS_DIR), crew, merging: m.merging, refused: m.refused, checking: m.busy };
+  const chip = (x: TownSnapshot["characters"][number]) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) });
+  const crew = chars.filter((x) => !x.isHomeBase && !x.reviewer).map(chip);
+  const reviewCrew = chars.filter((x) => x.reviewer).map(chip);
+  return { repo: m.repo, checkedAt: m.checkedAt, forYou: forYouCount(m.lines), lines: m.lines, error: m.error, pictures: resolveMailPictures(ASSETS_DIR), crew, reviewCrew, merging: m.merging, refused: m.refused, checking: m.busy };
 }
 
 /** Merge one of Maksym's PRs from the town — after asking GitHub once more
@@ -602,7 +608,7 @@ async function mergeFromTown(townPath: string, number: number, via: "street" | "
     if (via === "tg") {
       // The phone gets the faces too: one tap hands the fix to a character.
       const t = towns.get(townPath);
-      const faces: TgButton[] = ROSTER.filter((r) => !r.isHomeBase && !TERMINAL_IDS.has(r.id) && !(t?.lanes.isWorking(r.id) ?? true)).map((r) => ({ text: `${r.name} fixes it`, data: tgData("mailhand", r.id, number, townPath) }));
+      const faces: TgButton[] = ROSTER.filter((r) => !r.isHomeBase && !r.reviewer && !TERMINAL_IDS.has(r.id) && !(t?.lanes.isWorking(r.id) ?? true)).map((r) => ({ text: `${r.name} fixes it`, data: tgData("mailhand", r.id, number, townPath) }));
       await tg?.send(`Not merging — ${tgEsc(refusal)}.${faces.length ? " Who fixes it?" : ""}`, faces.length ? [faces] : undefined);
     }
     await pollMail(townPath); // the line turns ALMOST / SENT BACK with its Hand button, right now
@@ -652,6 +658,12 @@ async function handOffPull(townPath: string, number: number, characterId: Charac
   if (!m || !t || characterId === "krabs") return;
   const line = m.lines.find((l) => l.number === number);
   if (!line) { toast("That PR isn't on the paper anymore."); return; }
+  // The reviewer takes review orders only (someone else's PR waiting for Maksym's
+  // look); a builder takes fixes and never a review — only Karen reviews.
+  if (!canTake(REVIEWER_IDS.has(characterId), line.word)) {
+    toast(REVIEWER_IDS.has(characterId) ? "Karen only reviews other people's PRs — this one needs fixing, pick a builder." : `Reviews are Karen's — hand #${number} to her.`);
+    return;
+  }
   if (TERMINAL_IDS.has(characterId)) { toast(`${tgName(characterId)} works in a terminal — pick another character.`); return; }
   if (t.lanes.isWorking(characterId)) { toast(`${tgName(characterId)} is busy — pick someone idle.`); return; }
   const brief = briefFor(line, m.threads[number] || [], m.repo);
@@ -730,7 +742,7 @@ function buildWindow(chars: TownSnapshot["characters"]): WindowView | null {
   if (!c) return null;
   if (c.isHomeBase) {
     const crew = chars
-      .filter((x) => !x.isHomeBase)
+      .filter((x) => !x.isHomeBase && !x.reviewer) // the reviewer is never on the picker
       .map((x) => ({
         id: x.id, name: x.name,
         // Terminal chars (squid) are always pickable — no SDK "working" state.
@@ -1312,6 +1324,8 @@ function snapshot(): TownSnapshot {
   const base = projectLog ? fold(projectLog.all()) : emptyTown();
   // The chalk line lives in the lane (not the event log) — fill it in here.
   if (lanes) for (const c of base.characters) { if (!c.isHomeBase) { const v = lanes.view(c.id); c.note = v.note; c.noteAt = v.noteAt; c.attention = attentionFor(c.id, c.state); c.booth = v.booth; } }
+  // The reviewer (Karen): flagged from the roster, on the street only while reviewing.
+  for (const c of base.characters) { c.reviewer = REVIEWER_IDS.has(c.id); c.visible = visibleOnStreet(c); }
   applyFixture(base); // dev/screenshot hook only (BIKINI_FIXTURE) — a no-op in normal runs
   // Resolve every visual through the Asset Slot resolver (AD-7).
   for (const c of base.characters) {

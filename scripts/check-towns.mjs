@@ -37,6 +37,13 @@ const ad = laneAdoption("/x/scout-and-runner", sr);
 ok(ad && ad.adoptionFor("bob").worktree === "/x/sr-bob", "bob's worktree is the sibling /x/sr-bob (as today)");
 ok(ad.adoptionFor("pat").branch === "feat/pat" && ad.adoptionFor("pat").frontendPort === 3300, "pat keeps branch + port");
 ok(ad.adoptionFor("krabs") === null, "no adoption for Krabs");
+// Karen (2026-11-06): the reviewer adopts the project folder itself.
+{
+  const kp = normalizeProfile({ name: "K", landing: "none", lanes: { karen: { dir: ".", branch: "dev", label: "dev" } } }, "/towns/highcap");
+  const ka = laneAdoption("/towns/highcap", kp);
+  ok(ka && ka.adoptionFor("karen")?.worktree === "/towns/highcap" && ka.adoptionFor("karen")?.branch === "dev", "lanes.karen = { dir: '.', branch: 'dev' } resolves to the project folder on dev");
+  ok(ka && ka.adoptionFor("bob") === null, "the builders still get fresh worktrees");
+}
 ok(laneAdoption("/x/whatever", plain) === null, "a plain town has no adoptions (fresh .bikini worktrees)");
 
 console.log("loadProfile — never throws:");

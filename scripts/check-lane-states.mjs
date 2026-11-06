@@ -15,6 +15,10 @@ const { LaneManager } = require("../dist/main/adapters/lane.js");
 let fails = 0;
 const ok = (cond, msg) => { if (!cond) { fails++; console.log("  ✗", msg); } else console.log("  ✓", msg); };
 const tick = (ms = 150) => new Promise((r) => setTimeout(r, ms));
+// Wait for a condition instead of a fixed pause: the question path scans
+// ~/Desktop/claude-deliverables for pictures first, which takes longer than a
+// tick on a full Desktop (the check flaked 4/8 runs on 2026-11-06 for that).
+const until = async (cond, ms = 5000) => { const t0 = Date.now(); while (!cond() && Date.now() - t0 < ms) await tick(20); return cond(); };
 const fakeLog = () => { const events = []; return { events, append: async (e) => { events.push(e); }, all: () => events }; };
 const manager = (dir, log, cues) => new LaneManager(dir, log, () => {}, () => {}, (id, kind) => cues.push(kind));
 const readSaved = (dir) => { const f = join(dir, ".bikini", "sessions.json"); return existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : null; };
@@ -34,7 +38,7 @@ console.log("ask while the previous turn is still settling:");
   l.awaitingIdle = true; l.awaitSince = Date.now(); l.beatAt = Date.now(); lm.bumpIdle("squid");
   ok(l.idleTimer !== null, "the done-timer is armed by the result");
   void lm.promptChoice("squid", { questions: [{ question: "Ship it?", options: ["yes", "no"] }] });
-  await tick();
+  await until(() => l.pendingChoice !== null);
   ok(l.pendingChoice !== null && l.working === false, "the question is pending and he is not 'working'");
   ok(l.idleTimer === null && l.awaitingIdle === false, "the done-timer is disarmed — no second bell 12 s into the wait");
   ok(cues.filter((k) => k === "ready").length === 1, "exactly one bell for the question");
@@ -74,7 +78,7 @@ console.log("resumes by himself after the bell:");
   await tick();
   ok(lastState(log, "squid") === "working", "the street shows him working again");
   ok(lm.wakeIfResumed("squid", own) === false, "already working → nothing to do");
-  l.working = false; void lm.promptChoice("squid", { questions: [{ question: "Again?", options: ["a"] }] }); await tick();
+  l.working = false; void lm.promptChoice("squid", { questions: [{ question: "Again?", options: ["a"] }] }); await until(() => l.pendingChoice !== null);
   ok(lm.wakeIfResumed("squid", own) === false && l.working === false, "waiting on a question is a real stop — never woken over it");
   await lm.answerQuestion("squid", ["a"]);
   l.working = false; l.paused = true;

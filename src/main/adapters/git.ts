@@ -29,12 +29,32 @@ export async function ensureWorktree(projectPath: string, id: string): Promise<s
     await fs.access(path.join(wt, ".git")); // already a worktree
     return wt;
   } catch { /* create it */ }
-  // Branch per Lane off the Project's current HEAD; -B is idempotent.
-  const r = await git(projectPath, ["worktree", "add", "-B", `lane/${id}`, wt, "HEAD"]);
+  // Branch per Lane off the project's MAIN LINE — the remote's default branch
+  // (origin/dev on highcap), not the folder's current HEAD: since 2026-11-06 the
+  // reviewer works in the project folder itself and moves its branch while she
+  // reviews, so HEAD can be a teammate's PR branch. A repo with no remote keeps
+  // HEAD (the local-only / first-run case). -B is idempotent.
+  const r = await git(projectPath, ["worktree", "add", "-B", `lane/${id}`, wt, await mainLine(projectPath)]);
   if (!r.ok && !(await exists(path.join(wt, ".git")))) {
     throw new Error(`could not create ${id}'s workspace: ${r.out}`);
   }
   return wt;
+}
+
+/** The branch new lanes are cut from: `origin/<default>` when the remote says
+ *  which, else `HEAD`. */
+export async function mainLine(projectPath: string): Promise<string> {
+  const r = await git(projectPath, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  return r.ok && /^origin\/\S+$/.test(r.out) ? r.out : "HEAD";
+}
+
+/** Put a folder on a branch (`git switch`), never forcing. `changed` says
+ *  whether it was elsewhere. Used to park the reviewer's folder on its main line. */
+export async function switchBranch(cwd: string, branch: string): Promise<{ ok: boolean; changed: boolean; out: string }> {
+  const cur = (await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])).out;
+  if (cur === branch) return { ok: true, changed: false, out: "" };
+  const r = await git(cwd, ["switch", branch]);
+  return { ok: r.ok, changed: r.ok, out: r.out };
 }
 
 async function exists(p: string): Promise<boolean> {

@@ -122,7 +122,7 @@ export function seedProfile(projectPath: string, landing: Landing = "none"): Tow
   return p;
 }
 
-const CHARACTER_IDS: readonly CharacterId[] = ["bob", "squid", "pat", "krabs"];
+const CHARACTER_IDS: readonly CharacterId[] = ["bob", "squid", "pat", "krabs", "karen"];
 
 /** Tidy whatever was in the file into a well-formed profile. Unknown fields are
  *  dropped, missing ones defaulted — never throws. */

@@ -1,8 +1,9 @@
 // The IPC contract — the ONLY vocabulary that crosses the main↔renderer
 // boundary (AD-4). Both sides import these shapes; nothing else is shared.
 
-/** Fixed Character slugs for v1 (AD conventions). Sandy joins later as a drop-in. */
-export type CharacterId = "bob" | "squid" | "pat" | "krabs";
+/** Fixed Character slugs (AD conventions). Karen (2026-11-06) is the reviewer:
+ *  one job — other people's pull requests — and never any code. */
+export type CharacterId = "bob" | "squid" | "pat" | "krabs" | "karen";
 
 /** A Character's visible State, shown by its picture (PRD Glossary; FR-3). */
 export type CharacterState = "idle" | "working" | "calling";
@@ -22,6 +23,11 @@ export interface CharacterView {
   pos: { leftPct: number; topPct: number };
   /** Home Base isn't a work Lane; it hands out Jobs. */
   isHomeBase: boolean;
+  /** The reviewer (Karen): takes review orders only, never writes code, and is
+   *  on the street only while reviewing. Main sets it from the roster. */
+  reviewer: boolean;
+  /** Drawn on the street? False only for an idle reviewer with nothing unseen. */
+  visible: boolean;
   state: CharacterState;
   /** True while a finished/needy result is unseen (FR-4). */
   unseen: boolean;
@@ -471,8 +477,10 @@ export interface MailView {
   error: string | null;
   /** The two pictures (file:// URLs) for the prop, or null → drawn stand-in. */
   pictures: { empty: string | null; ready: string | null };
-  /** Who can take a hand-off right now (idle characters), for the face row. */
+  /** Who can take a FIX right now (idle builders), for the face row of Maksym's own lines. */
   crew: { id: CharacterId; name: string; available: boolean }[];
+  /** Who can take a REVIEW (the reviewer, Karen), for the face row of other people's lines. */
+  reviewCrew: { id: CharacterId; name: string; available: boolean }[];
   /** A merge in flight: the PR number, so the paper can say "merging…". */
   merging: number | null;
   /** The last merge the guard refused — the paper turns it into "who fixes

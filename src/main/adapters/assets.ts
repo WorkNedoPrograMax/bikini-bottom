@@ -15,6 +15,7 @@ const SOUND_ALIASES: Record<CharacterId, string[]> = {
   squid: ["squid"],
   pat: ["pat", "patrick", "patrcick"],
   krabs: ["krab"],
+  karen: ["karen"],
 };
 
 /** Resolve a Character's sound for a cue ('start' | 'ready'), picking a random

@@ -14,7 +14,7 @@ import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
 import { newEvidence, noteEvidence, openWindow, closeWindow, isClaimed, type PictureEvidence } from "../domain/pictureClaims";
 import { stampArchive, pruneArchive, ARCHIVE_KEEP_DAYS } from "../domain/archiveRetention";
-import { ensureWorktree, headSha, serveJob, sendBack } from "./git";
+import { ensureWorktree, headSha, serveJob, sendBack, switchBranch } from "./git";
 import { clearStrayApiKey } from "./claude";
 import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue, sanitizeStatus, statusAccepted, fallbackNote } from "./guards";
 import { shouldLand, type Landing, type DeviceSpec } from "../config/townProfile";
@@ -23,6 +23,8 @@ import { runSetup, setupDue, loadReport } from "./laneSetup";
 import { Switchboard, Bedtime, boothStep, phoneMatch, phoneTarget, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN, DEFAULT_SLEEP_AFTER_MIN, type PhoneKey } from "../domain/booth";
 import { wakeAndroid, wakeIos, sleepAndroid, sleepIos, androidSerial } from "./phone";
 import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../domain/stayInLane";
+import { isReviewOnlyAllowed, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } from "../domain/reviewOnly";
+import { REVIEWER_IDS } from "../config/roster";
 import { log, log as appLog } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -116,6 +118,7 @@ const VOICE_FLAVOUR: Record<CharacterId, string> = {
   pat: "You're Patrick — easy-going, warm, unbothered, says things simply and makes Maksym smile.",
   squid: "You're Squidward — dry, a bit grumpy, secretly caring; your humour is deadpan, never mean to Maksym.",
   krabs: "You're Mr. Krabs — practical and money-minded, warm underneath, fond of Maksym.",
+  karen: "You're Karen — Plankton's computer wife: sharp, precise, a little sardonic, never cruel; you notice everything and say it plainly. You review other people's pull requests in Maksym's name — that is your whole job.",
 };
 function voiceFor(id: CharacterId): string {
   return "WHO YOU ARE TALKING TO AND HOW: " + VOICE_FLAVOUR[id]
@@ -338,6 +341,8 @@ const DENY_READONLY = {
 const READ_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "NotebookRead"];
 // The Phone Booth's two refusals: a command only the town may run on the phone,
 // and a queued phone command whose job ended before its turn came.
+// Karen's refusal: the reviewer never changes code (domain/reviewOnly.ts).
+const DENY_REVIEW_ONLY = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: REVIEW_ONLY_REASON } } as const;
 const DENY_PHONE = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: FORBIDDEN_REASON } } as const;
 const DENY_LEFT = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: LEFT_REASON } } as const;
 // Stay in your lane: a character never makes another worktree (domain/stayInLane.ts).
@@ -1221,6 +1226,7 @@ export class LaneManager {
     this.clearWatchdog(l);
     this.setPhase(l, "waiting");
     this.leaveBooth(id); // scrapped → off the phone, out of the queue
+    void this.parkReviewer(id);
     l.note = null; l.noteAt = 0; // nothing to report about a scrapped order
     l.conversation.push({ from: "them", text: "Scrapped. That order's off the books." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
@@ -1243,6 +1249,7 @@ export class LaneManager {
     this.clearWatchdog(l);
     this.setPhase(l, "waiting");
     this.leaveBooth(id); // cancelled → off the phone, out of the queue
+    void this.parkReviewer(id);
     l.conversation.push({ from: "them", text: "Okay — I stopped. Nothing was left half-done." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -1390,6 +1397,7 @@ export class LaneManager {
                 const tool = input.tool_name as string;
                 if (readOnly) return READ_TOOLS.includes(tool) ? ALLOW : DENY_READONLY; // look-only wins over bypass
                 const ti = (input.tool_input || {}) as Record<string, unknown>;
+                if (REVIEWER_IDS.has(id) && !isReviewOnlyAllowed(tool, ti)) return DENY_REVIEW_ONLY; // the reviewer never changes code
                 if (isStrayWorktree(tool, ti)) return DENY_WORKTREE; // stay in your lane, bypass or not
                 if (this.getBypass()) return ALLOW; // changes-on + bypass → anything goes
                 if (this.isSafe(tool, ti, cwd)) return ALLOW;
@@ -1614,6 +1622,7 @@ export class LaneManager {
     l.working = false; this.clearWatchdog(l);
     this.setPhase(l, "waiting");
     this.leaveBooth(id); // burned → the phone is free again
+    void this.parkReviewer(id);
     l.conversation.push({ from: "them", text: `Uh oh — I burned this one: ${reason}. Nothing broke; your project is untouched. Try again, or scrap it?` });
     await this.log.append({ type: "JobBurned", id, reason });
     await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
@@ -1683,7 +1692,27 @@ export class LaneManager {
     if (l.note === null) { const fb = fallbackNote(lastReply?.text || ""); if (fb) { l.note = fb; l.noteAt = Date.now(); this.persist(); this.onChange(); } }
     log("lane", `${id} idle`, summary);
     this.onFinished(id, summary);
+    void this.parkReviewer(id); // the reviewer leaves the shared folder on its main line
     void this.integrate(id); // land the work in the Project (AD-5)
+  }
+
+  /** Back on dev (2026-11-06). The reviewer works in the project folder itself
+   *  (an adopted lane), so a review moves that folder's branch. Every start and
+   *  every end puts it back on the adopted branch — a compensation beside the
+   *  real guard (new lanes are cut from the remote main line, git.ts), logged,
+   *  never forced: a dirty tree is reported, not wiped. No-op for builders. */
+  private async parkReviewer(id: CharacterId): Promise<void> {
+    if (!REVIEWER_IDS.has(id)) return;
+    const a = this.adopt?.adoptionFor(id);
+    if (!a) return;
+    const r = await switchBranch(a.worktree, a.branch);
+    if (r.ok) log("lane", `${id} parked on ${a.branch}`, { changed: r.changed });
+    else {
+      log("lane", `${id} could not get back on ${a.branch}`, { error: r.out.slice(0, 200) });
+      const l = this.lane(id);
+      l.conversation.push({ from: "them", text: `Heads up: I couldn't put the project folder back on ${a.branch} (${r.out.split("\n")[0].slice(0, 120)}). Nothing is lost, but the folder is still on the branch I was reviewing.`, tool: true });
+      this.onChange();
+    }
   }
 
   private async runSession(id: CharacterId, pump: Pump, resume: boolean): Promise<void> {
@@ -1694,6 +1723,7 @@ export class LaneManager {
     try { cwd = await this.worktreeFor(id); }
     catch (e) { await this.burn(id, `couldn't set up my workspace (${(e as Error).message})`); l.pump = null; return; }
     await this.prepareLane(id, cwd);
+    if (!resume) await this.parkReviewer(id); // a review starts from the main line, whatever the last one left
 
     l.agents.clear();
     l.abort = new AbortController();
@@ -1867,6 +1897,7 @@ export class LaneManager {
               + serverNote
               + phoneNote
               + STAY_IN_LANE_NOTE
+              + (REVIEWER_IDS.has(id) ? REVIEW_ONLY_NOTE : "")
               + setupNote(l.setupReport),
           },
           // Load the repo's full setup (CLAUDE.md, skills, /commands, rules,
@@ -1901,6 +1932,13 @@ export class LaneManager {
                 // Our own "ask Maksym" tool is never a permission risk — always allow
                 // it so the question reaches him (even when asking-mode is on).
                 if (toolName.startsWith("mcp__bikini__")) return ALLOW;
+                // The reviewer never changes code — before bypass, before everything.
+                if (REVIEWER_IDS.has(id) && !isReviewOnlyAllowed(toolName, ti)) {
+                  log("lane", `${id} refused (review only)`, { tool: toolName, command: String(ti.command ?? "").slice(0, 160) });
+                  l.conversation.push({ from: "them", text: "The town stopped me there — I only review, I never change anything. I'll say it in the review instead.", tool: true });
+                  this.onChange();
+                  return DENY_REVIEW_ONLY;
+                }
                 // Stay in your lane — refused even in bypass mode, like the booth.
                 if (isStrayWorktree(toolName, ti)) {
                   log("lane", `${id} tried to make another worktree`, { tool: toolName, command: String(ti.command ?? "").slice(0, 120) });

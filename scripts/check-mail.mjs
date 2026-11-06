@@ -5,7 +5,7 @@
 //   node scripts/check-mail.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt, touchesGitHub, inferOnIt } = require("../dist/main/domain/mail.js");
+const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt, touchesGitHub, inferOnIt, canTake } = require("../dist/main/domain/mail.js");
 const { normalizePulls, normalizeProfile } = require("../dist/main/config/townProfile.js");
 
 let fails = 0;
@@ -187,6 +187,16 @@ ok(normalizePulls({ repo: "a/b", everySec: 10, merge: "merge", off: true, junk: 
 ok(normalizePulls({ repo: "not a repo" }) === null, "a malformed repo is dropped (defaults apply)");
 ok(normalizeProfile({ name: "x", pulls: { off: true } }, "/x").pulls.off === true, "profile carries pulls.off");
 ok(normalizeProfile({ name: "x" }, "/x").pulls === undefined, "no pulls block → defaults (nothing written)");
+
+console.log("canTake — only Karen reviews, Karen only reviews (2026-11-06):");
+ok(canTake(true, "your-turn"), "the reviewer takes 'your turn to review'");
+ok(canTake(true, "look-again"), "the reviewer takes 'look again'");
+ok(!canTake(true, "sent-back"), "the reviewer never takes a sent-back fix");
+ok(!canTake(true, "almost"), "the reviewer never takes an almost-there fix");
+ok(!canTake(false, "your-turn"), "a builder never takes a review");
+ok(!canTake(false, "look-again"), "a builder never takes a look-again");
+ok(canTake(false, "sent-back"), "a builder takes a sent-back fix");
+ok(canTake(false, "almost"), "a builder takes an almost-there fix");
 
 console.log(fails ? `\n${fails} check(s) failed` : "\nall mail checks passed");
 process.exit(fails ? 1 : 0);

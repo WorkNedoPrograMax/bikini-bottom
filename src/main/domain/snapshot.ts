@@ -2,10 +2,19 @@
 // no I/O — deterministic, so a boot-time replay yields exactly the live state.
 
 import type { DomainEvent } from "./events";
-import type { CharacterView, TownSnapshot } from "../../shared/ipc";
+import type { CharacterState, CharacterView, TownSnapshot } from "../../shared/ipc";
 import { EMPTY_FUEL } from "../../shared/ipc";
 
 export const BACKGROUND = "conch-day.png";
+
+/** Is this character drawn on the street? Everyone always — except the
+ *  reviewer (Karen), who is there only while reviewing: working, calling, or
+ *  finished-but-not-yet-seen (else "posted ✓ — Approve" would vanish unseen).
+ *  Maksym, 2026-11-06: "always visible only when she's reviewing something". */
+export function visibleOnStreet(c: { reviewer: boolean; state: CharacterState; unseen: boolean }): boolean {
+  if (!c.reviewer) return true;
+  return c.state !== "idle" || c.unseen;
+}
 
 /** The town before any Character exists (First Run shows over this). */
 export function emptyTown(): TownSnapshot {
@@ -27,6 +36,7 @@ export function fold(events: readonly DomainEvent[]): TownSnapshot {
           accent: ev.accent,
           pos: ev.pos,
           isHomeBase: ev.isHomeBase,
+          reviewer: false, visible: true, // main sets both from the roster (the log predates Karen)
           state: "idle",
           unseen: false,
           picture: null, // filled by the Asset Slot resolver in main (AD-7)
