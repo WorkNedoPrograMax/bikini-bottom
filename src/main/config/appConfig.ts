@@ -83,8 +83,21 @@ export class AppConfig {
     this.data.towns = migrateTowns(this.data);
   }
 
+  /** Every key this process itself changed since it started. */
+  private dirty: Partial<AppConfigData> = {};
+
+  /** The file on disk is the truth for every key this process never touched:
+   *  a save re-reads it and lays only this process's own changes on top. So a
+   *  key written by hand or by a newer build while an older build still runs
+   *  survives that older build's next save. (2026-11-06: the Jira token,
+   *  pasted while the 2026-11-05 build was up, was wiped by its next save —
+   *  it rewrote the file from the copy it had loaded the day before.) */
   async save(patch: Partial<AppConfigData>): Promise<void> {
-    this.data = { ...this.data, ...patch };
+    this.dirty = { ...this.dirty, ...patch };
+    let onDisk: Record<string, unknown> = {};
+    try { onDisk = JSON.parse(await fs.readFile(this.file, "utf8")); } catch { /* first save, or unreadable — this process's copy wins */ }
+    this.data = { ...DEFAULTS, ...onDisk, ...this.dirty } as AppConfigData;
+    this.data.towns = migrateTowns(this.data);
     await fs.mkdir(path.dirname(this.file), { recursive: true });
     await fs.writeFile(this.file, JSON.stringify(this.data, null, 2), "utf8");
   }

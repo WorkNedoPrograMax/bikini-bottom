@@ -84,6 +84,22 @@ ok(cfg2.data.towns.length === 2 && cfg2.data.towns[1].path === "/b", "saved town
 const cfg3 = new AppConfig(path.join(tmp, "nothing-here")); await cfg3.load();
 ok(cfg3.data.towns.length === 0 && cfg3.data.projectPath === null, "a fresh install: no towns");
 
+console.log("AppConfig.save — the file is the truth for keys this process never touched (2026-11-06 Jira token wipe):");
+// An OLD build loaded the file yesterday; meanwhile a script (or a newer build) wrote a key it does not know.
+const old = new AppConfig(ud); await old.load();
+const onDisk = JSON.parse(readFileSync(path.join(ud, "bikini-config.json"), "utf8"));
+writeFileSync(path.join(ud, "bikini-config.json"), JSON.stringify({ ...onDisk, jiraToken: "tok-from-the-script", jiraEmail: "a@b.c", jiraSite: "https://x" }), "utf8");
+await old.save({ lastTownPath: "/a" });
+const after = JSON.parse(readFileSync(path.join(ud, "bikini-config.json"), "utf8"));
+ok(after.jiraToken === "tok-from-the-script" && after.jiraEmail === "a@b.c", "a key written to the file after this process loaded it survives this process's save");
+ok(after.lastTownPath === "/a", "…and this process's own change is written");
+await old.save({ jiraToken: null });
+const after2 = JSON.parse(readFileSync(path.join(ud, "bikini-config.json"), "utf8"));
+ok(after2.jiraToken === null && after2.jiraEmail === "a@b.c", "a key this process DOES change wins over the file, the others still come from the file");
+writeFileSync(path.join(ud, "bikini-config.json"), JSON.stringify({ ...after2, jiraSite: "https://y" }), "utf8");
+await old.save({ towns: after2.towns });
+ok(JSON.parse(readFileSync(path.join(ud, "bikini-config.json"), "utf8")).jiraSite === "https://y" && old.data.jiraSite === "https://y", "later outside edits of untouched keys are re-read at every save, in memory too");
+
 console.log("townTabsFor — the switcher's lines from each town's own fold:");
 const A = { path: "/x/scout-and-runner", name: "Scout & Runner", characters: [
   { name: "Mr. Krabs", state: "idle", unseen: false, isHomeBase: true },
