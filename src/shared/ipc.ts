@@ -431,6 +431,8 @@ export interface JiraLine {
   /** First name of who did it ("" for quiet). */
   who: string;
   mine: boolean;
+  /** A character is handling this note (handed from the page or the phone), until it finishes. */
+  onIt?: { characterId: CharacterId; name: string; since: number } | null;
 }
 
 /** The Jira page: null when the town has no Jira project. `configured` false =
@@ -572,6 +574,7 @@ export type Intent =
   | { type: "saveJira"; email: string; token: string; site: string }
   | { type: "jiraSeen" }
   | { type: "sweepJira"; characterId: CharacterId }
+  | { type: "handOffJira"; id: string; characterId: CharacterId }
   | { type: "mergePull"; number: number }
   | { type: "askReview"; number: number }
   | { type: "handOffPull"; number: number; characterId: CharacterId }

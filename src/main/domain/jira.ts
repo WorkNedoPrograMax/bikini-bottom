@@ -7,7 +7,7 @@
 // Not a copy of Jira (Maksym, 2026-11-05): only what changed and what needs
 // him. A line is "for you" until he has looked at the page (the `seen` set).
 
-import type { JiraLine, JiraWord } from "../../shared/ipc";
+import type { JiraLine, JiraWord, CharacterId } from "../../shared/ipc";
 
 /** One issue as `POST /rest/api/3/search/jql` returns it (the fields we ask for,
  *  plus `expand: changelog`). Measured 2026-11-05: 45 issues, 2 s, one call. */
@@ -253,6 +253,67 @@ Do, in this order:
 4. Ask me ONCE with ask_maksym: the story = the board in 3–5 plain sentences (how many tickets, how many look fine, what is out of place and why); one question per proposal, short, with the options "Move it" / "Leave it" (and "Flag as blocked" where that applies), the ticket named in the question. No proposals at all → no question: say "the board is in order" and stop.
 5. Apply exactly what I picked: \`getTransitionsForJiraIssue\` → the transition whose name matches → \`transitionJiraIssue\`; one short comment on each moved ticket saying why (the PR, the merge, the sweep). A transition that is not offered: skip it and tell me in one line.
 6. Finish with one short message: what moved, what was flagged, what you left.`;
+}
+
+/** "X is on it": a tagged / sent-back line handed to a character carries the
+ *  mark and stops being "for you" until that character finishes. Marks whose
+ *  character is not cooking anymore are dropped by the caller. */
+export function markJiraOnIt(lines: readonly JiraLine[], onIt: ReadonlyMap<string, { characterId: string; name: string; since: number }>, working: (characterId: string) => boolean): JiraLine[] {
+  return lines.map((l) => {
+    const o = onIt.get(l.id);
+    if (!o || !working(o.characterId)) return { ...l, onIt: null };
+    return { ...l, onIt: { characterId: o.characterId as CharacterId, name: o.name, since: o.since }, forYou: false };
+  });
+}
+
+/** Which line can be handed to a character: someone wrote to Maksym, or a
+ *  ticket of his came back. Hand-overs and "just so you know" moves are not work. */
+export function canHandJira(line: JiraLine): boolean { return line.word === "tagged" || line.word === "sent-back"; }
+
+/** The town whose characters should take a ticket: a [BE] ticket goes to the
+ *  backend repo's town, anything else to the first town of the project. */
+export function townForTicket(title: string, towns: readonly { path: string; repo: string | null }[]): string | null {
+  if (!towns.length) return null;
+  const be = /\[BE\]/i.test(title);
+  const pick = towns.find((t) => be === /backend|api|server/i.test(t.repo || "")) || towns[0];
+  return pick.path;
+}
+
+/** The character's order for one note: read the ticket and its thread, work out
+ *  what is asked of Maksym, do it (an answer on Jira, or the work itself), and
+ *  come back with one short message. */
+export function jiraBrief(input: { line: JiraLine; comments: readonly JiraRawComment[]; site: string; project: string; me: string }): string {
+  const { line, comments, site, project, me } = input;
+  const thread = comments.filter((c) => c.body).slice(0, 6).reverse()
+    .map((c) => `  - ${firstName(c.author?.displayName) || "someone"}${(c.author?.accountId || "") === me ? " (me)" : ""}, ${String(c.created).slice(0, 16).replace("T", " ")}: “${adfText(c.body).slice(0, 400)}${adfText(c.body).length > 400 ? "…" : ""}”`).join("\n");
+  const head = line.word === "sent-back"
+    ? `${line.key} came back to me on Jira: ${line.reason}. It sits in ${line.status} now. Find out why, fix it, and send it on again.`
+    : `${line.who || "Someone"} tagged me on ${line.key} on Jira (${line.status}): ${line.reason}. Read what is asked of me and handle it.`;
+  const rules = `The ticket rules in CLAUDE.local.md hold (the board's moves by transition name: "Start work" → In Progress, "To review" → Code Review, "Changes requested" → In Progress; never Done, the QA columns, assignees; never create tickets).`;
+  const how = line.word === "sent-back"
+    ? `Do, in this order:
+1. Read the ticket and its newest comments with the Atlassian MCP (getJiraIssue ${line.key}, listJiraIssueComments), and the PR for its branch on GitHub (\`gh pr list --search "${line.key}" --state all\`, its review threads). Work out exactly what failed or what was requested — the comment or review that sent it back, quoted.
+2. Move the ticket to In Progress ("Start work" / "Changes requested" — whichever Jira offers) with a one-line comment that you are on it.
+3. Fix it on the ticket's own branch, push, make the PR ready again (re-request the reviewer with \`gh pr edit <n> --add-reviewer <login>\` when it was a review), and move the ticket to Code Review ("To review") with the PR link in a comment. A QA failure with steps: reproduce it first, fix, then say in the comment what you changed and how to re-test.
+4. A decision only I can make (scope, product behaviour, money, eligibility) → ask me ONCE with ask_maksym, your proposed answer first, then carry on with what I picked.`
+    : `Do, in this order:
+1. Read the ticket and the whole comment thread with the Atlassian MCP (getJiraIssue ${line.key}, listJiraIssueComments ${line.key}); find the comment(s) that mention me and what they ask. Open the linked PR / branch when they talk about code.
+2. Sort the ask:
+   - A question about the code, the PR or the work → find the answer in the code, git and the PR (measured: name the file and line, the commit or the PR), and post it as a comment on ${line.key} written as me: short, in the thread's language and tone, addressed to ${line.who || "the author"} with an @mention, every PR or ticket it cites as a link. No report layout, no headers.
+   - A request to change something (a defect, a missing piece, a review note carried to Jira) → do the work by the ticket rules: the ticket's branch, the ticket to In Progress when you start, a PR (or a push to the open one), the ticket to Code Review with the PR link in a comment, and a reply to ${line.who || "the author"} on the ticket saying what changed.
+   - Just an FYI with nothing to do → reply with one line acknowledging it, only if a reply is expected; otherwise do nothing on Jira.
+   - A decision only I can make (scope, product behaviour, money, eligibility, dates, promises) → ask me ONCE with ask_maksym, your proposed answer first; then post what I picked. Never commit me to a date, an amount or an action I did not state.
+3. Never answer from memory: a fact about the code is quoted from the code.`;
+  return `${head}
+
+Ticket: ${site}/browse/${line.key} (project ${project}). The thread so far, oldest first:
+${thread || "  (no comments read yet — read them on Jira)"}
+
+${rules}
+
+${how}
+
+Finish with one short message to me: what was asked, what you did (the comment, the PR, the move), and the link.`;
 }
 
 /** "HIGHCAP" from a lifecycle config's projectKeys, or null. */

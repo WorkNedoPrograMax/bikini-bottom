@@ -17,7 +17,7 @@ import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHe
 import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, inferOnIt, type GhThread } from "./domain/mail";
 import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview, branchAt } from "./adapters/pulls";
 import { JiraClient } from "./adapters/jira";
-import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
+import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, markJiraOnIt, canHandJira, townForTicket, jiraBrief, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
 import { LaneManager, type AdoptionSupport } from "./adapters/lane";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
@@ -299,13 +299,34 @@ interface JiraBoard {
   pinged: Set<string>; seen: Set<string>;
   /** A character sweeping this board (handed from the page), until it finishes. */
   sweeping: { characterId: CharacterId; name: string; since: number; townPath: string } | null;
+  /** Notes handed to a character (line id → who), until that character finishes. Persisted. */
+  onIt: Map<string, { characterId: CharacterId; name: string; since: number; townPath: string }>;
 }
 const jiras = new Map<string, JiraBoard>();
 const townJira = new Map<string, string>(); // town path → project key
 let jiraClient: JiraClient | null = null;
 const JIRA_EVERY_SEC = 180;
 
-function jiraStateFile(kind: "pings" | "seen", project: string): string { return path.join(app.getPath("userData"), `jira-${kind}-${project}.json`); }
+function jiraStateFile(kind: "pings" | "seen" | "on-it", project: string): string { return path.join(app.getPath("userData"), `jira-${kind}-${project}.json`); }
+function loadJiraOnIt(project: string): JiraBoard["onIt"] {
+  const out: JiraBoard["onIt"] = new Map();
+  try {
+    const a = JSON.parse(readFileSync(jiraStateFile("on-it", project), "utf8"));
+    if (Array.isArray(a)) for (const e of a) if (e && typeof e.id === "string" && typeof e.characterId === "string" && typeof e.townPath === "string") out.set(e.id, { characterId: e.characterId, name: String(e.name || tgName(e.characterId)), since: Number(e.since) || Date.now(), townPath: e.townPath });
+  } catch { /* none yet */ }
+  return out;
+}
+function saveJiraOnIt(b: JiraBoard): void {
+  try { writeFileSync(jiraStateFile("on-it", b.project), JSON.stringify([...b.onIt].map(([id, o]) => ({ id, ...o }))) + "\n", "utf8"); } catch (e) { log("jira", "on-it not saved", { error: String(e) }); }
+}
+/** The lines with "X is on it" laid on: a mark whose character stopped cooking is dropped. */
+function jiraLinesOf(b: JiraBoard): JiraLine[] {
+  const working = (id: string) => [...b.onIt.values()].some((o) => o.characterId === id && (lanesOf(o.townPath)?.isWorking(o.characterId) ?? false));
+  let dropped = false;
+  for (const [id, o] of b.onIt) if (!(lanesOf(o.townPath)?.isWorking(o.characterId) ?? false)) { b.onIt.delete(id); dropped = true; }
+  if (dropped) saveJiraOnIt(b);
+  return markJiraOnIt(b.lines, b.onIt, working);
+}
 function loadJiraSet(kind: "pings" | "seen", project: string): Set<string> {
   try { const a = JSON.parse(readFileSync(jiraStateFile(kind, project), "utf8")); return new Set(Array.isArray(a) ? a.map(String) : []); } catch { return new Set(); }
 }
@@ -332,8 +353,8 @@ async function startJira(townPath: string, profile: TownProfile): Promise<void> 
   if (!jiraConfigured()) { log("jira", "no token yet — the page shows the paste box", { town: profile.name, project }); return; }
   if (!jiraClient) jiraClient = new JiraClient(jiraSite(), cfg.data.jiraEmail!, cfg.data.jiraToken!);
   let me: { accountId: string; displayName: string };
-  try { me = await jiraClient.myself(); } catch (e: any) { log("jira", "token check failed", { project, error: String(e?.message || e) }); jiras.set(project, { project, me: "", meName: "", raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: String(e?.message || e), timer: null, busy: false, pinged: new Set(), seen: new Set(), sweeping: null }); pushSnapshot(); return; }
-  const b: JiraBoard = { project, me: me.accountId, meName: me.displayName, raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadJiraSet("pings", project), seen: loadJiraSet("seen", project), sweeping: null };
+  try { me = await jiraClient.myself(); } catch (e: any) { log("jira", "token check failed", { project, error: String(e?.message || e) }); jiras.set(project, { project, me: "", meName: "", raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: String(e?.message || e), timer: null, busy: false, pinged: new Set(), seen: new Set(), sweeping: null, onIt: new Map() }); pushSnapshot(); return; }
+  const b: JiraBoard = { project, me: me.accountId, meName: me.displayName, raw: { issues: [], comments: {} }, lines: [], plate: [], open: 0, checkedAt: 0, error: null, timer: null, busy: false, pinged: loadJiraSet("pings", project), seen: loadJiraSet("seen", project), sweeping: null, onIt: loadJiraOnIt(project) };
   jiras.set(project, b);
   log("jira", "board up", { project, me: me.displayName, everySec: JIRA_EVERY_SEC });
   await pollJira(project);
@@ -356,13 +377,13 @@ async function pollJira(project: string): Promise<void> {
     b.raw = await jiraClient.board(project, b.me);
     relineJira(b);
     b.checkedAt = Date.now(); b.error = null;
-    const fresh = newJiraPings(b.lines, b.pinged);
+    const fresh = newJiraPings(jiraLinesOf(b), b.pinged);
     if (fresh.length) {
       for (const l of fresh) b.pinged.add(l.id);
       saveJiraSet("pings", project, b.pinged);
       log("jira", "new notes for Maksym", { project, lines: fresh.map((l) => `${l.key} ${l.word}`) });
       if (winAlive()) win!.webContents.send(CHANNELS.sound, { characterId: "krabs", kind: "mail", url: resolveMailSound(SOUNDS_DIR) });
-      notifyTgJira(fresh);
+      notifyTgJira(project, fresh);
     }
   } catch (e: any) {
     b.error = e?.message || String(e);
@@ -392,7 +413,8 @@ function jiraViewFor(townPath: string | null, chars: TownSnapshot["characters"])
   if (!b) return { project, site: jiraSite(), configured: jiraConfigured(), email: cfg.data.jiraEmail, checkedAt: 0, checking: false, forYou: 0, lines: [], plate: [], open: 0, error: null, crew, sweeping: null };
   const sw = b.sweeping && (L?.isWorking(b.sweeping.characterId) ?? false) ? { characterId: b.sweeping.characterId, name: b.sweeping.name, since: b.sweeping.since } : null;
   if (b.sweeping && !sw) b.sweeping = null; // stopped cooking (finished, or the app restarted mid-sweep)
-  return { project, site: jiraSite(), configured: true, email: cfg.data.jiraEmail, checkedAt: b.checkedAt, checking: b.busy, forYou: jiraForYou(b.lines), lines: b.lines, plate: b.plate, open: b.open, error: b.error, crew, sweeping: sw };
+  const lines = jiraLinesOf(b);
+  return { project, site: jiraSite(), configured: true, email: cfg.data.jiraEmail, checkedAt: b.checkedAt, checking: b.busy, forYou: jiraForYou(lines), lines, plate: b.plate, open: b.open, error: b.error, crew, sweeping: sw };
 }
 
 /** After Maksym merged a PR from the town: its ticket moves to Review Completed
@@ -432,6 +454,31 @@ async function sweepFromTown(townPath: string, characterId: CharacterId): Promis
   pushSnapshot();
 }
 
+/** Hand a note to a character: it reads the ticket and its thread, answers on
+ *  Jira or does the work, and reports. The line says "X is on it" meanwhile. */
+async function handOffJira(townPath: string, id: string, characterId: CharacterId): Promise<void> {
+  const b = jiraOf(townPath); const t = towns.get(townPath);
+  if (!b || !t || characterId === "krabs") return;
+  const line = b.lines.find((l) => l.id === id);
+  if (!line) { toast("That note isn't on the page anymore."); return; }
+  if (!canHandJira(line)) { toast("Nothing to hand over on that line."); return; }
+  if (TERMINAL_IDS.has(characterId)) { toast(`${tgName(characterId)} works in a terminal — pick another character.`); return; }
+  if (t.lanes.isWorking(characterId)) { toast(`${tgName(characterId)} is busy — pick someone idle.`); return; }
+  const brief = jiraBrief({ line, comments: b.raw.comments[line.key] || [], site: jiraSite(), project: b.project, me: b.me });
+  log("jira", "note handed to a character", { key: line.key, word: line.word, characterId, town: townNameOf(townPath) });
+  if (townPath === currentTownPath) openWindowId = characterId;
+  await t.lanes.startJob(characterId, brief);
+  b.onIt.set(id, { characterId, name: tgName(characterId), since: Date.now(), townPath });
+  saveJiraOnIt(b);
+  pushSnapshot();
+}
+
+/** The towns of a project, for the phone's buttons: a [BE] ticket goes to the backend town. */
+function jiraTownFor(project: string, title: string): string | null {
+  const ts = [...towns.keys()].filter((p) => townJira.get(p) === project).map((p) => ({ path: p, repo: mails.get(p)?.repo ?? null }));
+  return townForTicket(title, ts);
+}
+
 /** The paste box: the token is saved to the town's settings and every town's board starts. */
 async function saveJiraSettings(email: string, token: string, site: string): Promise<void> {
   const e = email.trim(), t = token.trim(), s = (site.trim() || "https://empat.atlassian.net").replace(/\/+$/, "");
@@ -447,14 +494,25 @@ async function saveJiraSettings(email: string, token: string, site: string): Pro
 }
 
 /** The phone: one message per new note (buttons open Jira), a list when many. */
-function notifyTgJira(fresh: JiraLine[]): void {
+function notifyTgJira(project: string, fresh: JiraLine[]): void {
   if (!tg) return;
   if (fresh.length > 3) {
     const body = fresh.map((l) => `• <b>${tgEsc(l.key)}</b> ${tgEsc(l.label)} — ${tgEsc(l.title.slice(0, 60))}\n   ↳ ${tgEsc(l.reason)}`).join("\n");
     void tg.send(`📋 <b>Jira</b> — ${fresh.length} notes for you:\n${body}`);
     return;
   }
-  for (const l of fresh) void tg.send(`📋 <b>${tgEsc(l.key)} · ${tgEsc(l.label)}</b> — ${tgEsc(l.title)}\n↳ ${tgEsc(l.reason)}`, [[{ text: "Open on Jira", url: l.url }]]);
+  for (const l of fresh) {
+    const buttons: TgButton[][] = [];
+    // A note a character can take: one tap hands it over, like the mailbox's "fixes it".
+    const townPath = canHandJira(l) ? jiraTownFor(project, l.title) : null;
+    if (townPath) {
+      const t = towns.get(townPath);
+      const faces: TgButton[] = ROSTER.filter((r) => !r.isHomeBase && !TERMINAL_IDS.has(r.id) && !(t?.lanes.isWorking(r.id) ?? true)).map((r) => ({ text: `${r.name} handles it`, data: tgData("jirahand", r.id, l.id.replace(/:/g, "~"), townPath) }));
+      if (faces.length) buttons.push(faces);
+    }
+    buttons.push([{ text: "Open on Jira", url: l.url }]);
+    void tg.send(`📋 <b>${tgEsc(l.key)} · ${tgEsc(l.label)}</b> — ${tgEsc(l.title)}\n↳ ${tgEsc(l.reason)}`, buttons);
+  }
 }
 
 async function startMail(townPath: string, profile: TownProfile): Promise<void> {
@@ -635,7 +693,12 @@ function fireFinishNotification(townPath: string, id: CharacterId, summary: stri
   notifyTgDone(townPath, id, summary); // phone always gets the "finished" ping (not gated by focus/desktop-notif prefs)
   // A PR this character was on: the mark comes off and the paper looks at
   // GitHub right away, so the line says what came of the work, not "on it".
-  for (const b of jiras.values()) if (b.sweeping && b.sweeping.characterId === id && b.sweeping.townPath === townPath) { b.sweeping = null; log("jira", "sweep finished — re-reading the board", { project: b.project, characterId: id }); void pollJira(b.project); }
+  for (const b of jiras.values()) {
+    let again = false;
+    if (b.sweeping && b.sweeping.characterId === id && b.sweeping.townPath === townPath) { b.sweeping = null; log("jira", "sweep finished — re-reading the board", { project: b.project, characterId: id }); again = true; }
+    for (const [lid, o] of b.onIt) if (o.characterId === id && o.townPath === townPath) { b.onIt.delete(lid); log("jira", "character finished a note — re-reading", { id: lid, characterId: id }); again = true; }
+    if (again) { saveJiraOnIt(b); void pollJira(b.project); }
+  }
   const m = mails.get(townPath);
   if (m && ([...m.onIt.values()].some((o) => o.characterId === id) || m.lines.some((l) => l.onIt?.characterId === id))) {
     for (const [n, o] of m.onIt) if (o.characterId === id) { m.onIt.delete(n); log("mail", "character finished a PR — re-reading", { number: n, characterId: id, town: townNameOf(townPath) }); }
@@ -972,6 +1035,11 @@ async function handleTgTap(data: string): Promise<void> {
   } else if (action === "mailhand") {
     await handOffPull(townPath, Number(extra), id);
     await tg?.send(`🍳 ${tgName(id)} is on <b>#${Number(extra)}</b>${tgEsc(tgTown(townPath))}.`);
+  } else if (action === "jirahand") {
+    const lineId = String(extra || "").replace(/~/g, ":");
+    await handOffJira(townPath, lineId, id);
+    const key = jiraOf(townPath)?.lines.find((l) => l.id === lineId)?.key || lineId;
+    await tg?.send(`🍳 ${tgName(id)} is on <b>${tgEsc(key)}</b>${tgEsc(tgTown(townPath))}.`);
   }
 }
 
@@ -1543,6 +1611,9 @@ async function handleIntent(intent: Intent): Promise<void> {
 
     case "sweepJira":
       if (currentTownPath) await sweepFromTown(currentTownPath, intent.characterId);
+      break;
+    case "handOffJira":
+      if (currentTownPath) await handOffJira(currentTownPath, intent.id, intent.characterId);
       break;
 
     case "openPull": {

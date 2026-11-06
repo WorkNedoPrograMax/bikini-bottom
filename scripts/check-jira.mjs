@@ -5,7 +5,7 @@
 //   node scripts/check-jira.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { jiraLines, jiraForYou, newJiraPings, plateCounts, adfMentions, adfText, columnIndex, firstName, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, MOVES } = require("../dist/main/domain/jira.js");
+const { jiraLines, jiraForYou, newJiraPings, plateCounts, adfMentions, adfText, columnIndex, firstName, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, MOVES, markJiraOnIt, canHandJira, townForTicket, jiraBrief } = require("../dist/main/domain/jira.js");
 const { normalizeJira, normalizeProfile } = require("../dist/main/config/townProfile.js");
 
 let fails = 0;
@@ -101,6 +101,42 @@ ok(sb.includes("never yours to move") && sb.includes("never create tickets") && 
 ok(sb.includes("Ask me ONCE with ask_maksym") && sb.includes("\"Move it\" / \"Leave it\"") && sb.includes("Flag as blocked"), "one question, Move/Leave/Flag per proposal");
 ok(sb.includes("gh pr list -R <repo>") && sb.includes("highcap-mobile, EmpatDevelopment/highcap-backend"), "the work is read from both repos");
 ok(sb.includes("the board is in order"), "nothing to propose → no question");
+
+console.log("hand a note to a character — tagged / sent-back only, \"X is on it\" until they finish:");
+const tagged = { id: "tagged:62694", key: "HIGHCAP-274", title: "US4 [BE]: Produce each day's workout", url: SITE + "/browse/HIGHCAP-274", status: "Code Review", word: "tagged", label: "TAGGED YOU", reason: "Anna: “Two config rows from PR #125 have no reader yet”", forYou: true, since: NOW - 3600e3, who: "Anna", mine: false };
+const sentBack = { ...tagged, id: "sent-back:HIGHCAP-233:9001", key: "HIGHCAP-233", word: "sent-back", label: "SENT BACK", reason: "Yaroslav moved it back: In QA → QA Failed", status: "QA Failed", who: "Yaroslav", mine: true };
+const handed = { ...tagged, id: "assigned:HIGHCAP-160:1", word: "assigned", label: "NEWLY YOURS" };
+const moved = { ...tagged, id: "moved:HIGHCAP-336:2", word: "moved", label: "MOVED", forYou: false };
+ok(canHandJira(tagged) && canHandJira(sentBack) && !canHandJira(handed) && !canHandJira(moved), "tagged and sent-back can be handed; a hand-over or an FYI move cannot");
+const onIt = new Map([["tagged:62694", { characterId: "pat", name: "Patrick", since: NOW }], ["sent-back:HIGHCAP-233:9001", { characterId: "bob", name: "SpongeBob", since: NOW }]]);
+const marked = markJiraOnIt([tagged, sentBack, handed], onIt, (id) => id === "pat");
+ok(marked[0].onIt && marked[0].onIt.name === "Patrick" && marked[0].forYou === false, "a handed note says who is on it and stops being for you");
+ok(marked[1].onIt === null && marked[1].forYou === true, "a mark whose character is not cooking anymore is ignored — the note is yours again");
+ok(marked[2].onIt === null && marked[2].forYou === true, "other notes untouched");
+ok(jiraForYou(marked) === 2 && jiraForYou([tagged, sentBack, handed]) === 3, "the flag count drops by the handed note");
+const handTowns = [{ path: "/m", repo: "EmpatDevelopment/highcap-mobile" }, { path: "/b", repo: "EmpatDevelopment/highcap-backend" }];
+ok(townForTicket("US4 [BE]: Produce each day's workout", handTowns) === "/b", "a [BE] ticket goes to the backend town");
+ok(townForTicket("[FE] Plan tab calendar", handTowns) === "/m" && townForTicket("Something plain", handTowns) === "/m", "anything else goes to the first town");
+ok(townForTicket("[BE] x", [handTowns[0]]) === "/m" && townForTicket("x", []) === null, "one town → that town; none → null");
+const handComments = [
+  { id: "62694", created: "2026-11-04T17:44:00.000Z", author: { accountId: ANNA, displayName: "AnnaPinchukO" }, body: { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "mention", attrs: { id: ME, text: "@Maksym" } }, { type: "text", text: " two config rows from PR #125 have no reader yet — intended?" }] }] } },
+  { id: "62600", created: "2026-11-03T10:00:00.000Z", author: { accountId: ME, displayName: "Maksym Loia" }, body: { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text: "PR is up" }] }] } },
+];
+const tb = jiraBrief({ line: tagged, comments: handComments, site: SITE, project: "HIGHCAP", me: ME });
+ok(tb.startsWith("Anna tagged me on HIGHCAP-274 on Jira (Code Review)"), "a tagged note: who, the ticket, its column");
+ok(tb.includes("Maksym (me), 2026-11-03 10:00: “PR is up”") && tb.indexOf("“PR is up”") < tb.indexOf("intended?"), "the thread is in the order, oldest first, me marked");
+ok(tb.includes("getJiraIssue HIGHCAP-274") && tb.includes("listJiraIssueComments HIGHCAP-274"), "reads the ticket and the thread through the Atlassian MCP");
+ok(tb.includes("post it as a comment on HIGHCAP-274 written as me") && tb.includes("addressed to Anna with an @mention"), "a question → an answer on Jira, as Maksym, to Anna");
+ok(tb.includes("the ticket to In Progress when you start") && tb.includes("the ticket to Code Review with the PR link"), "a change request → the work by the ticket rules");
+ok(tb.includes("ask me ONCE with ask_maksym") && tb.includes("Never commit me to a date, an amount or an action I did not state"), "a decision → one question; no promises in Maksym's name");
+ok(tb.includes("never create tickets") && tb.includes("never Done, the QA columns, assignees"), "the never-list");
+ok(tb.includes("Never answer from memory"), "facts from the code");
+const sb2 = jiraBrief({ line: sentBack, comments: [], site: SITE, project: "HIGHCAP", me: ME });
+ok(sb2.startsWith("HIGHCAP-233 came back to me on Jira: Yaroslav moved it back: In QA → QA Failed. It sits in QA Failed now."), "a sent-back note: what happened and where it sits");
+ok(sb2.includes("(no comments read yet — read them on Jira)"), "no comments in hand → says so");
+ok(sb2.includes('gh pr list --search "HIGHCAP-233" --state all') && sb2.includes("Move the ticket to In Progress") && sb2.includes("move the ticket to Code Review (\"To review\")"), "find the PR, pick the ticket up, send it on again");
+ok(sb2.includes("reproduce it first"), "a QA failure is reproduced before the fix");
+ok(!sb2.includes("undefined") && !tb.includes("undefined"), "no holes in either order");
 
 console.log("profile — the jira spec:");
 ok(normalizeJira({ project: "HIGHCAP" }).project === "HIGHCAP" && normalizeJira({ project: "bad key" }) === null && normalizeJira({ off: true }).off === true && normalizeJira({}) === null, "project key validated, off kept, empty dropped");
