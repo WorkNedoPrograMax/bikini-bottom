@@ -378,6 +378,9 @@ interface PersistedLane {
     // The chalk line (Job 2): the character's own status + when it wrote it.
     note?: string | null;
     noteAt?: number;
+    /** The question (or permission ask) the character was waiting on when this
+     *  was saved — so a relaunch knows he was mid-job, not done (2026-11-06). */
+    pendingQuestion?: string | null;
   };
 }
 
@@ -775,6 +778,7 @@ export class LaneManager {
           baseSha: l.baseSha, servedTip: l.servedTip, served: l.served, sentBack: l.sentBack,
           taskStartedAt: l.taskStartedAt, taskTokens: l.taskTokens, stats: l.stats, limitedUntil: l.limitedUntil,
           note: l.note, noteAt: l.noteAt,
+          pendingQuestion: l.pending?.question ?? (l.pendingChoice ? l.pendingChoice.ask.questions.map((q) => q.question).join(" · ") : null),
         },
       };
     }
@@ -890,11 +894,33 @@ export class LaneManager {
     };
   }
 
-  /** On boot, a Character left mid-cook is paused (AD-11): offer Keep cooking. */
-  markPaused(id: CharacterId, lastPrompt: string | null): void {
+  /** On boot, a Character left mid-cook is paused (AD-11): offer Keep cooking.
+   *  A character that was WAITING ON AN ANSWER when the app closed is mid-cook
+   *  too: the question died with the session, so say which one was lost (before
+   *  2026-11-06 he came back as plain idle — chat ending in tool runs, no offer,
+   *  no process — and looked stuck). */
+  markPaused(id: CharacterId, lastPrompt: string | null, lostQuestion?: string | null): void {
     const l = this.lane(id);
     l.paused = true; l.lastPrompt = lastPrompt;
-    l.conversation.push({ from: "them", text: "I paused when you closed the app. Want me to keep cooking, or scrap it?" });
+    l.conversation.push({ from: "them", text: lostQuestion
+      ? `I paused when you closed the app — I was waiting for your answer to: «${lostQuestion.slice(0, 160)}». Want me to keep cooking (I'll ask again if I still need it), or scrap it?`
+      : "I paused when you closed the app. Want me to keep cooking, or scrap it?" });
+  }
+
+  /** The question the character was waiting on when the app last saved — read
+   *  from disk, for the boot rule above. Null when he was not waiting. */
+  lostQuestion(id: CharacterId): string | null {
+    const q = this.loaded[id]?.current?.pendingQuestion;
+    return q ? q : null;
+  }
+
+  /** A question or permission ask is going out: the character is Maksym's now,
+   *  not "settling". The quiet-timer armed by the last turn's result must NOT
+   *  ring "done" 12 s into the wait — it did (2026-11-06 11:55:20Z: a second
+   *  bell and a "finished" summary while the question stood unanswered). */
+  private stopSettling(l: Lane): void {
+    l.awaitingIdle = false;
+    if (l.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = null; }
   }
 
   async startJob(id: CharacterId, prompt: string, attachments?: Attachment[]): Promise<void> {
@@ -1451,6 +1477,7 @@ export class LaneManager {
     this.setPhase(l, "waiting");
     void this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
     this.clearWatchdog(l);
+    this.stopSettling(l);
     // Store the question BEFORE the cue: the cue is what tells the phone, and
     // the phone asks "is there a pending question?" — for a year of Bikini it
     // looked one line too early and sent nothing (2026-09-11).
@@ -1459,6 +1486,7 @@ export class LaneManager {
     l.pendingChoice = { ask, resolve: resolveAnswer };
     this.onCue(id, "ready"); // needs my answer — call Maksym
     log("lane", `${id} asked a question`, { question: q0?.question?.slice(0, 100), count: ask.questions.length });
+    this.persist(); // the question survives a relaunch (as "I was waiting on…")
     this.onChange();
     return answered;
   }
@@ -1934,11 +1962,13 @@ export class LaneManager {
                   await this.log.append({ type: "PermissionAsked", id });
                   await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
                   this.clearWatchdog(l);
+                  this.stopSettling(l);
                   // Store the ask BEFORE the cue (the phone reads it from the cue).
                   let resolveAsk!: (r: unknown) => void;
                   const answered = new Promise((resolve) => { resolveAsk = resolve as (r: unknown) => void; });
                   l.pending = { question, resolve: resolveAsk };
                   this.onCue(id, "ready"); // needs my OK — call Maksym
+                  this.persist(); // the ask survives a relaunch (as "I was waiting on…")
                   this.onChange();
                   return answered;
                 })();

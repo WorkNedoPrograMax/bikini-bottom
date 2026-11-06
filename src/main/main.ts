@@ -160,9 +160,14 @@ async function openTown(projectPath: string): Promise<Town> {
       if (c.state !== "idle") await townLog.append({ type: "CharacterStateChanged", id: c.id, state: "idle" });
       continue;
     }
-    if (c.state === "working") {
+    // "Calling" with a saved open question = he was WAITING ON AN ANSWER, which
+    // is mid-cook too (the question died with the session). Plain "calling"
+    // (a finished result) stays as it is.
+    const lost = c.state === "calling" ? townLanes.lostQuestion(c.id) : null;
+    if (c.state === "working" || lost) {
       const last = [...events].reverse().find((e) => e.type === "JobHandedOut" && e.id === c.id);
-      townLanes.markPaused(c.id, last && last.type === "JobHandedOut" ? last.prompt : null);
+      townLanes.markPaused(c.id, last && last.type === "JobHandedOut" ? last.prompt : null, lost);
+      if (lost) log("lane", `${c.id} relaunched mid-question — paused, keep cooking offered`, { question: lost.slice(0, 100) });
       await townLog.append({ type: "CharacterStateChanged", id: c.id, state: "calling" });
     }
   }
