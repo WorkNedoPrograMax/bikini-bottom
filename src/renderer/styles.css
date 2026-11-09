@@ -57,6 +57,22 @@ html, body {
   box-shadow: 0 0 10px var(--coral); display: none; animation: ping 1.3s ease-in-out infinite;
 }
 .actor.unseen .dot { display: block; }
+/* The reviewer (Karen) hangs from the ceiling at the top middle: a wall screen
+   on a cable, tucked up so only its lower part shows; mouse over the area and
+   it comes down so Maksym can press it (2026-11-09). Her street spot is
+   leftPct 50 / topPct 0 — the base translate(-50%,-50%) is replaced here. */
+.actor.hanging { transform: translate(-50%, -38%); transition: transform .45s cubic-bezier(.22,1.2,.36,1); z-index: 9; }
+.actor.hanging:hover { transform: translate(-50%, 2%); }
+.actor.hanging .who img { height: clamp(72px, 10vw, 136px); }
+.actor.hanging .who { filter: drop-shadow(0 6px 7px rgba(0,0,0,.55)); }
+/* The cable: from above the top edge down to the screen. */
+.actor.hanging::before {
+  content: ""; position: absolute; left: 50%; bottom: 100%; width: 4px; height: 60vh;
+  transform: translateX(-50%); background: linear-gradient(#2a2a2a, #555); border-radius: 2px; z-index: -1;
+}
+/* A wider mouse target than the peeking part, so "over the area" is enough. */
+.actor.hanging::after { content: ""; position: absolute; left: -48px; right: -48px; top: 0; bottom: -56px; }
+.actor.hanging .label { margin-top: 6px; }
 @keyframes ping { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.25); opacity: .8; } }
 
 /* --- The Phone Booth: a wooden telephone booth on the street (wooden-sign

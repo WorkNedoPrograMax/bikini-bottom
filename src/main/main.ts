@@ -1324,9 +1324,10 @@ function snapshot(): TownSnapshot {
   const base = projectLog ? fold(projectLog.all()) : emptyTown();
   // The chalk line lives in the lane (not the event log) — fill it in here.
   if (lanes) for (const c of base.characters) { if (!c.isHomeBase) { const v = lanes.view(c.id); c.note = v.note; c.noteAt = v.noteAt; c.attention = attentionFor(c.id, c.state); c.booth = v.booth; } }
-  // The reviewer (Karen): flagged from the roster, on the street only while reviewing.
-  for (const c of base.characters) { c.reviewer = REVIEWER_IDS.has(c.id); c.visible = visibleOnStreet(c); }
   applyFixture(base); // dev/screenshot hook only (BIKINI_FIXTURE) — a no-op in normal runs
+  // The reviewer (Karen): flagged from the roster, on the street only while
+  // reviewing. After the fixture, so a photographed "working" Karen is shown.
+  for (const c of base.characters) { c.reviewer = REVIEWER_IDS.has(c.id); c.visible = visibleOnStreet(c); }
   // Resolve every visual through the Asset Slot resolver (AD-7).
   for (const c of base.characters) {
     c.picture = resolvePicture(ASSETS_DIR, c.id, c.state);
