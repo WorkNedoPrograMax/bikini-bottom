@@ -1934,7 +1934,7 @@ export class LaneManager {
                 if (toolName.startsWith("mcp__bikini__")) return ALLOW;
                 // The reviewer never changes code — before bypass, before everything.
                 if (REVIEWER_IDS.has(id) && !isReviewOnlyAllowed(toolName, ti)) {
-                  log("lane", `${id} refused (review only)`, { tool: toolName, command: String(ti.command ?? "").slice(0, 160) });
+                  log("lane", `${id} refused (review only)`, { tool: toolName, command: String(ti.command ?? "").slice(0, 600) });
                   l.conversation.push({ from: "them", text: "The town stopped me there — I only review, I never change anything. I'll say it in the review instead.", tool: true });
                   this.onChange();
                   return DENY_REVIEW_ONLY;
