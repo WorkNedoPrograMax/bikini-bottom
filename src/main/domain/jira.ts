@@ -95,6 +95,8 @@ export interface JiraInput {
   now: number;
   /** Line ids Maksym has already looked at (the page was open). */
   seen: ReadonlySet<string>;
+  /** Line ids a character was handed and finished (the caller persists them): off the page. */
+  handled?: ReadonlySet<string>;
   /** "https://empat.atlassian.net" — for the lines' links. */
   site: string;
 }
@@ -103,7 +105,7 @@ const WORD_TEXT: Record<JiraWord, string> = { tagged: "TAGGED YOU", "sent-back":
 
 /** The lines of the Jira page, unsorted (jiraRank orders them). */
 export function jiraLines(input: JiraInput): JiraLine[] {
-  const { issues, comments, me, now, seen, site } = input;
+  const { issues, comments, me, now, seen, site, handled } = input;
   const out: JiraLine[] = [];
   const byKey = new Map<string, JiraRawIssue>();
   for (const i of issues) byKey.set(i.key, i);
@@ -115,8 +117,12 @@ export function jiraLines(input: JiraInput): JiraLine[] {
 
   for (const i of byKey.values()) {
     const mine = (i.fields.assignee?.accountId || "") === me;
-    // Tagged: the newest comment by someone else that mentions me, in the last 7 days.
-    const tags = (comments[i.key] || []).filter((c) => (c.author?.accountId || "") !== me && adfMentions(c.body).includes(me) && now - Date.parse(c.created) < 7 * DAY)
+    // Tagged: the newest comment by someone else that mentions me, in the last 7 days,
+    // and after my own last word on the ticket — a mention I replied to is answered
+    // (2026-11-09: HIGHCAP-274 sat on the page three days after the answer).
+    const all = comments[i.key] || [];
+    const myLast = Math.max(0, ...all.filter((c) => (c.author?.accountId || "") === me).map((c) => Date.parse(c.created) || 0));
+    const tags = all.filter((c) => (c.author?.accountId || "") !== me && adfMentions(c.body).includes(me) && now - Date.parse(c.created) < 7 * DAY && (Date.parse(c.created) || 0) > myLast)
       .sort((a, b) => Date.parse(b.created) - Date.parse(a.created));
     if (tags.length) {
       const c = tags[0];
@@ -134,7 +140,9 @@ export function jiraLines(input: JiraInput): JiraLine[] {
       const back = to.toLowerCase() === "qa failed" || (columnIndex(to) >= 0 && columnIndex(from) >= 0 && columnIndex(to) < columnIndex(from));
       const who = firstName(lastStatus.author?.displayName);
       const at = Date.parse(lastStatus.created) || now;
-      if (back) out.push(line(i, `sent-back:${i.key}:${lastStatus.id}`, "sent-back", `${who} moved it back: ${from} → ${to}`, at, who, true));
+      // Sent back, then moved on by me → dealt with, no line.
+      const myLastMove = Math.max(0, ...(i.changelog?.histories || []).filter((h) => (h.author?.accountId || "") === me && (h.items || []).some((x) => x.field === "status")).map((h) => Date.parse(h.created) || 0));
+      if (back) { if (at > myLastMove) out.push(line(i, `sent-back:${i.key}:${lastStatus.id}`, "sent-back", `${who} moved it back: ${from} → ${to}`, at, who, true)); }
       else if (now - at < DAY) out.push(line(i, `moved:${i.key}:${lastStatus.id}`, "moved", `${who} moved it on: ${from} → ${to}`, at, who, false));
     }
     const handed = hist.find((h) => (h.items || []).some((x) => x.field === "assignee" && x.to === me));
@@ -148,7 +156,7 @@ export function jiraLines(input: JiraInput): JiraLine[] {
       out.push(line(i, `quiet:${i.key}`, "quiet", `in progress, nothing for ${Math.floor((now - upd) / DAY)} days — still on it?`, upd, "", false));
     }
   }
-  return batchHandovers(out, site).sort((a, b) => jiraRank(a) - jiraRank(b) || b.since - a.since);
+  return batchHandovers(out.filter((l) => !handled?.has(l.id)), site).sort((a, b) => jiraRank(a) - jiraRank(b) || b.since - a.since);
 }
 
 /** More than three tickets handed over by the same person on the same day are

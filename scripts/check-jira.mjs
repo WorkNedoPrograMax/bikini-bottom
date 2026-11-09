@@ -67,6 +67,20 @@ ok(jiraForYou(lines) === 3, `3 for you (tagged, sent back, newly yours): ${jiraF
 ok(newJiraPings(lines, new Set()).length === 3 && newJiraPings(lines, new Set(["tagged:62786"])).length === 2, "pings once per line id");
 const after = jiraLines({ issues, comments, me: ME, now: NOW, seen: new Set(["tagged:62786", "sent-back:HIGHCAP-240:1", "assigned:HIGHCAP-359:3"]), site: SITE });
 ok(jiraForYou(after) === 0 && after.some((l) => l.word === "tagged"), "once seen, the lines stay on the page but the flag drops to 0");
+
+console.log("a note already dealt with leaves the page (2026-11-09: HIGHCAP-274 stayed 3 days after the answer):");
+const answered = { "HIGHCAP-274": [comment("62922", ME, "Maksym Loia", h(0.5), adf(ANNA, "@Anna Pinchuk", "no, step 3 won't read it")), ...comments["HIGHCAP-274"]] };
+ok(!jiraLines({ issues, comments: answered, me: ME, now: NOW, seen, site: SITE }).some((l) => l.word === "tagged"), "my reply after the mention → answered, no line");
+const again = { "HIGHCAP-274": [comment("63000", MB, "Maksym Brediuk", h(0.2), adf(ME, "@Maksym Loia", "one more thing")), ...answered["HIGHCAP-274"]] };
+const a2 = jiraLines({ issues, comments: again, me: ME, now: NOW, seen, site: SITE }).filter((l) => l.word === "tagged");
+ok(a2.length === 1 && a2[0].id === "tagged:63000" && a2[0].forYou && !/\+\d+ more/.test(a2[0].reason), "a new mention after my reply → a new note, for me; the answered ones are not 'more'");
+const h1 = jiraLines({ issues, comments, me: ME, now: NOW, seen, site: SITE, handled: new Set(["tagged:62786"]) });
+ok(!h1.some((l) => l.word === "tagged") && h1.some((l) => l.word === "sent-back") && jiraForYou(h1) === 2, "a note a character finished (handled) is off the page and out of the count; the others stay");
+ok(jiraLines({ issues, comments: again, me: ME, now: NOW, seen, site: SITE, handled: new Set(["tagged:62786"]) }).some((l) => l.id === "tagged:63000"), "handled is per comment: a newer mention is a new note");
+const movedOn = [issue("HIGHCAP-240", "In QA", { histories: [statusChange("1", ANNA, "Anna Pinchuk", h(3), "In QA", "QA Failed"), statusChange("7", ME, "Maksym Loia", h(1), "QA Failed", "In QA")] })];
+ok(!jiraLines({ issues: movedOn, comments: {}, me: ME, now: NOW, seen, site: SITE }).some((l) => l.word === "sent-back"), "sent back, then moved on by me → dealt with, no line");
+const movedBefore = [issue("HIGHCAP-240", "QA Failed", { histories: [statusChange("1", ANNA, "Anna Pinchuk", h(3), "In QA", "QA Failed"), statusChange("7", ME, "Maksym Loia", h(5), "In Progress", "In QA")] })];
+ok(jiraLines({ issues: movedBefore, comments: {}, me: ME, now: NOW, seen, site: SITE }).some((l) => l.word === "sent-back"), "my move from before the send-back does not count");
 const plate = plateCounts(issues, ME);
 ok(plate.map((p) => `${p.status} ${p.count}`).join(" · ") === "To Do 2 · In Progress 1 · Review Completed 2 · QA Failed 1", `the plate in board order: ${plate.map((p) => `${p.status} ${p.count}`).join(" · ")}`);
 ok(lines.find((l) => l.key === "HIGHCAP-274").url === "https://empat.atlassian.net/browse/HIGHCAP-274", "lines link to the ticket");
