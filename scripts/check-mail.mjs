@@ -5,7 +5,7 @@
 //   node scripts/check-mail.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt, touchesGitHub, inferOnIt, canTake } = require("../dist/main/domain/mail.js");
+const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt, touchesGitHub, inferOnIt, canTake, handOffStands } = require("../dist/main/domain/mail.js");
 const { normalizePulls, normalizeProfile } = require("../dist/main/config/townProfile.js");
 
 let fails = 0;
@@ -146,6 +146,16 @@ ok(forYouCount(marked) === forYouCount([l102, l87]) - 1, "the flag counts one le
 ok(!newPings(marked, new Set()).some((l) => l.number === 102), "an on-it line never pings");
 const done = markOnIt([l102, l87], onIt, () => false);
 ok(done[0] === l102 && done[0].forYou === true, "Patrick finished (not working) → the raw line comes back as it was, yours again until the next look");
+
+console.log("handOffStands — the mark is tied to the job, not the first working stretch (Maksym 2026-11-09: Patrick on #146 after a follow-up, paper said SENT BACK):");
+const handed146 = { characterId: "pat", name: "Patrick", since: 1762680000000, job: 1762680000000 };
+ok(handOffStands(handed146, { working: true, taskStartedAt: 1762680000000 }), "cooking the handed job → stands");
+ok(handOffStands(handed146, { working: false, taskStartedAt: 1762680000000 }), "finished, same job → still stands (painted again when he cooks again)");
+ok(!handOffStands(handed146, { working: true, taskStartedAt: 1762690000000 }), "a new order (new job clock) → over");
+ok(!handOffStands(handed146, { working: false, taskStartedAt: 0 }), "lane reset (no job clock) → over");
+ok(handOffStands({ characterId: "pat", name: "Patrick", since: 1 }, { working: true, taskStartedAt: 5 }) && !handOffStands({ characterId: "pat", name: "Patrick", since: 1 }, { working: false, taskStartedAt: 5 }), "a hand-off saved before the job clock existed: stands while working, as before");
+const back = markOnIt([l102, l87], onIt, (id) => id === "pat");
+ok(back[0].onIt && back[0].status === "PATRICK IS ON IT", "typed to again and cooking → the line says Patrick is on it again");
 
 console.log("inferOnIt — who is on what, read from the lanes (Maksym 2026-11-05: Patrick was on #101 from chat, the paper said SENT BACK):");
 const lanePat = { characterId: "pat", name: "Patrick", branch: "feature/x", working: true, since: 1762330000000 };

@@ -225,6 +225,16 @@ export function inferOnIt(lines: readonly MailLine[], lanes: readonly { characte
   return out;
 }
 
+/** Does a hand-off still stand? It is tied to the JOB the character got, not to
+ *  the first "working" stretch: a character who finished, was typed to, and is
+ *  cooking the same job again is still on that PR (Maksym, 2026-11-09: Patrick
+ *  on #146 after a follow-up, the paper said SENT BACK). The lane's job clock
+ *  (`taskStartedAt`) changes only with a new order; a hand-off made before the
+ *  clock was recorded falls back to "while working". Pure. */
+export function handOffStands(o: { job?: number }, lane: { working: boolean; taskStartedAt: number }): boolean {
+  return o.job ? lane.taskStartedAt === o.job : lane.working;
+}
+
 /** A character is on a line (handed from the paper, still cooking): the line
  *  becomes "in progress" — not yours, no buttons, no ping — until the
  *  character finishes and the next look at GitHub says what came of it.

@@ -14,7 +14,7 @@ import { AppConfig } from "./config/appConfig";
 import { prepareProject } from "./adapters/git";
 import { checkClaude, clearStrayApiKey } from "./adapters/claude";
 import { resolvePicture, resolveBackground, resolveSound, resolveFace, resolveHelperIcon, resolveMailPictures, resolveMailSound } from "./adapters/assets";
-import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, inferOnIt, canTake, type GhThread } from "./domain/mail";
+import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, markOnIt, inferOnIt, canTake, type GhThread, handOffStands } from "./domain/mail";
 import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview, branchAt } from "./adapters/pulls";
 import { JiraClient } from "./adapters/jira";
 import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, markJiraOnIt, canHandJira, townForTicket, jiraBrief, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
@@ -247,7 +247,7 @@ interface TownMail {
   /** A re-read a few seconds after a character wrote to GitHub (debounced). */
   nudge: ReturnType<typeof setTimeout> | null;
   /** PR number → the character cooking it (handed from the paper). */
-  onIt: Map<number, { characterId: CharacterId; name: string; since: number }>;
+  onIt: Map<number, { characterId: CharacterId; name: string; since: number; job?: number }>;
 }
 const mails = new Map<string, TownMail>();
 
@@ -256,7 +256,7 @@ function loadOnIt(townPath: string): TownMail["onIt"] {
   const out: TownMail["onIt"] = new Map();
   try {
     const a = JSON.parse(readFileSync(onItFile(townPath), "utf8"));
-    if (Array.isArray(a)) for (const e of a) if (e && typeof e.number === "number" && typeof e.characterId === "string") out.set(e.number, { characterId: e.characterId, name: String(e.name || tgName(e.characterId)), since: Number(e.since) || Date.now() });
+    if (Array.isArray(a)) for (const e of a) if (e && typeof e.number === "number" && typeof e.characterId === "string") out.set(e.number, { characterId: e.characterId, name: String(e.name || tgName(e.characterId)), since: Number(e.since) || Date.now(), job: Number(e.job) || undefined });
   } catch { /* none yet */ }
   return out;
 }
@@ -265,13 +265,17 @@ function saveOnIt(townPath: string, m: TownMail): void {
 }
 /** The paper's lines with "X is on it" applied — from the paper's own hand-offs
  *  AND from what the lanes are really doing (a cooking character whose lane is
- *  on the PR's branch). A hand-off mark whose character has stopped cooking
- *  (finished, or the app restarted mid-job) is dropped. */
+ *  on the PR's branch). A hand-off mark stands as long as the character's job
+ *  is the one it was handed (finished and typed to again = still on it); it is
+ *  dropped when the character got a new order (or was scrapped). */
 async function decorateMail(townPath: string, m: TownMail, lines: MailLine[]): Promise<MailLine[]> {
   const L = lanesOf(townPath);
   const working = (id: string) => L?.isWorking(id as CharacterId) ?? false;
   let dropped = false;
-  for (const [n, o] of m.onIt) if (!working(o.characterId)) { m.onIt.delete(n); dropped = true; }
+  for (const [n, o] of m.onIt) {
+    const v = L?.view(o.characterId);
+    if (!v || !handOffStands(o, { working: v.working, taskStartedAt: v.taskStartedAt })) { m.onIt.delete(n); dropped = true; log("mail", "hand-off over — a new order or no lane", { number: n, characterId: o.characterId }); }
+  }
   if (dropped) saveOnIt(townPath, m);
   const lanes: { characterId: string; name: string; branch: string | null; working: boolean; since: number }[] = [];
   if (L) for (const r of ROSTER) {
@@ -673,7 +677,7 @@ async function handOffPull(townPath: string, number: number, characterId: Charac
   if (townPath === currentTownPath) openWindowId = characterId;
   await t.lanes.startJob(characterId, brief);
   // The line is in progress now: "<name> is on it", not yours, until they finish.
-  m.onIt.set(number, { characterId, name: tgName(characterId), since: Date.now() });
+  m.onIt.set(number, { characterId, name: tgName(characterId), since: Date.now(), job: t.lanes.view(characterId).taskStartedAt || undefined });
   if (m.refused?.number === number) m.refused = null;
   saveOnIt(townPath, m);
   m.lines = await decorateMail(townPath, m, m.raw);
@@ -718,8 +722,9 @@ function fireFinishNotification(townPath: string, id: CharacterId, summary: stri
   }
   const m = mails.get(townPath);
   if (m && ([...m.onIt.values()].some((o) => o.characterId === id) || m.lines.some((l) => l.onIt?.characterId === id))) {
-    for (const [n, o] of m.onIt) if (o.characterId === id) { m.onIt.delete(n); log("mail", "character finished a PR — re-reading", { number: n, characterId: id, town: townNameOf(townPath) }); }
-    saveOnIt(townPath, m);
+    // The mark stays stored (the job is still theirs if Maksym types to them again); the
+    // paper paints it only while they cook, so right now the line says what came of it.
+    for (const [n, o] of m.onIt) if (o.characterId === id) log("mail", "character finished a PR — re-reading", { number: n, characterId: id, town: townNameOf(townPath) });
     void pollMail(townPath); // re-reads GitHub and re-paints who is on what
   }
   if (!cfg.data.notificationsWanted || !Notification.isSupported()) return;
