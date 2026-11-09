@@ -288,6 +288,15 @@ export function mergeRefusal(line: MailLine | null, fresh: GhPull | null): strin
   return null;
 }
 
+/** Who may take a line (2026-11-06, Karen): the reviewer takes REVIEW orders
+ *  only — someone else's PR waiting for Maksym's look; a builder takes every
+ *  other hand-off (a PR of Maksym's sent back or almost there) and never a
+ *  review — "no other lane does PR review, only that one" (Maksym). */
+export function canTake(reviewer: boolean, word: MailWord): boolean {
+  const review = word === "your-turn" || word === "look-again";
+  return reviewer ? review : !review;
+}
+
 /** The order a character gets when Maksym hands a line to it. Plain words, the
  *  branch, every open comment quoted, and what "done" means. */
 export function briefFor(line: MailLine, threads: GhThread[], repo: string): string {
