@@ -17,6 +17,11 @@ import { stampArchive, pruneArchive, ARCHIVE_KEEP_DAYS } from "../domain/archive
 import { ensureWorktree, headSha, serveJob, sendBack, switchBranch } from "./git";
 import { clearStrayApiKey } from "./claude";
 import { normalizeResetsAt, parseLimitText, fmtClock, isAckOnly, foldFuel, fuelWarnDue, sanitizeStatus, statusAccepted, fallbackNote } from "./guards";
+import { jiraMoveOf, jiraTransitionsOf, reachedReview, sentenceCheck, nudgeText, bubbleText } from "../domain/notebook";
+
+// The Notebook, as the character hears it (2026-11-10). Maksym copies one
+// sentence per finished ticket into a paper notebook so the work stays his.
+const NOTEBOOK_NOTE = " MAKSYM'S NOTEBOOK: the moment you move a ticket to Code Review (the work is done from his side), call the `notebook_line` tool ONCE with that ticket key and ONE sentence in Ukrainian that names the key, says what exactly was done, and what the core technical problem was — he copies it by hand into a paper notebook before stand-up, so plain words, no Markdown, under 280 characters. The town refuses your first attempt to finish while a moved ticket has no line, so write it before your final report.";
 import { shouldLand, type Landing, type DeviceSpec } from "../config/townProfile";
 import { setupNote, setupActivity, type LaneSetup, type SetupReport } from "../domain/laneSetup";
 import { runSetup, setupDue, loadReport } from "./laneSetup";
@@ -457,6 +462,10 @@ interface Lane {
   // is, posted via `post_status`. Shown under its name on the street.
   note: string | null;
   noteAt: number;               // epoch ms of the last accepted line (cooldown anchor)
+  // The Notebook: the moves Jira offered per ticket this session (id → name),
+  // learned from the character's own `getTransitionsForJiraIssue` answers, so
+  // the town knows "To review" from "Start work" without a token of its own.
+  jiraMoves: Map<string, Record<string, string>>;
   // The Phone Booth: on the phone, waiting outside its door, or neither. Runtime
   // only — never persisted; a relaunch starts with an empty booth.
   booth: "holding" | "queued" | null;
@@ -534,6 +543,22 @@ export interface LaneView {
   phone: PhoneKey | null;
 }
 
+/** The Notebook (2026-11-10), as main lends it to the lane engine: the town
+ *  keeps the file; the lane sees the Jira move, offers the tool, refuses one
+ *  finish. All synchronous but the Jira look. */
+export interface NotebookSupport {
+  /** A line already exists for this ticket. */
+  hasLine(key: string): boolean;
+  /** This ticket reached review with no line — this character owes one. True when newly noted. */
+  pending(key: string, characterId: CharacterId): boolean;
+  /** The character's line → "new" (kept) or "dupe" (the key already had one). */
+  add(characterId: CharacterId, key: string, sentence: string): "new" | "dupe";
+  /** The Stop hook's question: the refusal text to block THIS finish with, or null to let it end. */
+  stopVerdict(characterId: CharacterId, stopHookActive: boolean): string | null;
+  /** The ticket's column on Jira right now (null: no token, or Jira did not answer). */
+  statusOf(key: string): Promise<string | null>;
+}
+
 export class LaneManager {
   private lanes = new Map<CharacterId, Lane>();
   /** Single integration queue — serves apply one at a time (AD-5). */
@@ -567,7 +592,9 @@ export class LaneManager {
     /** The Phone Booth's second phone: the town's Android emulator, or null. Has
      *  its own door; the one waiting line is shared with `device`. Like the
      *  iPhone it sleeps until a job aims a command at it (then the town wakes it). */
-    private android: DeviceSpec | null = null
+    private android: DeviceSpec | null = null,
+    /** The Notebook: one sentence per finished ticket (null in tests and the smoke path). */
+    private notebook: NotebookSupport | null = null
   ) {
     this.sessionsFile = path.join(projectPath, ".bikini", "sessions.json");
     this.board = new Switchboard(this.phoneKeys(), { graceSec: device?.graceSec, maxHoldMin: device?.maxHoldMin });
@@ -808,7 +835,7 @@ export class LaneManager {
         sessionId: cur?.sessionId ?? null, lastPrompt: cur?.lastPrompt ?? null,
         abort: null, cancelled: false, superseded: false,
         resumedSession: false, turnsThisSession: 0, lastCallCtx: 0,
-        pump: null, sdkQuery: null, outstanding: 0, awaitingIdle: false, awaitSince: 0, idleAt: 0, helperFinishedAt: 0, idleTimer: null,
+        pump: null, sdkQuery: null, outstanding: 0, awaitingIdle: false, awaitSince: 0, idleAt: 0, helperFinishedAt: 0, idleTimer: null, jiraMoves: new Map(),
         activity: null, todos: [], taskStartedAt: cur?.taskStartedAt ?? 0, taskTokens: cur?.taskTokens ?? 0, beatAt: 0, lastBeatPush: 0, sessionLoop: null,
         pending: null, pendingChoice: null, watchdog: null, agents: new Map(), notified: new Set(),
         baseSha: cur?.baseSha ?? null, servedTip: cur?.servedTip ?? null,
@@ -1262,6 +1289,27 @@ export class LaneManager {
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
     this.onChange();
+  }
+
+  /** The Notebook: read the character's own Jira calls. The moves offered for
+   *  a ticket are remembered (id → name); a move that reached review (by its
+   *  name, or by the ticket's column when the town has a Jira token and the
+   *  name is unknown) makes the line owed and returns the ask for the model. */
+  private async jiraMoveSeen(id: CharacterId, l: Lane, toolName: string, toolInput: unknown, toolResponse: unknown): Promise<string | null> {
+    if (!this.notebook) return null;
+    const offered = jiraTransitionsOf(toolName, toolInput, toolResponse);
+    if (offered) { l.jiraMoves.set(offered.key, { ...(l.jiraMoves.get(offered.key) || {}), ...offered.names }); return null; }
+    const move = jiraMoveOf(toolName, toolInput);
+    if (!move) return null;
+    const resp = (toolResponse && typeof toolResponse === "object" ? toolResponse : {}) as Record<string, unknown>;
+    if (resp.isError === true || resp.is_error === true) return null; // the move itself failed
+    if (this.notebook.hasLine(move.key)) return null;
+    const name = move.transitionId ? l.jiraMoves.get(move.key)?.[move.transitionId] ?? null : null;
+    let reached = name ? reachedReview(name) : null;
+    if (reached === null) { const col = await this.notebook.statusOf(move.key); reached = col ? reachedReview(col) : null; log("lane", `${id} notebook: move name unknown, asked Jira`, { key: move.key, column: col }); }
+    if (!reached) return null;
+    this.notebook.pending(move.key, id);
+    return nudgeText(move.key);
   }
 
   /** Land a finished Job's work in the Project (AD-5), serialized so two
@@ -1887,6 +1935,28 @@ export class LaneManager {
             return { content: [{ type: "text", text: `Posted: ${args.event} on ${args.repo}#${args.number}. ${r.out}`.trim() }] };
           },
         ),
+        // The Notebook (2026-11-10): the one sentence Maksym copies by hand. The
+        // character who did the work writes it (best context); the town keeps
+        // it, one per ticket, and refuses one finish when it is owed (Stop hook).
+        tool(
+          "notebook_line",
+          "Write the ONE line for Maksym's paper notebook about a ticket whose work is done (it reached Code Review). Exactly one sentence IN UKRAINIAN that names the ticket key, says what exactly was done, and what the core technical problem was — he copies it by hand with a pen, so plain words, no Markdown, under 280 characters. One line per ticket, ever: a second call for the same key is refused. Call it right after moving the ticket to Code Review, before you finish.",
+          {
+            key: z.string().describe("The ticket key, e.g. HIGHCAP-275."),
+            sentence: z.string().describe("One Ukrainian sentence: the key · what was done · the core technical problem. Example: 'HIGHCAP-275: додав екран плану з вкладками й кешем на день, головна проблема — сервер віддавав дати без часового поясу, тож день зсувався на годину.'"),
+          },
+          async (args) => {
+            if (!this.notebook) return { content: [{ type: "text", text: "This town keeps no notebook. Carry on." }] };
+            const key = String(args.key || "").trim().toUpperCase();
+            const c = sentenceCheck(key, args.sentence);
+            if (!c.ok) return { content: [{ type: "text", text: `Not written — ${c.reason}. Fix that one thing and call notebook_line once more.` }] };
+            const r = this.notebook.add(id, key, c.sentence);
+            if (r === "dupe") return { content: [{ type: "text", text: `${key} already has its notebook line — nothing added. Carry on.` }] };
+            l.conversation.push({ from: "them", text: bubbleText(c.sentence), tool: true });
+            this.onChange();
+            return { content: [{ type: "text", text: `Written to Maksym's notebook: ${c.sentence} Carry on and finish.` }] };
+          },
+        ),
       ],
     });
 
@@ -1929,6 +1999,7 @@ export class LaneManager {
               + serverNote
               + phoneNote
               + STAY_IN_LANE_NOTE
+              + (this.notebook && !REVIEWER_IDS.has(id) ? NOTEBOOK_NOTE : "")
               + (REVIEWER_IDS.has(id) ? REVIEW_ONLY_NOTE : "")
               + setupNote(l.setupReport),
           },
@@ -2079,7 +2150,21 @@ export class LaneManager {
               const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.board.touch(id);
               // A review posted, a push, a PR edited: the town's paper re-reads GitHub.
               if (touchesGitHub(input.tool_name, input.tool_input)) { try { this.fuelOpts.onGitHubWrite?.(id); } catch { /* never let the paper break the lane */ } }
+              // The Notebook: a ticket moved → did it reach review? Then a line is owed.
+              try {
+                const nudge = await this.jiraMoveSeen(id, l, input.tool_name, input.tool_input, input.tool_response);
+                if (nudge) return { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: nudge } };
+              } catch (e) { log("lane", `${id} notebook: move not read`, { error: String(e) }); }
               return {};
+            }] }],
+            // The Notebook's forced step: a ticket reached review this job and no
+            // line was written → the FIRST attempt to finish is refused with the
+            // ask (same turn, no second bell); the second always goes through.
+            Stop: [{ hooks: [async (input: any): Promise<any> => {
+              const reason = this.notebook?.stopVerdict(id, !!input.stop_hook_active) ?? null;
+              if (!reason) return {};
+              log("lane", `${id} finish refused once — notebook line owed`);
+              return { decision: "block", reason };
             }] }],
             PostToolUseFailure: [{ hooks: [async (input: any): Promise<any> => { const ids = this.phoneIds(); if (ids && phoneMatch(input.tool_name, input.tool_input, ids) === "phone") this.board.touch(id); return {}; }] }],
           },

@@ -490,6 +490,33 @@ export interface MailView {
   checking: boolean;
 }
 
+/** One line of the Notebook: a finished ticket in one Ukrainian sentence,
+ *  written by the character who did the work. */
+export interface NotebookLine {
+  key: string;
+  sentence: string;
+  characterId: CharacterId;
+  name: string;
+  /** Epoch ms the line was written. */
+  at: number;
+  /** Maksym ticked it — copied by hand into his paper notebook. */
+  copied: boolean;
+  /** Written minutes ago and not copied: the paper draws the ink still wet. */
+  fresh: boolean;
+}
+
+/** The Notebook prop and its paper: null only when no town is open. */
+export interface NotebookView {
+  /** Newest first. */
+  lines: NotebookLine[];
+  /** Lines not yet copied — the number on the prop. */
+  uncopied: number;
+  /** Tickets that reached Code Review with no line yet (a character owes one). */
+  owed: { key: string; characterId: CharacterId; name: string; since: number }[];
+  /** The Jira site, to open a key in the browser ("" when none). */
+  site: string;
+}
+
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */
 export interface TownSnapshot {
   /** Monotonic sequence of the last event folded into this snapshot. */
@@ -522,6 +549,8 @@ export interface TownSnapshot {
   mail: MailView | null;
   /** The Jira page of the mailbox (null: no Jira project for this town). */
   jira: JiraView | null;
+  /** The Notebook: one line per finished ticket (null before a town is open). */
+  notebook: NotebookView | null;
 }
 
 /** Renderer → main. Named intents only — never raw fs/git/SDK calls (AD-4). */
@@ -586,7 +615,9 @@ export type Intent =
   | { type: "mergePull"; number: number }
   | { type: "askReview"; number: number }
   | { type: "handOffPull"; number: number; characterId: CharacterId }
-  | { type: "openPull"; number: number };
+  | { type: "openPull"; number: number }
+  // The Notebook: Maksym ticks a line once it is in his paper notebook.
+  | { type: "notebookCopied"; key: string; copied: boolean };
 
 /** A one-shot sound cue (transient, view-only — like the token stream). */
 export interface SoundCue {

@@ -18,7 +18,8 @@ import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, mark
 import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview, branchAt } from "./adapters/pulls";
 import { JiraClient } from "./adapters/jira";
 import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, markJiraOnIt, canHandJira, townForTicket, jiraBrief, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
-import { LaneManager, type AdoptionSupport } from "./adapters/lane";
+import { LaneManager, type AdoptionSupport, type NotebookSupport } from "./adapters/lane";
+import { parseNotebook, notePending, addLine, setCopied, stopVerdict, uncopiedCount, sortedEntries, isFresh, EMPTY_NOTEBOOK, type NotebookState } from "./domain/notebook";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { defaultName, loadProfile, seedProfile, serializeProfile, profilePath, laneAdoption, townTabsFor, type TownProfile, type DeviceSpec } from "./config/townProfile";
@@ -28,7 +29,7 @@ import { seedSetup } from "./domain/laneSetup";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
-import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView, type MailView, type MailLine, type JiraView, type JiraLine } from "../shared/ipc";
+import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type NotebookView, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView, type MailView, type MailLine, type JiraView, type JiraLine } from "../shared/ipc";
 import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
 const IDLE_PREP = { status: "idle" as const, message: "" };
@@ -127,7 +128,8 @@ async function openTown(projectPath: string): Promise<Town> {
     () => cfg.data.bypassPermissions, adopt,
     // One account, one fuel file: two towns sharing it is fine (same numbers).
     { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning, onGitHubWrite: (id) => nudgeMail(projectPath, id) },
-    profile.landing, profile.device ?? null, profile.setup ?? null, profile.android ?? null);
+    profile.landing, profile.device ?? null, profile.setup ?? null, profile.android ?? null,
+    notebookSupportFor(projectPath));
   // The Phone Booth: only LOOK at the town's phones on open — the iPhone and the
   // Android phone both sleep until a job aims a command at one, then the town
   // wakes it from the lane hook (Maksym, 2026-10-15: no simulator at app start,
@@ -343,6 +345,78 @@ function saveJiraSet(kind: "pings" | "seen" | "handled", project: string, set: S
   try { writeFileSync(jiraStateFile(kind, project), JSON.stringify([...set].slice(-600)) + "\n", "utf8"); } catch (e) { log("jira", `${kind} not saved`, { error: String(e) }); }
 }
 function jiraOf(townPath: string | null): JiraBoard | null { const k = townPath ? townJira.get(townPath) : null; return k ? jiras.get(k) ?? null : null; }
+// ─── The Notebook: one Ukrainian sentence per finished ticket ───────────────
+// Written by the character who did the work (the `notebook_line` town tool),
+// kept per town in .bikini/notebook.json, drawn as the book on the street.
+// Maksym copies each line by hand and ticks it. The pure rules live in
+// domain/notebook.ts; here is the file and the wiring to the lanes.
+const notebooks = new Map<string, NotebookState>();
+function notebookFile(townPath: string): string { return path.join(townPath, ".bikini", "notebook.json"); }
+function notebookOf(townPath: string): NotebookState {
+  let st = notebooks.get(townPath);
+  if (!st) {
+    try { st = parseNotebook(JSON.parse(readFileSync(notebookFile(townPath), "utf8"))); }
+    catch { st = EMPTY_NOTEBOOK; }
+    notebooks.set(townPath, st);
+  }
+  return st;
+}
+function saveNotebook(townPath: string, st: NotebookState): void {
+  notebooks.set(townPath, st);
+  try { mkdirSync(path.dirname(notebookFile(townPath)), { recursive: true }); writeFileSync(notebookFile(townPath), JSON.stringify(st, null, 2) + "\n", "utf8"); }
+  catch (e) { log("notebook", "not saved", { townPath, error: String(e) }); }
+}
+function notebookViewFor(townPath: string | null): NotebookView | null {
+  if (!townPath) return null;
+  const st = notebookOf(townPath);
+  const now = Date.now();
+  const nameOf = (id: CharacterId) => ROSTER.find((r) => r.id === id)?.name ?? id;
+  return {
+    lines: sortedEntries(st).map((e) => ({ key: e.key, sentence: e.sentence, characterId: e.characterId, name: e.name || nameOf(e.characterId), at: e.at, copied: e.copied, fresh: isFresh(e, now) })),
+    uncopied: uncopiedCount(st),
+    owed: st.pending.map((p) => ({ key: p.key, characterId: p.characterId, name: nameOf(p.characterId), since: p.at })),
+    site: jiraSite(),
+  };
+}
+function notebookTick(townPath: string, key: string, copied: boolean): void {
+  const st = notebookOf(townPath);
+  if (!st.entries.some((e) => e.key === key)) return;
+  saveNotebook(townPath, setCopied(st, key, copied, Date.now()));
+  log("notebook", copied ? "line copied" : "line unticked", { key });
+  pushSnapshot();
+}
+/** What the lane engine may do to this town's notebook. */
+function notebookSupportFor(townPath: string): NotebookSupport {
+  return {
+    hasLine: (key) => notebookOf(townPath).entries.some((e) => e.key === key),
+    pending: (key, characterId) => {
+      const r = notePending(notebookOf(townPath), key, characterId, Date.now());
+      if (r.added) { saveNotebook(townPath, r.state); log("notebook", "a line is owed", { key, characterId }); pushSnapshot(); }
+      return r.added;
+    },
+    add: (characterId, key, sentence) => {
+      const name = ROSTER.find((r) => r.id === characterId)?.name ?? characterId;
+      const r = addLine(notebookOf(townPath), { key, sentence, characterId, name, at: Date.now() });
+      if (r.result === "new") { saveNotebook(townPath, r.state); log("notebook", "line written", { key, characterId, sentence }); pushSnapshot(); }
+      else log("notebook", "line refused — the key already has one", { key, characterId, by: r.existing?.characterId });
+      return r.result;
+    },
+    stopVerdict: (characterId, stopHookActive) => {
+      const v = stopVerdict(notebookOf(townPath), characterId, stopHookActive);
+      if (!v.block) return null;
+      saveNotebook(townPath, v.state);
+      log("notebook", "finish refused once — the line is owed", { key: v.key, characterId });
+      return v.reason;
+    },
+    statusOf: async (key) => {
+      try {
+        if (!jiraClient && jiraConfigured()) jiraClient = new JiraClient(jiraSite(), cfg.data.jiraEmail!, cfg.data.jiraToken!);
+        return jiraClient ? await jiraClient.status(key) : null;
+      } catch { return null; }
+    },
+  };
+}
+
 function jiraConfigured(): boolean { return !!(cfg.data.jiraEmail && cfg.data.jiraToken && cfg.data.jiraSite); }
 function jiraSite(): string { return (cfg.data.jiraSite || "https://empat.atlassian.net").replace(/\/+$/, ""); }
 
@@ -1367,6 +1441,7 @@ function snapshot(): TownSnapshot {
   // The Mailbox (pull requests): runtime state from the town's mail reader.
   base.mail = fx?.mail !== undefined ? fx.mail : mailViewFor(currentTownPath, base.characters);
   base.jira = fx?.jira !== undefined ? fx.jira : jiraViewFor(currentTownPath, base.characters);
+  base.notebook = fx?.notebook !== undefined ? fx.notebook : notebookViewFor(currentTownPath);
   return base;
 }
 
@@ -1375,7 +1450,7 @@ function snapshot(): TownSnapshot {
 // character with a chalk line, a full Orders board) can be photographed with
 // `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
 // orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
-type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null; jira?: JiraView | null };
+type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null; jira?: JiraView | null; notebook?: NotebookView | null };
 let fixture: Fixture | null | undefined;
 function loadFixture(): Fixture | null {
   if (fixture === undefined) {
@@ -1639,6 +1714,10 @@ async function handleIntent(intent: Intent): Promise<void> {
       break;
     case "handOffJira":
       if (currentTownPath) await handOffJira(currentTownPath, intent.id, intent.characterId);
+      break;
+
+    case "notebookCopied":
+      if (currentTownPath) notebookTick(currentTownPath, String(intent.key || ""), !!intent.copied);
       break;
 
     case "openPull": {

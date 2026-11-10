@@ -2,11 +2,11 @@
   "name": "bikini-bottom",
   "version": "0.1.0",
   "private": true,
-  "description": "A cozy home for your work — a SpongeBob town that wraps Claude Code.",
+  "description": "A cozy home for your work \u2014 a SpongeBob town that wraps Claude Code.",
   "main": "dist/main/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "postbuild": "node scripts/check-lane-states.mjs && node scripts/check-review-only.mjs",
+    "postbuild": "node scripts/check-lane-states.mjs && node scripts/check-review-only.mjs && node scripts/check-notebook.mjs",
     "start": "npm run build && electron .",
     "smoke": "npm run build && BIKINI_SMOKE=1 electron .",
     "rebuild": "electron-rebuild -w node-pty",
