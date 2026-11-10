@@ -4,7 +4,7 @@
 // appeared (2026-11-04). Run after `npm run build`:  node scripts/check-pictures.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { newEvidence, noteEvidence, openWindow, closeWindow, isClaimed } = require("../dist/main/domain/pictureClaims.js");
+const { newEvidence, noteEvidence, openWindow, closeWindow, isClaimed, pickToShow, dropShownPathLines } = require("../dist/main/domain/pictureClaims.js");
 
 let fails = 0;
 const ok = (cond, msg) => { if (!cond) { fails++; console.log("  ✗", msg); } else console.log("  ✓", msg); };
@@ -61,6 +61,28 @@ console.log("a fresh turn starts with no claims:");
   noteEvidence(ev, `wrote ${shot}`);
   const next = newEvidence();
   ok(isClaimed(ev, shot, T, "") && !isClaimed(next, shot, T, ""), "evidence is per turn object; a new one knows nothing");
+}
+
+console.log("2026-11-10 — a reply names two pictures an earlier bubble already carried:");
+{
+  const D = "/Users/maksymloia/Desktop/claude-deliverables/2026-11-10-tester-build-recheck";
+  const a = { file: `${D}/android-second-race-hidden.png`, mtime: T }, i = { file: `${D}/iphone-second-race.png`, mtime: T + 1 };
+  const other = { file: `${D}/iphone-plan.png`, mtime: T + 2 };
+  const ev = newEvidence();
+  for (const p of [a, i, other]) noteEvidence(ev, `saved ${p.file}`);
+  const shown = new Set([a, i, other].map((p) => `${p.file}@${p.mtime}`));
+  const reply = `Here's how it looks on both phones today:\n\n${a.file}\n\n${i.file}\n\nAnd you're right, I shouldn't have talked as if Anna knows.`;
+  const picked = pickToShow([a, i, other], shown, ev, reply);
+  ok(picked.length === 2 && picked[0] === a && picked[1] === i, "both named pictures ride again, although shown before");
+  ok(!picked.includes(other), "a shown picture the reply does not name is not repeated");
+  ok(pickToShow([a, i, other], shown, ev, "").length === 0, "the end-of-turn flush repeats nothing already shown");
+  ok(pickToShow([a], new Set(), ev, "").length === 1, "a never-shown picture still rides the flush");
+  ok(pickToShow([a], shown, newEvidence(), "nothing of mine").length === 0, "another lane's shown picture is still not claimed");
+  const cleaned = dropShownPathLines(reply, picked.map((p) => p.file));
+  ok(!cleaned.includes("/Users/") && cleaned.includes("both phones today:") && cleaned.includes("Anna knows"), "the bare path lines leave the bubble, the words stay");
+  ok(dropShownPathLines(`See ${a.file} for the bug.`, [a.file]).includes(a.file), "a path inside a sentence stays");
+  ok(dropShownPathLines(`- \`${other.file}\``, [a.file]).includes("iphone-plan.png"), "a bare path of a picture NOT shown stays");
+  ok(dropShownPathLines(`- \`${a.file}\``, [a.file]) === "", "a bulleted, back-ticked bare path of a shown picture goes");
 }
 
 console.log(fails ? `\n${fails} check(s) failed` : "\nall picture-claim checks passed");

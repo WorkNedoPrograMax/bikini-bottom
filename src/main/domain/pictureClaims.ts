@@ -68,3 +68,40 @@ export function isClaimed(ev: PictureEvidence, file: string, mtime: number, text
   for (const w of ev.windows.values()) if (mtime >= w.from - WINDOW_SLACK_MS && mtime <= w.to + WINDOW_SLACK_MS) return true;
   return false;
 }
+
+/** Did the text of THIS bubble name the picture (full path or just the file name)? */
+export function namedHere(file: string, text: string): boolean {
+  return !!text && text.includes(path.basename(file));
+}
+
+/** Which of the candidate pictures ride in the bubble showing `text`.
+ *
+ *  2026-11-10: Squidward showed two phone screenshots at 12:01 and 12:43 UTC,
+ *  and two hours later in the same job wrote "here's how it looks on both
+ *  phones today:" followed by their two full paths. The "already shown this
+ *  job" memory dropped both, so Maksym got two file paths and no pictures.
+ *  That memory exists so a picture made this turn is not repeated by every
+ *  later bubble and by the end-of-turn flush — it must not veto a reply that
+ *  names the picture on purpose. So: a picture named in this bubble's own text
+ *  always rides; an unnamed one rides only the first time. */
+export function pickToShow<T extends { file: string; mtime: number }>(
+  cands: T[], shown: Set<string>, ev: PictureEvidence, text: string,
+): T[] {
+  return cands.filter((p) => isClaimed(ev, p.file, p.mtime, text)
+    && (namedHere(p.file, text) || !shown.has(`${p.file}@${p.mtime}`)));
+}
+
+const BARE_PATH_LINE_RE = /^[\s>*\-•\d.)]*[`"'(<\[]*((?:~|\/)[^\s"'`()\[\]<>]+?\.(?:png|jpe?g|gif|webp))[`"')>\]]*[.,;:]?\s*$/i;
+
+/** The picture is in the bubble, so a line that is nothing but its path is
+ *  noise ("/Users/…/android-second-race-hidden.png"). Drop those lines; a path
+ *  inside a sentence, or of a picture that is not shown, stays. */
+export function dropShownPathLines(text: string, shownFiles: string[]): string {
+  if (!shownFiles.length) return text;
+  const names = new Set(shownFiles.map((f) => path.basename(f)));
+  const kept = text.split("\n").filter((line) => {
+    const m = BARE_PATH_LINE_RE.exec(line);
+    return !(m && names.has(path.basename(m[1])));
+  });
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}

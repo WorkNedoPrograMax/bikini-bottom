@@ -12,7 +12,7 @@ import { nativeImage } from "electron";
 import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats, Fuel, Gauge } from "../../shared/ipc";
 import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
-import { newEvidence, noteEvidence, openWindow, closeWindow, isClaimed, type PictureEvidence } from "../domain/pictureClaims";
+import { newEvidence, noteEvidence, openWindow, closeWindow, pickToShow, dropShownPathLines, type PictureEvidence } from "../domain/pictureClaims";
 import { stampArchive, pruneArchive, ARCHIVE_KEEP_DAYS } from "../domain/archiveRetention";
 import { ensureWorktree, headSha, serveJob, sendBack, switchBranch } from "./git";
 import { clearStrayApiKey } from "./claude";
@@ -1530,21 +1530,28 @@ export class LaneManager {
    *  character in every town, so "new since my turn started" alone handed
    *  Patrick's screenshots to Bob (2026-11-04). */
   private async picturesFor(l: Lane, text: string): Promise<string[] | undefined> {
+    return (await this.picturesWithFiles(l, text))?.images;
+  }
+
+  /** The same, plus which files those thumbnails are — so the bubble can drop
+   *  the lines that only spell a shown picture's path. A picture the bubble's
+   *  own text names rides even when an earlier bubble already carried it
+   *  (2026-11-10: a reply naming two pictures shown two hours before came out
+   *  as two bare paths). */
+  private async picturesWithFiles(l: Lane, text: string): Promise<{ images: string[]; files: string[] } | undefined> {
     let fresh: { file: string; mtime: number }[];
     try {
-      fresh = (await findPictures(l.turnStartedAt, text))
-        .filter((p) => !l.shownPictures.has(`${p.file}@${p.mtime}`))
-        .filter((p) => isClaimed(l.pictureEvidence, p.file, p.mtime, text));
+      fresh = pickToShow(await findPictures(l.turnStartedAt, text), l.shownPictures, l.pictureEvidence, text);
     } catch { return undefined; }
     if (!fresh.length) return undefined;
-    const out: string[] = [];
+    const images: string[] = [], files: string[] = [];
     for (const p of fresh.slice(-PICTURE_MAX_PER_BUBBLE)) {
       l.shownPictures.add(`${p.file}@${p.mtime}`);
       const url = pictureThumb(p.file);
-      if (url) out.push(url);
+      if (url) { images.push(url); files.push(p.file); }
     }
-    if (out.length) log("lane", "pictures shown", { count: out.length, files: fresh.slice(-PICTURE_MAX_PER_BUBBLE).map((p) => path.basename(p.file)) });
-    return out.length ? out : undefined;
+    if (images.length) log("lane", "pictures shown", { count: images.length, files: files.map((f) => path.basename(f)) });
+    return images.length ? { images, files } : undefined;
   }
 
   /** At a turn's end: any picture made this turn that no bubble carried yet gets
@@ -2310,7 +2317,8 @@ export class LaneManager {
           for (const block of msg.message.content) {
             if (block.type === "text" && block.text.trim()) {
               noteEvidence(l.pictureEvidence, block.text);
-              l.conversation.push({ from: "them", text: block.text.trim(), images: await this.picturesFor(l, block.text) });
+              const pics = await this.picturesWithFiles(l, block.text);
+              l.conversation.push({ from: "them", text: pics ? dropShownPathLines(block.text, pics.files) || block.text.trim() : block.text.trim(), images: pics?.images });
               l.activity = "writing a reply…";
               // "You've hit your session limit · resets 1:40pm" arrives as plain
               // text before the error result — read the reset clock from it.
