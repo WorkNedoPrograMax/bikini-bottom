@@ -28,7 +28,14 @@ export class JiraClient {
         body: body ? JSON.stringify(body) : undefined,
       });
       if (!r.ok) throw new Error(httpReason(r.status));
-      return await r.json();
+      // A move answers "done" with NO body (204). Reading that as JSON threw,
+      // and the throw was reported as "Jira could not be reached" — so every
+      // move since 2026-11-09 said it failed while Jira had moved the ticket,
+      // and the comment after it was never written (measured 2026-11-10:
+      // HIGHCAP-367 moved at the very second of the "not moved" toast).
+      const raw = await r.text();
+      if (!raw.trim()) return null;
+      try { return JSON.parse(raw); } catch { throw new Error("Jira answered with something unreadable"); }
     } catch (e: any) {
       if (e?.name === "AbortError") throw new Error("Jira took too long to answer");
       throw new Error(e?.message?.startsWith("Jira") || e?.message?.startsWith("the token") ? e.message : "Jira could not be reached");

@@ -6,7 +6,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "postbuild": "node scripts/check-lane-states.mjs && node scripts/check-review-only.mjs && node scripts/check-notebook.mjs && node scripts/check-pictures.mjs",
+    "postbuild": "node scripts/check-lane-states.mjs && node scripts/check-review-only.mjs && node scripts/check-notebook.mjs && node scripts/check-pictures.mjs && node scripts/check-jira-move.mjs",
     "start": "npm run build && electron .",
     "smoke": "npm run build && BIKINI_SMOKE=1 electron .",
     "rebuild": "electron-rebuild -w node-pty",
