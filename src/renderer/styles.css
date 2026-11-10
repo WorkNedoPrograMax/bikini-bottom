@@ -75,6 +75,12 @@ html, body {
 }
 /* A wider mouse target than the peeking part, so "over the area" is enough. */
 .actor.hanging::after { content: ""; position: absolute; left: -48px; right: -48px; top: 0; bottom: -56px; }
+/* Off duty (idle, nothing to show): fully above the top edge, out of sight, but
+   still there — a band at the top middle is the mouse target, and hovering it
+   brings her all the way down so she can be pressed (Maksym, 2026-11-10). */
+.actor.hanging.tucked { transform: translate(-50%, -104%); }
+.actor.hanging.tucked::after { left: -90px; right: -90px; bottom: -110px; }
+.actor.hanging.tucked:hover { transform: translate(-50%, 2%); }
 .actor.hanging .label { margin-top: 6px; }
 @keyframes ping { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.25); opacity: .8; } }
 
