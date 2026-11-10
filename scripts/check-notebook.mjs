@@ -61,6 +61,9 @@ console.log("stopVerdict — the forced step, refused ONCE, never a loop:");
 st = N.notePending(N.EMPTY_NOTEBOOK, "HIGHCAP-281", "pat", 1000).state;
 let v = N.stopVerdict(st, "pat", false);
 ok(v.block && v.key === "HIGHCAP-281" && /notebook_line/.test(v.reason) && /HIGHCAP-281/.test(v.reason), "Patrick owes a line → his first finish is refused, the reason names the tool and the key");
+const two = N.notePending(N.notePending(N.EMPTY_NOTEBOOK, "HIGHCAP-281", "pat", 1).state, "HIGHCAP-282", "pat", 2).state;
+const v2 = N.stopVerdict(two, "pat", false);
+ok(v2.block && v2.keys.length === 2 && /HIGHCAP-281, HIGHCAP-282/.test(v2.reason) && !N.stopVerdict(v2.state, "pat", false).block, "two keys owed (a catch-up) → ONE refusal naming both, then the next finish goes through");
 ok(!N.stopVerdict(v.state, "pat", false).block, "the second finish (still no line) goes through — the key is marked nudged");
 ok(!N.stopVerdict(st, "pat", true).block, "stop_hook_active (the CLI already continued us once) → never refused, whatever the state says");
 ok(!N.stopVerdict(st, "bob", false).block, "another character does not pay for Patrick's line");
@@ -76,6 +79,37 @@ ok(parsed.pending.length === 1 && parsed.pending[0].key === "HIGHCAP-2" && parse
 ok(N.parseNotebook(null).entries.length === 0 && N.parseNotebook("junk").pending.length === 0 && N.parseNotebook({ entries: "x" }).entries.length === 0, "null / junk / wrong shapes → an empty notebook, no crash");
 // The crossing a restart must pass: a nudged pending key read back → the next stop still goes through (no second refusal after relaunch).
 ok(!N.stopVerdict(parsed, "pat", false).block, "after a relaunch, a key already nudged is not refused again");
+
+console.log("catching up — what moved before the notebook existed:");
+const DAY = 86_400_000, NOW = Date.parse("2026-11-10T09:00:00Z");
+const hist = (created, to) => ({ created, items: [{ field: "status", fromString: "x", toString: to }] });
+const issues = [
+  { key: "HIGHCAP-260", fields: { summary: "Plan tab" }, changelog: { histories: [hist("2026-11-09T10:00:00Z", "Code Review"), hist("2026-11-09T15:00:00Z", "Review Completed")] } },
+  { key: "HIGHCAP-261", fields: { summary: "Old one" }, changelog: { histories: [hist("2026-11-01T10:00:00Z", "Done")] } },
+  { key: "HIGHCAP-262", fields: { summary: "Started" }, changelog: { histories: [hist("2026-11-09T11:00:00Z", "In Progress")] } },
+  { key: "HIGHCAP-263", fields: { summary: "Sent back" }, changelog: { histories: [hist("2026-11-10T07:00:00Z", "Code Review"), { created: "2026-11-10T08:00:00Z", items: [{ field: "assignee", toString: "Code Review" }] }] } },
+  { key: "HIGHCAP-275", fields: { summary: "Has a line" }, changelog: { histories: [hist("2026-11-10T06:00:00Z", "Code Review")] } },
+];
+const withLine = N.addLine(N.EMPTY_NOTEBOOK, { key: "HIGHCAP-275", sentence: UA, characterId: "bob", name: "SpongeBob", at: 1 }).state;
+const mv = N.movedForward(issues, NOW - 2 * DAY, NOW, withLine);
+ok(mv.map((x) => x.key).join(",") === "HIGHCAP-263,HIGHCAP-260", "forward moves inside the window, newest first; a move to In Progress, an old Done and a key with a line are left out");
+ok(mv[1].to === "Review Completed" && mv[1].summary === "Plan tab", "the latest forward move of a key is the one reported, with the title");
+ok(mv[0].to === "Code Review", "a non-status history item saying 'Code Review' is not a move");
+const w = N.catchUpWindow(Date.parse("2026-11-10T09:30:00"), 2);
+ok(new Date(w.from).getDate() === 9 && new Date(w.from).getHours() === 0 && w.to === Date.parse("2026-11-10T09:30:00"), "2 days = from the start of yesterday (local) to now");
+ok(new Date(N.catchUpWindow(Date.parse("2026-11-10T09:30:00"), 1).from).getDate() === 10, "1 day = today only");
+ok(N.jqlDate(Date.parse("2026-11-09T00:05:00")) === "2026/11/09 00:05", "JQL date is local yyyy/MM/dd HH:mm");
+const convos = [
+  { characterId: "bob", name: "SpongeBob", title: "HIGHCAP-260 plan tab", messages: [{ from: "you", text: "do HIGHCAP-260" }, { from: "them", text: "Looking…", tool: true }, { from: "them", text: "Done: the plan tab shows weeks; the server sent dates without a zone so I normalise them." }] },
+  { characterId: "pat", name: "Patrick", title: "something else", messages: [{ from: "them", text: "unrelated" }] },
+  { characterId: "squid", name: "Squidward", title: "fix", messages: [{ from: "you", text: "please also check HIGHCAP-263" }, { from: "them", text: "Checked HIGHCAP-263: the retry button kept the error state." }] },
+];
+const rc = N.recallFor(["HIGHCAP-260", "HIGHCAP-263", "HIGHCAP-999"], convos);
+ok(rc.length === 2 && rc[0].key === "HIGHCAP-260" && rc[0].name === "SpongeBob" && rc[0].said.startsWith("Done: the plan tab"), "a conversation naming the key → its last plain reply (tool bubbles skipped)");
+ok(rc[1].key === "HIGHCAP-263" && rc[1].characterId === "squid", "a key named only inside a message is found too; an unknown key yields nothing");
+const brief = N.catchUpBrief({ tickets: mv, recalls: rc, site: "https://empat.atlassian.net", repos: ["EmpatDevelopment/highcap-mobile"], from: NOW - 2 * DAY, to: NOW });
+ok(/HIGHCAP-260/.test(brief) && /HIGHCAP-263/.test(brief) && /notebook_line/.test(brief) && /the plan tab shows weeks/.test(brief) && /change no code/.test(brief) && /highcap-mobile/.test(brief), "the brief lists the tickets, what the old lanes said, the tool, the repo and the no-changes rule");
+ok(/found no finished conversation/.test(N.catchUpBrief({ tickets: mv, recalls: [], site: "s", repos: [], from: 0, to: 1 })), "no recalls → the brief says so and points at Jira and GitHub");
 
 console.log("the rest:");
 const e1 = { key: "A-1", sentence: "x", characterId: "bob", name: "", at: 1000, copied: false, copiedAt: null };

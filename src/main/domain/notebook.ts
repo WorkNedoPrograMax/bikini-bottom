@@ -195,17 +195,22 @@ export function setCopied(state: NotebookState, key: string, copied: boolean, at
  *  so a second stop always goes through (never a loop). `stopHookActive` is
  *  the CLI saying "this stop is already the continuation of a blocked one" —
  *  then nothing is refused, whatever the state says. */
-export function stopVerdict(state: NotebookState, characterId: CharacterId, stopHookActive: boolean): { block: false } | { block: true; key: string; reason: string; state: NotebookState } {
+export function stopVerdict(state: NotebookState, characterId: CharacterId, stopHookActive: boolean): { block: false } | { block: true; key: string; keys: string[]; reason: string; state: NotebookState } {
   if (stopHookActive) return { block: false };
-  const owed = state.pending.find((p) => p.characterId === characterId && !p.nudged && !state.entries.some((e) => e.key === p.key));
-  if (!owed) return { block: false };
-  const next: NotebookState = { entries: state.entries, pending: state.pending.map((p) => p.key === owed.key ? { ...p, nudged: true } : p) };
-  return { block: true, key: owed.key, reason: nudgeText(owed.key), state: next };
+  // Every key this character owes, in one refusal (a catch-up job owes several).
+  const owed = state.pending.filter((p) => p.characterId === characterId && !p.nudged && !state.entries.some((e) => e.key === p.key));
+  if (!owed.length) return { block: false };
+  const keys = owed.map((p) => p.key);
+  const next: NotebookState = { entries: state.entries, pending: state.pending.map((p) => keys.includes(p.key) ? { ...p, nudged: true } : p) };
+  return { block: true, key: keys[0], keys, reason: nudgeText(keys), state: next };
 }
 
 /** The ask, as the model reads it (right after the move, and on a refused stop). */
-export function nudgeText(key: string): string {
-  return `Maksym's notebook: ${key} reached Code Review this job and has no notebook line yet. Before you finish, call the \`notebook_line\` tool ONCE with key "${key}" and ONE sentence in Ukrainian that names ${key}, says what exactly was done, and what the core technical problem was (he copies it by hand into a paper notebook, so one plain sentence, no Markdown, under ${SENTENCE_MAX} characters). Then finish as usual.`;
+export function nudgeText(keys: string | string[]): string {
+  const ks = Array.isArray(keys) ? keys : [keys];
+  const list = ks.join(", ");
+  const one = ks.length === 1;
+  return `Maksym's notebook: ${list} ${one ? "reached Code Review this job and has" : "have"} no notebook line yet. Before you finish, call the \`notebook_line\` tool once PER TICKET (${one ? `key "${ks[0]}"` : `keys ${list}`}) with ONE sentence in Ukrainian that names the key, says what exactly was done, and what the core technical problem was (he copies it by hand into a paper notebook, so one plain sentence, no Markdown, under ${SENTENCE_MAX} characters). Then finish as usual.`;
 }
 
 /** The line as the character's chat shows it. */
@@ -220,3 +225,77 @@ export function sortedEntries(state: NotebookState): NotebookEntry[] { return [.
 /** A line written in the last few minutes still "wet" — the paper animates it. */
 export const FRESH_MS = 10 * 60_000;
 export function isFresh(entry: NotebookEntry, now: number = Date.now()): boolean { return !entry.copied && now - entry.at < FRESH_MS; }
+
+// ─── Catching up: the tickets that moved before the notebook existed ─────────
+/** The columns a ticket of Maksym's moves INTO when work is done or past done. */
+export const FORWARD_COLUMNS = ["code review", "review completed", "ready for qa", "in qa", "done", "release ready"];
+
+export interface MovedTicket { key: string; summary: string; to: string; at: number }
+
+/** Jira's issues with their changelogs → the tickets that moved into a forward
+ *  column inside the window (latest such move per key), newest first. Tickets
+ *  that already have a line are left out. */
+export function movedForward(issues: { key: string; fields?: { summary?: string }; changelog?: { histories?: { created: string; items?: { field?: string; toString?: string | null }[] }[] } | null }[], fromMs: number, toMs: number, state: NotebookState): MovedTicket[] {
+  const out: MovedTicket[] = [];
+  for (const i of issues || []) {
+    if (!i?.key || state.entries.some((e) => e.key === i.key)) continue;
+    let best: MovedTicket | null = null;
+    for (const h of i.changelog?.histories || []) {
+      const at = Date.parse(h.created);
+      if (!(at >= fromMs && at <= toMs)) continue;
+      for (const it of h.items || []) {
+        if (it.field !== "status") continue;
+        const to = String(it.toString || "");
+        if (!FORWARD_COLUMNS.includes(to.toLowerCase())) continue;
+        if (!best || at > best.at) best = { key: i.key, summary: String(i.fields?.summary || ""), to, at };
+      }
+    }
+    if (best) out.push(best);
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+
+/** "since yesterday" (2 days), "today" (1), "this week" (7): the window from
+ *  the start of that first day (local) to now. */
+export function catchUpWindow(now: number, days: number): { from: number; to: number } {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - Math.max(0, Math.round(days) - 1));
+  return { from: d.getTime(), to: now };
+}
+
+/** Jira's JQL date, local time ("2026/11/09 00:00"). */
+export function jqlDate(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** What an old lane said when it finished a ticket — context for the catch-up. */
+export interface Recall { key: string; characterId: CharacterId; name: string; title: string; said: string }
+
+/** Search the characters' conversations (archived and current) for a key: the
+ *  title or any message names it → the last plain reply of that conversation. */
+export function recallFor(keys: string[], convos: { characterId: CharacterId; name: string; title: string; messages: { from: "you" | "them"; text: string; tool?: boolean }[] }[]): Recall[] {
+  const out: Recall[] = [];
+  for (const key of keys) {
+    for (const c of convos) {
+      const mentions = c.title.includes(key) || c.messages.some((m) => (m.text || "").includes(key));
+      if (!mentions) continue;
+      const last = [...c.messages].reverse().find((m) => m.from === "them" && !m.tool && (m.text || "").trim());
+      if (!last) continue;
+      out.push({ key, characterId: c.characterId, name: c.name, title: c.title.slice(0, 120), said: last.text.replace(/\s+/g, " ").trim().slice(0, 700) });
+    }
+  }
+  return out;
+}
+
+/** The catch-up job, as the character gets it. */
+export function catchUpBrief(o: { tickets: MovedTicket[]; recalls: Recall[]; site: string; repos: string[]; from: number; to: number }): string {
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const lines = o.tickets.map((t) => `- ${t.key} — ${t.summary || "(no title)"} → moved to ${t.to} on ${day(t.at)}`).join("\n");
+  const recalls = o.recalls.length
+    ? "\n\nWHAT THE CHARACTER WHO DID IT SAID WHEN FINISHING (from the town's own records — the best context you have, use it first):\n" + o.recalls.map((r) => `- ${r.key} · ${r.name}, order "${r.title}": ${r.said}`).join("\n")
+    : "\n\n(The town found no finished conversation naming these tickets — build the context from Jira and GitHub.)";
+  return `Catch-up for Maksym's paper notebook. These tickets of his moved forward on Jira between ${day(o.from)} and ${day(o.to)} and have no notebook line yet:\n${lines}${recalls}\n\nFor EACH ticket: read it on Jira (${o.site}/browse/<key> — the Atlassian MCP tools: the issue, its comments), find its pull request (${o.repos.length ? `\`gh pr list --state all --search "<key>" --repo ${o.repos.join(" / ")}\`` : "`gh pr list --state all --search \"<key>\"`"}; read the PR body and skim the diff), then call the \`notebook_line\` tool with that key and ONE sentence in Ukrainian that names the key, says what exactly was done, and what the core technical problem was. He copies each sentence by hand into a paper notebook, so: one plain sentence, no Markdown, under ${SENTENCE_MAX} characters, concrete (what changed for the user or the code, and the real hard part — not "fixed a bug"). One call per ticket; a ticket that already has a line is refused, skip it.\n\nRules: change no code, open no PR, move no ticket, post no comment — this is reading and writing lines only. When every line is written, finish with a short plain report: which lines you wrote and anything you could not find.`;
+}

@@ -515,6 +515,12 @@ export interface NotebookView {
   owed: { key: string; characterId: CharacterId; name: string; since: number }[];
   /** The Jira site, to open a key in the browser ("" when none). */
   site: string;
+  /** Catch-up needs Jira: the town has a project and a token. */
+  canCatchUp: boolean;
+  /** Who can take the catch-up (idle builders). */
+  crew: { id: CharacterId; name: string; available: boolean }[];
+  /** A character is writing the lines for these tickets right now. */
+  catchingUp: { characterId: CharacterId; name: string; since: number; keys: string[] } | null;
 }
 
 /** The whole town as a derived, seq-stamped snapshot (AD-2, AD-4). */
@@ -617,7 +623,9 @@ export type Intent =
   | { type: "handOffPull"; number: number; characterId: CharacterId }
   | { type: "openPull"; number: number }
   // The Notebook: Maksym ticks a line once it is in his paper notebook.
-  | { type: "notebookCopied"; key: string; copied: boolean };
+  | { type: "notebookCopied"; key: string; copied: boolean }
+  // …and asks a character to write the lines for what moved before (days back: 1 today, 2 since yesterday, 7 this week).
+  | { type: "notebookCatchUp"; days: number; characterId: CharacterId };
 
 /** A one-shot sound cue (transient, view-only — like the token stream). */
 export interface SoundCue {

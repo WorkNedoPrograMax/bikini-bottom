@@ -19,7 +19,7 @@ import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, reques
 import { JiraClient } from "./adapters/jira";
 import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, markJiraOnIt, canHandJira, townForTicket, jiraBrief, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
 import { LaneManager, type AdoptionSupport, type NotebookSupport } from "./adapters/lane";
-import { parseNotebook, notePending, addLine, setCopied, stopVerdict, uncopiedCount, sortedEntries, isFresh, EMPTY_NOTEBOOK, type NotebookState } from "./domain/notebook";
+import { parseNotebook, notePending, addLine, setCopied, stopVerdict, uncopiedCount, sortedEntries, isFresh, EMPTY_NOTEBOOK, movedForward, catchUpWindow, jqlDate, recallFor, catchUpBrief, type NotebookState } from "./domain/notebook";
 import { PointerManager } from "./adapters/pointer/manager";
 import { TerminalManager, listClaudeSessions } from "./adapters/terminal";
 import { defaultName, loadProfile, seedProfile, serializeProfile, profilePath, laneAdoption, townTabsFor, type TownProfile, type DeviceSpec } from "./config/townProfile";
@@ -366,17 +366,58 @@ function saveNotebook(townPath: string, st: NotebookState): void {
   try { mkdirSync(path.dirname(notebookFile(townPath)), { recursive: true }); writeFileSync(notebookFile(townPath), JSON.stringify(st, null, 2) + "\n", "utf8"); }
   catch (e) { log("notebook", "not saved", { townPath, error: String(e) }); }
 }
-function notebookViewFor(townPath: string | null): NotebookView | null {
+/** A catch-up in flight per town: who writes the lines for which tickets. */
+const catchUps = new Map<string, { characterId: CharacterId; name: string; since: number; keys: string[] }>();
+function notebookViewFor(townPath: string | null, chars: TownSnapshot["characters"]): NotebookView | null {
   if (!townPath) return null;
   const st = notebookOf(townPath);
   const now = Date.now();
   const nameOf = (id: CharacterId) => ROSTER.find((r) => r.id === id)?.name ?? id;
+  const L = lanesOf(townPath);
+  const cu = catchUps.get(townPath) ?? null;
+  if (cu && !(L?.isWorking(cu.characterId) ?? false)) catchUps.delete(townPath); // finished (or the app restarted mid-way)
+  const crew = chars.filter((x) => !x.isHomeBase && !x.reviewer).map((x) => ({ id: x.id, name: x.name, available: !TERMINAL_IDS.has(x.id) && x.state === "idle" && !(L?.isWorking(x.id) ?? false) }));
   return {
     lines: sortedEntries(st).map((e) => ({ key: e.key, sentence: e.sentence, characterId: e.characterId, name: e.name || nameOf(e.characterId), at: e.at, copied: e.copied, fresh: isFresh(e, now) })),
     uncopied: uncopiedCount(st),
     owed: st.pending.map((p) => ({ key: p.key, characterId: p.characterId, name: nameOf(p.characterId), since: p.at })),
     site: jiraSite(),
+    canCatchUp: !!townJira.get(townPath) && jiraConfigured(),
+    crew,
+    catchingUp: catchUps.get(townPath) ?? null,
   };
+}
+/** The catch-up: find Maksym's tickets that moved forward in the window and
+ *  have no line, remember who owes them, and hand ONE reading job to an idle
+ *  character with what the old lanes said about each. */
+async function catchUpFromTown(townPath: string, days: number, characterId: CharacterId): Promise<void> {
+  const t = towns.get(townPath); const project = townJira.get(townPath);
+  if (!t || characterId === "krabs") return;
+  if (!project || !jiraConfigured()) { toast("The catch-up needs Jira — paste the token on the J page first."); return; }
+  if (REVIEWER_IDS.has(characterId)) { toast("Karen only reviews — pick a builder for the notebook."); return; }
+  if (TERMINAL_IDS.has(characterId)) { toast(`${tgName(characterId)} works in a terminal — pick another character.`); return; }
+  if (t.lanes.isWorking(characterId)) { toast(`${tgName(characterId)} is busy — pick someone idle.`); return; }
+  const cu = catchUps.get(townPath);
+  if (cu && t.lanes.isWorking(cu.characterId)) { toast(`${cu.name} is already catching up.`); return; }
+  if (!jiraClient) jiraClient = new JiraClient(jiraSite(), cfg.data.jiraEmail!, cfg.data.jiraToken!);
+  const w = catchUpWindow(Date.now(), days);
+  let issues: JiraRawIssue[];
+  try { issues = await jiraClient.moved(project, jqlDate(w.from), jqlDate(w.to)); }
+  catch (e: any) { toast(`Jira did not answer: ${String(e?.message || e).slice(0, 120)}`); log("notebook", "catch-up: Jira search failed", { error: String(e) }); return; }
+  const tickets = movedForward(issues, w.from, w.to, notebookOf(townPath));
+  log("notebook", "catch-up: tickets found", { project, days, from: new Date(w.from).toISOString(), searched: issues.length, without: tickets.map((x) => x.key) });
+  if (!tickets.length) { toast(days <= 1 ? "Nothing of yours moved forward today that has no line." : `Nothing of yours moved forward in the last ${days} days that has no line.`); return; }
+  let st = notebookOf(townPath);
+  for (const x of tickets) st = notePending(st, x.key, characterId, Date.now()).state;
+  saveNotebook(townPath, st);
+  const recalls = recallFor(tickets.map((x) => x.key), t.lanes.conversations());
+  const repos = [...new Set([...towns.keys()].filter((p) => townJira.get(p) === project).map((p) => mails.get(p)?.repo).filter((r): r is string => !!r))];
+  const brief = catchUpBrief({ tickets, recalls, site: jiraSite(), repos, from: w.from, to: w.to });
+  log("notebook", "catch-up handed to a character", { characterId, keys: tickets.map((x) => x.key), recalls: recalls.length });
+  if (townPath === currentTownPath) openWindowId = characterId;
+  await t.lanes.startJob(characterId, brief);
+  catchUps.set(townPath, { characterId, name: tgName(characterId), since: Date.now(), keys: tickets.map((x) => x.key) });
+  pushSnapshot();
 }
 function notebookTick(townPath: string, key: string, copied: boolean): void {
   const st = notebookOf(townPath);
@@ -1441,7 +1482,7 @@ function snapshot(): TownSnapshot {
   // The Mailbox (pull requests): runtime state from the town's mail reader.
   base.mail = fx?.mail !== undefined ? fx.mail : mailViewFor(currentTownPath, base.characters);
   base.jira = fx?.jira !== undefined ? fx.jira : jiraViewFor(currentTownPath, base.characters);
-  base.notebook = fx?.notebook !== undefined ? fx.notebook : notebookViewFor(currentTownPath);
+  base.notebook = fx?.notebook !== undefined ? fx.notebook : notebookViewFor(currentTownPath, base.characters);
   return base;
 }
 
@@ -1718,6 +1759,9 @@ async function handleIntent(intent: Intent): Promise<void> {
 
     case "notebookCopied":
       if (currentTownPath) notebookTick(currentTownPath, String(intent.key || ""), !!intent.copied);
+      break;
+    case "notebookCatchUp":
+      if (currentTownPath) await catchUpFromTown(currentTownPath, Number(intent.days) || 2, intent.characterId);
       break;
 
     case "openPull": {

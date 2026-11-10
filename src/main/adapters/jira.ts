@@ -68,6 +68,17 @@ export class JiraClient {
     return { issues, comments };
   }
 
+  /** The Notebook's catch-up: Maksym's tickets whose status changed inside
+   *  the window (local-time JQL dates), with their changelogs — the domain
+   *  picks the forward moves. */
+  async moved(project: string, fromJql: string, toJql: string): Promise<JiraRawIssue[]> {
+    const j = await this.call("POST", "/rest/api/3/search/jql", {
+      jql: `project = ${project} AND (assignee = currentUser() OR assignee WAS currentUser()) AND status CHANGED DURING ("${fromJql}", "${toJql}") ORDER BY updated DESC`,
+      fields: FIELDS, maxResults: 60, expand: "changelog",
+    });
+    return (j?.issues || []) as JiraRawIssue[];
+  }
+
   /** The current column of a ticket. */
   async status(key: string): Promise<string | null> {
     const j = await this.call("GET", `/rest/api/3/issue/${key}?fields=status`, undefined, 20_000);

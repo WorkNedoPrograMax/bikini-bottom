@@ -30,7 +30,7 @@ import { wakeAndroid, wakeIos, sleepAndroid, sleepIos, androidSerial } from "./p
 import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../domain/stayInLane";
 import { reviewOnlyRefusal, postReviewArgs, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } from "../domain/reviewOnly";
 import { execFile } from "node:child_process";
-import { REVIEWER_IDS } from "../config/roster";
+import { REVIEWER_IDS, ROSTER } from "../config/roster";
 import { log, log as appLog } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -1289,6 +1289,19 @@ export class LaneManager {
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
     this.onChange();
+  }
+
+  /** The Notebook's catch-up: every conversation the town holds (archived and
+   *  current, every character) as plain records, so main can find what was
+   *  said when a ticket was finished. Read-only. */
+  conversations(): { characterId: CharacterId; name: string; title: string; messages: ChatMessage[] }[] {
+    const out: { characterId: CharacterId; name: string; title: string; messages: ChatMessage[] }[] = [];
+    for (const [id, l] of this.lanes) {
+      const name = ROSTER.find((r) => r.id === id)?.name ?? id;
+      for (const a of l.archive) out.push({ characterId: id, name, title: a.title || "", messages: a.messages || [] });
+      if (l.conversation.length) out.push({ characterId: id, name, title: l.lastPrompt || "", messages: l.conversation });
+    }
+    return out;
   }
 
   /** The Notebook: read the character's own Jira calls. The moves offered for
