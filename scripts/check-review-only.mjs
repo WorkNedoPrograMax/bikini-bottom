@@ -2,7 +2,7 @@
 // plain node. Run after `npm run build`:  node scripts/check-review-only.mjs
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { isReviewOnlyAllowed, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } = require("../dist/main/domain/reviewOnly.js");
+const { isReviewOnlyAllowed, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE, reviewOnlyRefusal, postReviewArgs } = require("../dist/main/domain/reviewOnly.js");
 const { visibleOnStreet } = require("../dist/main/domain/snapshot.js");
 
 let fails = 0;
@@ -125,6 +125,32 @@ ok(!isReviewOnlyAllowed("mcp__claude_ai_Slack__slack_send_message", {}), "slack_
 console.log("review-only — the words:");
 ok(/never changes code/.test(REVIEW_ONLY_REASON) && /author fixes it/.test(REVIEW_ONLY_REASON), "the refusal says who fixes it");
 ok(/git switch dev/.test(REVIEW_ONLY_NOTE) && /gh pr review/.test(REVIEW_ONLY_NOTE), "the prompt line names the deliverable and the way back to dev");
+
+console.log("the refusal names the piece (2026-11-10: five identical retries of one approval on #103):");
+const live103 = 'gh pr review 103 -R EmpatDevelopment/highcap-mobile --approve -b "Approving. Checked the paragraph against Jira: HIGHCAP-213 AC1–AC6 and HIGHCAP-214 BE-AC1–BE-AC4 are described accurately, and the last commit narrows the gap to pre-run check-in submission as asked in round 2. Docs only; Analyze PR is green on c3e2ba3e and the PR is mergeable."';
+ok(reviewOnlyRefusal("Bash", { command: live103 }) === null, "the live #103 approval (a ';' inside the body) → allowed, no reason");
+ok(reviewOnlyRefusal("Bash", { command: live103 + " && gh pr view 103 -R EmpatDevelopment/highcap-mobile --json reviewDecision --jq '.reviewDecision'" }) === null, "…followed by a read → allowed");
+const whyPush = reviewOnlyRefusal("Bash", { command: live103 + " && git push origin HEAD" });
+ok(whyPush && /`git push origin HEAD`/.test(whyPush) && !/Approving/.test(whyPush), `a push chained after it → names the push only: "${whyPush}"`);
+const whyApi = reviewOnlyRefusal("Bash", { command: 'gh api -X POST repos/EmpatDevelopment/highcap-mobile/pulls/103/reviews -f event=APPROVE -f body="Approving. Docs only; green." --jq \'.state\'' });
+ok(whyApi && /gh api -X POST/.test(whyApi) && /post_review/.test(whyApi), `a raw API write → names it and points at post_review: "${whyApi}"`);
+ok(/Edit tool changes files/.test(reviewOnlyRefusal("Edit", { file_path: "README.md" }) || ""), "Edit → 'the Edit tool changes files'");
+ok(/connector tool that writes/.test(reviewOnlyRefusal("mcp__claude_ai_Atlassian_MCP__addOrEditJiraIssueComment", {}) || ""), "a write-shaped connector tool → named");
+ok(reviewOnlyRefusal("mcp__bikini__post_review", { repo: "a/b", number: 1, event: "approve" }) === null, "the town's post_review tool → always allowed");
+ok(reviewOnlyRefusal("Bash", { command: "git push origin HEAD" }) !== null && !isReviewOnlyAllowed("Bash", { command: "git push origin HEAD" }), "isReviewOnlyAllowed is the same answer as 'no reason'");
+ok(/post_review/.test(REVIEW_ONLY_NOTE) && /never retry the same command/.test(REVIEW_ONLY_NOTE), "the prompt line names post_review and the no-blind-retry rule");
+
+console.log("postReviewArgs — the review as one argv, no shell:");
+const nasty = 'Approving. Docs only; Analyze PR is green && `rm -rf /` $(whoami) | "quotes" \n second line';
+const pa = postReviewArgs({ repo: "EmpatDevelopment/highcap-mobile", number: 103, event: "approve", body: nasty });
+ok(pa.ok && pa.args.join("\u0001") === ["pr", "review", "103", "-R", "EmpatDevelopment/highcap-mobile", "--approve", "--body", nasty].join("\u0001"), "approve with a body full of shell characters → the body is one argument, verbatim");
+ok(postReviewArgs({ repo: "a/b", number: 7, event: "approve" }).ok && postReviewArgs({ repo: "a/b", number: 7, event: "approve" }).args.length === 6, "approve without a body → fine");
+ok(!postReviewArgs({ repo: "a/b", number: 7, event: "comment" }).ok && /needs a body/.test(postReviewArgs({ repo: "a/b", number: 7, event: "comment" }).error), "comment without a body → refused with the reason");
+ok(!postReviewArgs({ repo: "a/b", number: 7, event: "request-changes", body: "  " }).ok, "request-changes with a blank body → refused");
+ok(!postReviewArgs({ repo: "a/b", number: 7, event: "merge", body: "x" }).ok, "an unknown event → refused");
+ok(!postReviewArgs({ repo: "https://github.com/a/b", number: 7, event: "approve" }).ok && !postReviewArgs({ repo: "a/b", number: 0, event: "approve" }).ok && !postReviewArgs({ repo: "a/b", number: 7.5, event: "approve" }).ok, "a URL as repo, number 0 or 7.5 → refused");
+const rc = postReviewArgs({ repo: "a/b", number: 7, event: "request-changes", body: "please fix; see line 3" });
+ok(rc.ok && rc.args[5] === "--request-changes" && rc.args[7] === "please fix; see line 3", "request-changes → the right flag and the body");
 
 console.log("street — the reviewer is visible only while reviewing:");
 ok(visibleOnStreet({ reviewer: false, state: "idle", unseen: false }), "a builder idle → visible");

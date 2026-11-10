@@ -16,7 +16,7 @@ export const REVIEW_ONLY_REASON =
 
 /** The line in her system prompt that states the rule (the hook enforces it). */
 export const REVIEW_ONLY_NOTE =
-  " YOU ONLY REVIEW: you never change code, never commit, never push, never open or merge a pull request, never edit a file — the town refuses all of it, so do not try. Your deliverable is the review posted on GitHub (gh pr review / gh pr comment) and, when needed, asking the reviewer to look again (gh pr edit --add-reviewer). You may fetch, check out the PR's branch in this folder, run what CI runs, and read anything. When you are done, switch this folder back to its main line (`git switch dev`) — it is the shared project folder, not a lane of your own.";
+  " YOU ONLY REVIEW: you never change code, never commit, never push, never open or merge a pull request, never edit a file — the town refuses all of it, so do not try. Your deliverable is the review posted on GitHub: post it with the town's own `post_review` tool (repo, number, approve / comment / request-changes, body) — never with `gh pr review` in the shell, where the words of your review can be mistaken for commands (2026-11-10). When needed, ask the reviewer to look again (gh pr edit --add-reviewer). If the town ever refuses a command, its reason names the exact piece it read as a change: change that piece once; if it is refused again, stop and say so in your report — never retry the same command. You may fetch, check out the PR's branch in this folder, run what CI runs, and read anything. When you are done, switch this folder back to its main line (`git switch dev`) — it is the shared project folder, not a lane of your own.";
 
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "TodoWrite", "NotebookRead", "WebFetch", "WebSearch", "ToolSearch", "Skill"]);
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "EnterWorktree"]);
@@ -168,14 +168,46 @@ function segmentAllowed(seg: string): boolean {
 }
 
 /** True when the tool call may run in a review-only session. */
-export function isReviewOnlyAllowed(toolName: string, toolInput: Record<string, unknown> | null | undefined): boolean {
+/** Why a call is refused — one plain line naming the exact piece the town read as
+ *  a change — or null when it is allowed. The reviewer quotes it instead of
+ *  retrying blindly (2026-11-10: five identical retries of one approval on #103,
+ *  because the refusal only said "she never changes code"). Pure. */
+export function reviewOnlyRefusal(toolName: string, toolInput: Record<string, unknown> | null | undefined): string | null {
   const ti = toolInput ?? {};
-  if (toolName.startsWith("mcp__bikini__")) return true; // ask_maksym, post_status
-  if (WRITE_TOOLS.has(toolName)) return false;
-  if (toolName === "Agent" || toolName === "Task") return ti.isolation !== "worktree"; // a helper's own calls pass through this same hook
-  if (toolName === "Bash") return reviewSegments(String(ti.command ?? "")).every(segmentAllowed);
-  if (READ_TOOLS.has(toolName)) return true;
+  if (toolName.startsWith("mcp__bikini__")) return null; // ask_maksym, post_status, post_review
+  if (WRITE_TOOLS.has(toolName)) return `the ${toolName} tool changes files`;
+  if (toolName === "Agent" || toolName === "Task") return ti.isolation !== "worktree" ? null : "a helper in a worktree of its own would change code"; // a helper's own calls pass through this same hook
+  if (toolName === "Bash") {
+    const bad = reviewSegments(String(ti.command ?? "")).find((s) => !segmentAllowed(s));
+    if (bad === undefined) return null;
+    const flat = bad.trim().replace(/\s+/g, " ");
+    const shown = flat.length > 100 ? flat.slice(0, 100) + "…" : flat;
+    const hint = /^gh\b/.test(flat) ? " — a review is posted with the town's post_review tool, not through the shell" : "";
+    return `the town read \`${shown}\` as a command that changes something${hint}`;
+  }
+  if (READ_TOOLS.has(toolName)) return null;
   // Connector tools: only read-shaped names (get/list/search/read/view…); every write-shaped one is refused.
-  if (toolName.startsWith("mcp__")) return /__(get|list|search|read|fetch|view|find|query|lookup|describe|whoami|discover|executeRead|atlassianUserInfo|getAccessibleAtlassianResources)[A-Za-z_]*$/i.test(toolName);
-  return false;
+  if (toolName.startsWith("mcp__")) return /__(get|list|search|read|fetch|view|find|query|lookup|describe|whoami|discover|executeRead|atlassianUserInfo|getAccessibleAtlassianResources)[A-Za-z_]*$/i.test(toolName) ? null : `${toolName} is a connector tool that writes`;
+  return `the ${toolName} tool is not on the reviewer's list`;
+}
+
+export function isReviewOnlyAllowed(toolName: string, toolInput: Record<string, unknown> | null | undefined): boolean {
+  return reviewOnlyRefusal(toolName, toolInput) === null;
+}
+
+/** The review as `gh` arguments — one argv, no shell, so the body can hold any
+ *  character (`;`, `|`, quotes, newlines) and nothing ever reads it as a command.
+ *  The town's `post_review` tool runs exactly this. Pure. */
+export type ReviewEvent = "approve" | "comment" | "request-changes";
+const REVIEW_FLAG: Record<ReviewEvent, string> = { approve: "--approve", comment: "--comment", "request-changes": "--request-changes" };
+export function postReviewArgs(a: { repo: string; number: number; event: string; body?: string | null }): { ok: true; args: string[] } | { ok: false; error: string } {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(a.repo)) return { ok: false, error: `repo must be owner/name, got "${a.repo}"` };
+  if (!Number.isInteger(a.number) || a.number <= 0) return { ok: false, error: `number must be the PR's number, got ${String(a.number)}` };
+  const flag = REVIEW_FLAG[a.event as ReviewEvent];
+  if (!flag) return { ok: false, error: `event must be approve, comment or request-changes, got "${a.event}"` };
+  const body = String(a.body ?? "").trim();
+  if (!body && a.event !== "approve") return { ok: false, error: `a ${a.event} review needs a body` };
+  const args = ["pr", "review", String(a.number), "-R", a.repo, flag];
+  if (body) args.push("--body", body);
+  return { ok: true, args };
 }

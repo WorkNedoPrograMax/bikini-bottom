@@ -23,7 +23,8 @@ import { runSetup, setupDue, loadReport } from "./laneSetup";
 import { Switchboard, Bedtime, boothStep, phoneMatch, phoneTarget, FORBIDDEN_REASON, LEFT_REASON, DEFAULT_MAX_HOLD_MIN, DEFAULT_SLEEP_AFTER_MIN, type PhoneKey } from "../domain/booth";
 import { wakeAndroid, wakeIos, sleepAndroid, sleepIos, androidSerial } from "./phone";
 import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../domain/stayInLane";
-import { isReviewOnlyAllowed, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } from "../domain/reviewOnly";
+import { reviewOnlyRefusal, postReviewArgs, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } from "../domain/reviewOnly";
+import { execFile } from "node:child_process";
 import { REVIEWER_IDS } from "../config/roster";
 import { log, log as appLog } from "../log";
 
@@ -342,7 +343,14 @@ const READ_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "NotebookRead"];
 // The Phone Booth's two refusals: a command only the town may run on the phone,
 // and a queued phone command whose job ended before its turn came.
 // Karen's refusal: the reviewer never changes code (domain/reviewOnly.ts).
-const DENY_REVIEW_ONLY = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: REVIEW_ONLY_REASON } } as const;
+/** The reviewer's refusal, with the exact piece the town read as a change, so she changes that and never retries the same command. */
+const denyReviewOnly = (why: string) => ({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${REVIEW_ONLY_REASON} Refused because ${why}. Change that piece once; if it is refused again, stop and say so in your report.` } } as const);
+/** `gh <args>` in a folder, no shell: the argv reaches gh verbatim. */
+function runGh(args: string[], cwd: string): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    execFile("gh", args, { cwd, timeout: 60000, maxBuffer: 4 * 1024 * 1024 }, (err: any, stdout, stderr) => resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, out: `${stdout || ""}${stderr || ""}`.trim() }));
+  });
+}
 const DENY_PHONE = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: FORBIDDEN_REASON } } as const;
 const DENY_LEFT = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: LEFT_REASON } } as const;
 // Stay in your lane: a character never makes another worktree (domain/stayInLane.ts).
@@ -1397,7 +1405,8 @@ export class LaneManager {
                 const tool = input.tool_name as string;
                 if (readOnly) return READ_TOOLS.includes(tool) ? ALLOW : DENY_READONLY; // look-only wins over bypass
                 const ti = (input.tool_input || {}) as Record<string, unknown>;
-                if (REVIEWER_IDS.has(id) && !isReviewOnlyAllowed(tool, ti)) return DENY_REVIEW_ONLY; // the reviewer never changes code
+                const why = REVIEWER_IDS.has(id) ? reviewOnlyRefusal(tool, ti) : null; // the reviewer never changes code
+                if (why !== null) return denyReviewOnly(why);
                 if (isStrayWorktree(tool, ti)) return DENY_WORKTREE; // stay in your lane, bypass or not
                 if (this.getBypass()) return ALLOW; // changes-on + bypass → anything goes
                 if (this.isSafe(tool, ti, cwd)) return ALLOW;
@@ -1855,6 +1864,29 @@ export class LaneManager {
             return { content: [{ type: "text", text: `Hung up — the ${name} is free for the others. Carry on.` }] };
           },
         ),
+        // The reviewer's one outward act, as a town tool: the body travels as one
+        // argument to gh, never through a shell, so no word of a review can ever be
+        // read as a command (2026-11-10: an approval with "Docs only; …" in it was
+        // refused five times by the shell guard).
+        tool(
+          "post_review",
+          "Post YOUR REVIEW on a pull request (the reviewer's way — never use `gh pr review` in the shell). Approve, comment, or request changes, with the body you wrote. Returns GitHub's answer.",
+          {
+            repo: z.string().describe("owner/name, e.g. EmpatDevelopment/highcap-mobile"),
+            number: z.number().int().describe("the pull request number"),
+            event: z.enum(["approve", "comment", "request-changes"]).describe("approve · comment · request-changes"),
+            body: z.string().optional().describe("The review text as Maksym would write it (Markdown fine; any characters). Required for comment and request-changes."),
+          },
+          async (args) => {
+            if (!REVIEWER_IDS.has(id)) return { content: [{ type: "text", text: "Only the reviewer posts reviews from the town. Say what you found in your report instead." }] };
+            const built = postReviewArgs(args);
+            if (!built.ok) return { content: [{ type: "text", text: `Not posted — ${built.error}.` }] };
+            const r = await runGh(built.args, this.worktreeDir(id));
+            log("lane", `${id} post_review`, { repo: args.repo, number: args.number, event: args.event, code: r.code, out: r.out.slice(0, 300) });
+            if (r.code !== 0) return { content: [{ type: "text", text: `GitHub did not take it (exit ${r.code}): ${r.out || "no message"}. Fix what it names and post once more; if it fails again, say so in your report.` }] };
+            return { content: [{ type: "text", text: `Posted: ${args.event} on ${args.repo}#${args.number}. ${r.out}`.trim() }] };
+          },
+        ),
       ],
     });
 
@@ -1933,11 +1965,12 @@ export class LaneManager {
                 // it so the question reaches him (even when asking-mode is on).
                 if (toolName.startsWith("mcp__bikini__")) return ALLOW;
                 // The reviewer never changes code — before bypass, before everything.
-                if (REVIEWER_IDS.has(id) && !isReviewOnlyAllowed(toolName, ti)) {
-                  log("lane", `${id} refused (review only)`, { tool: toolName, command: String(ti.command ?? "").slice(0, 600) });
-                  l.conversation.push({ from: "them", text: "The town stopped me there — I only review, I never change anything. I'll say it in the review instead.", tool: true });
+                const why = REVIEWER_IDS.has(id) ? reviewOnlyRefusal(toolName, ti) : null;
+                if (why !== null) {
+                  log("lane", `${id} refused (review only)`, { tool: toolName, why, command: String(ti.command ?? "").slice(0, 600) });
+                  l.conversation.push({ from: "them", text: `The town stopped me there: ${why}. I only review, I never change anything.`, tool: true });
                   this.onChange();
-                  return DENY_REVIEW_ONLY;
+                  return denyReviewOnly(why);
                 }
                 // Stay in your lane — refused even in bypass mode, like the booth.
                 if (isStrayWorktree(toolName, ti)) {

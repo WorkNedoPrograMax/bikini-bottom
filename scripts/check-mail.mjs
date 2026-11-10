@@ -176,6 +176,7 @@ ok(bash("gh pr edit 87 -R o/r --add-reviewer AnnaPinchukO") && bash("gh pr comme
 ok(bash("gh api -X POST repos/o/r/pulls/1/requested_reviewers -f 'reviewers[]=anna'") && bash("gh api repos/o/r/pulls/1/reviews -f event=APPROVE"), "gh api writes (-X POST, -f) → re-read");
 ok(!bash("gh pr view 87 --json mergeable") && !bash("gh api repos/o/r/pulls/87") && !bash("git status") && !bash("gh pr list"), "reads never re-read");
 ok(!touchesGitHub("Read", { file_path: "gh pr review" }) && !touchesGitHub("Bash", null), "only Bash with a command counts");
+ok(touchesGitHub("mcp__bikini__post_review", { repo: "a/b", number: 103, event: "approve" }), "the town's post_review tool is a GitHub write — the paper re-reads after it");
 
 console.log("briefFor — the character's order:");
 const b = briefFor(l102, [th(ANNA, false, "Rename this to miles"), th(ANNA, true, "done")], "EmpatDevelopment/highcap-mobile");

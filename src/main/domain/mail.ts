@@ -252,6 +252,7 @@ export function markOnIt(lines: readonly MailLine[], onIt: ReadonlyMap<number, {
  *  character just posted never shows as still due (Maksym, 2026-11-05). Reads
  *  (`gh pr view`, `gh api` GET) do not count. */
 export function touchesGitHub(toolName: string, input: unknown): boolean {
+  if (toolName === "mcp__bikini__post_review") return true; // the reviewer's review, posted by the town itself (no shell)
   if (toolName !== "Bash" || !input || typeof input !== "object") return false;
   const cmd = String((input as { command?: unknown }).command || "");
   if (/\bgit\s+push\b/.test(cmd)) return true;
