@@ -63,6 +63,9 @@ html, body {
    leftPct 50 / topPct 0 — the base translate(-50%,-50%) is replaced here. */
 .actor.hanging { transform: translate(-50%, -38%); transition: transform .45s cubic-bezier(.22,1.2,.36,1); z-index: 9; }
 .actor.hanging:hover { transform: translate(-50%, 2%); }
+/* While she reviews she is fully down the whole time, not half tucked (Maksym,
+   2026-11-10); tucked-up-with-hover is for when she waits (calling). */
+.actor.hanging.working { transform: translate(-50%, 2%); }
 .actor.hanging .who img { height: clamp(72px, 10vw, 136px); }
 .actor.hanging .who { filter: drop-shadow(0 6px 7px rgba(0,0,0,.55)); }
 /* The cable: from above the top edge down to the screen. */
