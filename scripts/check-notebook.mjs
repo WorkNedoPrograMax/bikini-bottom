@@ -117,5 +117,12 @@ ok(N.isFresh(e1, 1000 + 60_000) && !N.isFresh(e1, 1000 + N.FRESH_MS + 1) && !N.i
 ok(N.sortedEntries({ entries: [{ ...e1, at: 1 }, { ...e1, key: "A-2", at: 9 }], pending: [] })[0].key === "A-2", "newest first");
 ok(N.bubbleText("HIGHCAP-1: рядок.").startsWith("📓 Записав у записник Максима: HIGHCAP-1"), "the chat bubble names the line");
 
+console.log("the paper (renderer.js) keeps the reader's place:");
+const rjs = require("node:fs").readFileSync(new URL("../src/renderer/renderer.js", import.meta.url), "latin1");
+const fn = rjs.slice(rjs.indexOf("function renderNotebookPaper("), rjs.indexOf("function closeNotebook("));
+ok(/if \(old && drawn === notebookDrawn\) return;/.test(fn) && /JSON\.stringify\(\[nb, noteAsk\]\)/.test(fn), "a snapshot that changes nothing in the notebook does not redraw the paper (2026-11-11: it jumped to the top every push)");
+ok(/const keep = old \? old\.scrollTop : 0;/.test(fn) && /paper\.scrollTop = keep;/.test(fn) && fn.indexOf("noteboard.replaceChildren(pad)") < fn.indexOf("paper.scrollTop = keep"), "a redraw puts the scroll back where it was, after the new paper is in the page");
+ok(/function closeNotebook\(\) \{[^\n]*notebookDrawn = null;/.test(rjs), "closing the notebook forgets what was drawn, so the next open draws fresh");
+
 console.log(fails ? `\n${fails} check(s) failed` : "\nall notebook checks passed");
 process.exit(fails ? 1 : 0);
