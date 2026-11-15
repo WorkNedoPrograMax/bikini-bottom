@@ -4,11 +4,13 @@
 // back as "GitHub did not take it (exit 1): no message".
 // Run after `npm run build`:  node scripts/check-gh.mjs
 import { createRequire } from "node:module";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const require = createRequire(import.meta.url);
+import { fileURLToPath } from "node:url";
 const { ghEnv, runGh } = require("../dist/main/adapters/gh.js");
+const dist = fileURLToPath(new URL("../dist/main", import.meta.url));
 
 let fails = 0;
 const ok = (cond, msg) => { if (!cond) { fails++; console.log("  ✗", msg); } else console.log("  ✓", msg); };
@@ -37,10 +39,16 @@ const miss = await runGh(["--version"], empty, { PATH: empty });
 ok(miss.code !== 0, `a missing gh is a failure (exit ${miss.code})`);
 ok(/ENOENT/.test(miss.out), `…and says why instead of nothing: "${miss.out}"`);
 
-console.log("gh — the reviewer's post_review goes through it:");
-const lane = readFileSync(new URL("../dist/main/adapters/lane.js", import.meta.url), "utf8");
-ok(/gh_1\.runGh\)\(/.test(lane), "lane.ts calls the shared runGh");
-ok(!/execFile\)\("gh"/.test(lane), "lane.ts starts no gh of its own");
+console.log("gh — every place the town starts gh uses the shared starter:");
+const lane = readFileSync(join(dist, "adapters/lane.js"), "utf8");
+ok(/gh_1\.runGh\)\(/.test(lane), "the reviewer's post_review calls the shared runGh");
+const starts = /(execFile|execFileSync|spawn|spawnSync|run)\)?\("gh"/;
+const shared = /require\("(\.\/|\.\.\/adapters\/)gh"\)/;
+const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith(".js") ? [join(d, e.name)] : []);
+const starters = walk(dist).filter((f) => f !== join(dist, "adapters/gh.js") && starts.test(readFileSync(f, "utf8")));
+ok(starters.length > 0, `the scan sees the callers (${starters.map((f) => f.slice(dist.length + 1)).join(", ")})`);
+for (const f of starters) ok(shared.test(readFileSync(f, "utf8")), `${f.slice(dist.length + 1)} starts gh through adapters/gh`);
+ok(starts.test('(0, node_child_process_1.execFile)("gh", args)') && starts.test('await run("gh", ["pr"])') && !shared.test('require("node:child_process")'), "the scan itself catches a bare start (compiled and helper shapes)");
 
 process.env.PATH = realPath;
 console.log(fails ? `\n${fails} FAILED` : "\nall green");

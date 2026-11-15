@@ -10,6 +10,7 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { ghEnv } from "./gh";
 
 export interface LaneInfo {
   name: string;
@@ -34,7 +35,7 @@ export interface SrLaneConfig {
 
 function run(cmd: string, args: string[], cwd: string): Promise<{ ok: boolean; out: string }> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { cwd, timeout: 15 * 60_000 }, (err, so, se) =>
+    execFile(cmd, args, { cwd, env: ghEnv(), timeout: 15 * 60_000 }, (err, so, se) =>
       resolve({ ok: !err, out: (so || se || "").toString().trim() })
     );
   });
