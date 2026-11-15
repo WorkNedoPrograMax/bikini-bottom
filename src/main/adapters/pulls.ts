@@ -11,8 +11,9 @@ import { execFile } from "node:child_process";
 import type { GhPull, GhThread } from "../domain/mail";
 import { repoFromRemote } from "../domain/mail";
 import { log } from "../log";
+import { ghEnv } from "./gh";
 
-const ENV = { ...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || "/usr/bin:/bin"}`, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" };
+const ENV = ghEnv();
 
 function run(cmd: string, args: string[], cwd: string | undefined, timeout = 30_000): Promise<{ ok: boolean; out: string; err: string }> {
   return new Promise((resolve) => {

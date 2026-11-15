@@ -29,7 +29,7 @@ import { Switchboard, Bedtime, boothStep, phoneMatch, phoneTarget, FORBIDDEN_REA
 import { wakeAndroid, wakeIos, sleepAndroid, sleepIos, androidSerial } from "./phone";
 import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../domain/stayInLane";
 import { reviewOnlyRefusal, postReviewArgs, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } from "../domain/reviewOnly";
-import { execFile } from "node:child_process";
+import { runGh } from "./gh";
 import { REVIEWER_IDS, ROSTER } from "../config/roster";
 import { log, log as appLog } from "../log";
 
@@ -350,12 +350,6 @@ const READ_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "NotebookRead"];
 // Karen's refusal: the reviewer never changes code (domain/reviewOnly.ts).
 /** The reviewer's refusal, with the exact piece the town read as a change, so she changes that and never retries the same command. */
 const denyReviewOnly = (why: string) => ({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${REVIEW_ONLY_REASON} Refused because ${why}. Change that piece once; if it is refused again, stop and say so in your report.` } } as const);
-/** `gh <args>` in a folder, no shell: the argv reaches gh verbatim. */
-function runGh(args: string[], cwd: string): Promise<{ code: number; out: string }> {
-  return new Promise((resolve) => {
-    execFile("gh", args, { cwd, timeout: 60000, maxBuffer: 4 * 1024 * 1024 }, (err: any, stdout, stderr) => resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, out: `${stdout || ""}${stderr || ""}`.trim() }));
-  });
-}
 const DENY_PHONE = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: FORBIDDEN_REASON } } as const;
 const DENY_LEFT = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: LEFT_REASON } } as const;
 // Stay in your lane: a character never makes another worktree (domain/stayInLane.ts).
