@@ -20,6 +20,8 @@ export interface AppConfigData {
   notificationsWanted: boolean;
   /** Sound muted? (FR-8) Persists across restarts. */
   muted: boolean;
+  /** Calm mode: "auto" (pulses stand still above three working lanes), "on" or "off". */
+  calm: "auto" | "on" | "off";
   /** Bypass permissions — characters never stop to ask (Maksym's preference). */
   bypassPermissions: boolean;
   /** Gate S&R serving: when true, finishing only LOGS the push/PR (fires nothing). */
@@ -44,6 +46,7 @@ const DEFAULTS: AppConfigData = {
   firstRunStep: "welcome",
   notificationsWanted: false,
   muted: false,
+  calm: "auto",
   bypassPermissions: true,
   srDryRun: true,
   telegramToken: null,

@@ -537,6 +537,13 @@ export interface TownSnapshot {
   orders: OrderLine[];
   /** Sound muted? Visual signals are never muted (FR-8). */
   muted: boolean;
+  /** Is anyone looking? "watched" (visible + focused), "glance" (visible, another
+   *  app has the keyboard) or "away" (hidden / minimised / covered). The page
+   *  stands its pulses and its 1 s ticker still unless watched. */
+  watch: "watched" | "glance" | "away";
+  /** Calm mode as set (auto = calm above three working lanes) and whether it is on now. */
+  calmMode: "auto" | "on" | "off";
+  calm: boolean;
   /** Per-Character portrait (file:// URL) for all UI chrome — no emoji (AD-7). */
   faces: Partial<Record<CharacterId, string | null>>;
   /** Claude's usage-limit windows, town-wide (the reserve light's data). */
@@ -599,6 +606,7 @@ export type Intent =
   | { type: "closePreview" }
   | { type: "sendPicks"; characterId: CharacterId; notes: Record<string, string> }
   | { type: "toggleMute" }
+  | { type: "cycleCalm" }
   // The Ferry: switch the street to another town, or add one.
   | { type: "switchTown"; path: string }
   | { type: "addTown" }

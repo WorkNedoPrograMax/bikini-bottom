@@ -29,6 +29,7 @@ import { seedSetup } from "./domain/laneSetup";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
+import { watchState, snapshotGate, calmNow, nextCalm, normalizeCalm, type CalmMode, type WatchState } from "./domain/watch";
 import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type NotebookView, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView, type MailView, type MailLine, type JiraView, type JiraLine } from "../shared/ipc";
 import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
@@ -59,6 +60,7 @@ let terminals: TerminalManager | null = null;
 let openWindowId: CharacterId | null = null;
 let firstRun: FirstRunView | null = null;
 let muted = false;
+let calmMode: CalmMode = "auto";
 // "Point at it" (Orca plan, Job 5): the engine + tray manager, one lane at a time.
 let pointer: PointerManager | null = null;
 // The shown town's adoption table (where each lane's app runs), for the pointer's URL.
@@ -1465,6 +1467,9 @@ function snapshot(): TownSnapshot {
   base.openWindow = buildWindow(base.characters);
   base.orders = (base as any).__fixtureOrders || buildOrders(base.characters);
   base.muted = muted;
+  base.watch = watchNow();
+  base.calmMode = calmMode;
+  base.calm = calmNow(calmMode, [...towns.values()].reduce((n, t) => n + t.lanes.workingCount(), 0));
   // Portraits for all UI chrome (no emoji, AD-7).
   base.faces = {};
   for (const r of ROSTER) base.faces[r.id] = resolveFace(ASSETS_DIR, r.id);
@@ -1516,7 +1521,39 @@ function pushSnapshot(): void {
     const viewingPast = !!(openWindowId && openWindowId !== "krabs" && lanes && lanes.view(openWindowId).viewing);
     pointer.reconcile(firstRun ? null : openWindowId, viewingPast);
   }
-  if (winAlive()) win!.webContents.send(CHANNELS.snapshot, snapshot());
+  if (!winAlive()) return;
+  // Nobody looking → nothing to draw for: held while the window is away, at
+  // most one a second while it is only glanced at. Sounds, toasts and the
+  // phone's pings travel on their own and are never held.
+  const now = Date.now();
+  const gate = snapshotGate(watchNow(), now, snapSentAt);
+  if (!gate.send) {
+    snapHeld = true;
+    if (gate.waitMs !== null && !snapTimer) snapTimer = setTimeout(() => { snapTimer = null; if (snapHeld) pushSnapshot(); }, gate.waitMs);
+    return;
+  }
+  sendSnapshot(now);
+}
+let snapSentAt = 0; let snapHeld = false; let snapTimer: ReturnType<typeof setTimeout> | null = null;
+function sendSnapshot(now: number): void {
+  if (snapTimer) { clearTimeout(snapTimer); snapTimer = null; }
+  snapHeld = false; snapSentAt = now;
+  win!.webContents.send(CHANNELS.snapshot, snapshot());
+}
+/** The window as the "show"/"hide" events last said (macOS fires them on full
+ *  occlusion too — a covered window is not watched either). */
+let winShown = false;
+function watchNow(): WatchState {
+  return watchState({ shown: winShown, minimized: winAlive() && win!.isMinimized(), focused: winAlive() && win!.isFocused() });
+}
+/** Someone started or stopped looking: tell the page at once, whatever was held
+ *  rides along — so the picture is current the moment the window is seen. */
+let lastWatch: WatchState | null = null;
+function onWatchChange(): void {
+  const w = watchNow();
+  if (w === lastWatch || !winAlive()) return;
+  lastWatch = w;
+  sendSnapshot(Date.now());
 }
 
 /** A transient one-liner for the tray (never persisted, like sound cues). */
@@ -2027,6 +2064,12 @@ async function handleIntent(intent: Intent): Promise<void> {
       if (lanes) void lanes.resumePast(intent.characterId, intent.index, intent.prompt);
       break;
 
+    case "cycleCalm":
+      calmMode = nextCalm(calmMode);
+      await cfg.save({ calm: calmMode });
+      pushSnapshot();
+      break;
+
     case "toggleMute":
       muted = !muted;
       await cfg.save({ muted });
@@ -2082,13 +2125,17 @@ async function createWindow(): Promise<void> {
   });
   // When the window is actually destroyed, drop the reference so nothing tries
   // to talk to a dead window (that's the "Object has been destroyed" crash).
-  win.on("closed", () => { pointer?.close(); win = null; });
+  win.on("closed", () => { pointer?.close(); win = null; winShown = false; lastWatch = null; });
   // The pointer's engine is a child view of this window: it must not linger when
   // the window is minimised (it comes back with it). NOT on "hide"/"show": on
   // macOS Electron fires those on OCCLUSION too (another window fully covering
   // ours), which blanked the engine for no reason.
   win.on("minimize", () => pointer?.hideForWindow());
   win.on("restore", () => pointer?.showForWindow());
+  // Is anyone looking? (the pulses stand still and page updates are held when not)
+  win.on("show", () => { winShown = true; onWatchChange(); });
+  win.on("hide", () => { winShown = false; onWatchChange(); });
+  for (const ev of ["focus", "blur", "minimize", "restore"] as const) win.on(ev as "focus", onWatchChange);
 
   await win.loadFile(path.join(__dirname, "../../src/renderer/index.html"));
 }
@@ -2164,6 +2211,7 @@ app.whenReady().then(async () => {
   cfg = new AppConfig(app.getPath("userData"));
   await cfg.load();
   muted = cfg.data.muted;
+  calmMode = normalizeCalm(cfg.data.calm);
   log("app", "config loaded", { projectPath: cfg.data.projectPath, firstRunComplete: cfg.data.firstRunComplete, bypass: cfg.data.bypassPermissions });
 
   if (cfg.data.firstRunComplete && cfg.data.projectPath) {

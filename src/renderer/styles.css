@@ -575,6 +575,21 @@ html, body {
 }
 .topbtn:hover { filter: brightness(1.06); }
 #muteBtn { left: 14px; }
+#calmBtn { left: 66px; font-size: 12px; opacity: .8; }
+#calmBtn.on { opacity: 1; background: #5f9c8f; border-color: #2f5f55; box-shadow: 0 4px 0 #264c44; }
+
+/* --- cheap when not watched (2026-11-18) ---
+   A running animation makes the whole window present 60 times a second (two
+   pulsing dots: ~10% of a core in the app + ~22% in WindowServer, measured).
+   Every endless animation in this file is named in the two lists below —
+   scripts/check-watch.mjs fails the build when one is missing.
+   :root.still — nobody is looking (window hidden, covered, minimised or not
+   focused): the pulses freeze where they are and resume on focus.
+   :root.calm  — calm mode: the pulses are off; the dots stay visible, still.
+   .offscreen  — a character outside the window does not animate. */
+:root.still :is(.actor.idle .who, .dot, .work-strip .work-dot, .topbtn.sign .sign-dot, .mailbox .count, .notebook .count, .notebook.fresh .book) { animation-play-state: paused !important; }
+:root.calm :is(.actor.idle .who, .dot, .work-strip .work-dot, .topbtn.sign .sign-dot, .mailbox .count, .notebook .count, .notebook.fresh .book) { animation: none !important; }
+.actor.offscreen :is(.who, .dot) { animation: none !important; }
 /* The top-right row (the Ferry): reserve light · Orders · the town sign. A flex
    row, so the sign can be as wide as its town's name without overlapping Orders. */
 .topright { position: absolute; top: 14px; right: 14px; z-index: 8; display: flex; gap: 8px; align-items: flex-start; }
