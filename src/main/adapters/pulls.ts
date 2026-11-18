@@ -53,12 +53,14 @@ const PR_NODE = `
     ... on CheckRun { name status conclusion }
     ... on StatusContext { context state }
   } } } } } }
-  reviews(last: 40) { nodes { author { login } state submittedAt } }
+  reviews(last: 40) { nodes { id author { login } state submittedAt } }
+  dismissals: timelineItems(itemTypes: [REVIEW_DISMISSED_EVENT], last: 40) { nodes { ... on ReviewDismissedEvent { previousReviewState review { id } } } }
   reviewRequests(first: 10) { nodes { requestedReviewer { __typename ... on User { login } } } }
   reviewThreads(first: 60) { nodes { isResolved isOutdated
     opening: comments(first: 1) { nodes { id author { login } body path line } }
     tail: comments(last: 4) { nodes { id author { login } body path line } } } }`;
-// One look costs ~20 rate-limit points of GitHub's 5000/hour (measured 2026-11-05;
+// One look costs 38 rate-limit points of GitHub's 5000/hour (measured 2026-11-18,
+// the same with and without the dismissal events; it was ~20 on 2026-11-05;
 // the fuller shape — 50 PRs, 100 threads, 10 comments each — cost 53). The thread's
 // OPENING comment says who asked; its TAIL says who had the last word.
 
@@ -89,19 +91,22 @@ export async function viewPull(repo: string, number: number): Promise<GhPull | n
   try { const n = JSON.parse(r.out)?.data?.repository?.pullRequest; return n ? fromNode(n).pull : null; } catch { return null; }
 }
 
-/** A GraphQL node → the GhPull shape the domain reads (+ its threads). */
-function fromNode(n: any): { pull: GhPull; thr: GhThread[] } {
+/** A GraphQL node → the GhPull shape the domain reads (+ its threads). A
+ *  DISMISSED review gets `was` — the state its dismissal event says it had. */
+export function fromNode(n: any): { pull: GhPull; thr: GhThread[] } {
   const commit = n.commits?.nodes?.[0]?.commit || null;
   const contexts: any[] = commit?.statusCheckRollup?.contexts?.nodes || [];
   const rollup: NonNullable<GhPull["statusCheckRollup"]> = contexts.map((c) => (c.__typename === "StatusContext" ? { state: c.state, context: c.context } : { conclusion: c.conclusion, status: c.status, name: c.name }));
   // No contexts but a rollup state (e.g. a check still queued) → carry the state.
   if (!rollup.length && commit?.statusCheckRollup?.state) rollup.push({ state: commit.statusCheckRollup.state });
+  const was = new Map<string, string>();
+  for (const d of n.dismissals?.nodes || []) if (d?.review?.id && d.previousReviewState) was.set(d.review.id, String(d.previousReviewState));
   const pull: GhPull = {
     number: n.number, title: n.title || "", url: n.url || "", author: { login: n.author?.login || "" }, isDraft: !!n.isDraft,
     headRefName: n.headRefName || "", baseRefName: n.baseRefName || "", createdAt: n.createdAt || "", updatedAt: n.updatedAt || "",
     mergeable: n.mergeable || "UNKNOWN", mergeStateStatus: n.mergeStateStatus || "UNKNOWN",
     statusCheckRollup: rollup,
-    reviews: (n.reviews?.nodes || []).map((r: any) => ({ author: { login: r.author?.login || "" }, state: r.state, submittedAt: r.submittedAt })),
+    reviews: (n.reviews?.nodes || []).map((r: any) => ({ author: { login: r.author?.login || "" }, state: r.state, submittedAt: r.submittedAt, was: r.state === "DISMISSED" ? was.get(r.id) ?? null : null })),
     commits: commit?.committedDate ? [{ committedDate: commit.committedDate }] : [],
     requested: (n.reviewRequests?.nodes || []).map((q: any) => q?.requestedReviewer?.login).filter((x: unknown): x is string => typeof x === "string" && !!x),
   };

@@ -6,6 +6,7 @@
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { mailLineFor, mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, repoFromRemote, checksWord, latestVerdicts, firstName, markOnIt, touchesGitHub, inferOnIt, canTake, handOffStands } = require("../dist/main/domain/mail.js");
+const { fromNode } = require("../dist/main/adapters/pulls.js");
 const { normalizePulls, normalizeProfile } = require("../dist/main/config/townProfile.js");
 
 let fails = 0;
@@ -13,6 +14,8 @@ const ok = (cond, msg) => { if (!cond) { fails++; console.log("  ✗", msg); } e
 const ME = "WorkNedoPrograMax", ANNA = "AnnaPinchukO";
 const pr = (o) => ({ title: "t", url: `https://github.com/EmpatDevelopment/highcap-mobile/pull/${o.number}`, author: { login: ME }, isDraft: false, headRefName: "feature/x", baseRefName: "dev", createdAt: "2026-11-04T07:00:00Z", updatedAt: "2026-11-04T14:00:00Z", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }], reviews: [], commits: [{ committedDate: "2026-11-04T10:00:00Z" }], ...o });
 const rv = (who, state, at) => ({ author: { login: who }, state, submittedAt: at });
+// A review GitHub threw away: its state is rewritten to DISMISSED in place, and `was` is what the dismissal event says it had been.
+const rvd = (who, was, at) => ({ ...rv(who, "DISMISSED", at), was });
 const th = (who, resolved = false, body = "please fix") => ({ isResolved: resolved, comments: [{ author: who, body, path: "lib/a.dart", line: 3 }] });
 
 console.log("checksWord — the checks in one word:");
@@ -25,7 +28,31 @@ console.log("latestVerdicts — the latest verdict per reviewer, the author igno
 const v = latestVerdicts([rv(ME, "CHANGES_REQUESTED", "2026-11-04T07:58:00Z"), rv(ME, "DISMISSED", "2026-11-04T15:23:00Z"), rv(ME, "APPROVED", "2026-11-04T15:51:00Z"), rv(ANNA, "COMMENTED", "2026-11-04T14:00:00Z")], ANNA);
 ok(v.get(ME).verdict === "APPROVED", "CHANGES_REQUESTED → DISMISSED → APPROVED reads APPROVED");
 ok(!v.has(ANNA), "the author's own comments are not a review");
-ok(latestVerdicts([rv(ANNA, "APPROVED", "2026-11-04T10:00:00Z"), rv(ANNA, "DISMISSED", "2026-11-04T11:00:00Z")], ME).get(ANNA).verdict === null, "a DISMISSED approval is no verdict (the repo throws reviews away on push)");
+// 2026-11-18 (Maksym): an approval counts once given — a dismissal does not take it back
+const vd = (reviews) => latestVerdicts(reviews, ME).get(ANNA);
+ok(vd([rvd(ANNA, "APPROVED", "2026-11-04T10:00:00Z")]).verdict === "APPROVED" && vd([rvd(ANNA, "APPROVED", "2026-11-04T10:00:00Z")]).dismissed, "a DISMISSED review that was an approval is still APPROVED (marked dismissed)");
+ok(vd([rv(ANNA, "APPROVED", "2026-11-04T10:00:00Z"), rv(ANNA, "DISMISSED", "2026-11-04T11:00:00Z")]).verdict === "APPROVED", "APPROVED then a DISMISSED of unknown kind keeps the earlier APPROVED");
+ok(vd([rvd(ANNA, "CHANGES_REQUESTED", "2026-11-04T10:00:00Z")]).verdict === null, "a DISMISSED review that was 'changes requested' clears it");
+ok(vd([rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T10:00:00Z"), rv(ANNA, "DISMISSED", "2026-11-04T11:00:00Z")]).verdict === null, "CHANGES_REQUESTED then a DISMISSED of unknown kind clears it, as before");
+ok(vd([rv(ANNA, "DISMISSED", "2026-11-04T11:00:00Z")]).verdict === null, "a lone DISMISSED of unknown kind is no verdict (never invents an approval)");
+ok(vd([rvd(ANNA, "APPROVED", "2026-11-04T10:00:00Z"), rv(ANNA, "COMMENTED", "2026-11-04T12:00:00Z")]).verdict === "APPROVED", "a later comment does not take the kept approval back");
+ok(vd([rvd(ANNA, "APPROVED", "2026-11-04T10:00:00Z"), rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T12:00:00Z")]).verdict === "CHANGES_REQUESTED", "the same reviewer's later CHANGES_REQUESTED does");
+ok(vd([rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T09:00:00Z"), rvd(ANNA, "APPROVED", "2026-11-04T10:00:00Z")]).verdict === "APPROVED" && !vd([rv(ANNA, "APPROVED", "2026-11-04T10:00:00Z")]).dismissed, "changes requested, then an approval later thrown away → APPROVED; a standing approval is not marked dismissed");
+
+console.log("fromNode — GitHub's answer carries what a dismissed review WAS (highcap-mobile #104, recorded 2026-11-18):");
+const n104 = { number: 104, author: { login: ME }, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", baseRefName: "dev", headRefName: "feature/x",
+  commits: { nodes: [{ commit: { committedDate: "2026-11-17T23:15:05Z", statusCheckRollup: { state: "SUCCESS", contexts: { nodes: [{ __typename: "CheckRun", name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }] } } } }] },
+  reviews: { nodes: [{ id: "R_a", author: { login: ANNA }, state: "COMMENTED", submittedAt: "2026-11-13T12:12:17Z" }, { id: "R_b", author: { login: ANNA }, state: "DISMISSED", submittedAt: "2026-11-16T17:40:34Z" }, { id: "R_c", author: { login: ANNA }, state: "COMMENTED", submittedAt: "2026-11-16T17:40:40Z" }] },
+  dismissals: { nodes: [{ previousReviewState: "APPROVED", review: { id: "R_b" } }] },
+  reviewRequests: { nodes: [{ requestedReviewer: { login: ANNA } }] }, reviewThreads: { nodes: [] } };
+const p104 = fromNode(n104).pull;
+ok(p104.reviews[1].was === "APPROVED" && p104.reviews[0].was === null, "the dismissed review gets was=APPROVED from its dismissal event; other reviews get none");
+ok(fromNode({ ...n104, dismissals: { nodes: [] } }).pull.reviews[1].was === null, "no dismissal event → was unknown (null)");
+const l104 = mailLineFor(p104, [], ME);
+ok(l104.word === "almost" && !l104.canMerge && l104.reason.startsWith("Anna approved ✓ · but it collides with dev"), `#104 as recorded: approval thrown away by a push + collision → ALMOST (was: SENT BACK): "${l104.reason}"`);
+const l104b = mailLineFor(fromNode({ ...n104, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }).pull, [], ME);
+ok(l104b.word === "clean-plate" && l104b.canMerge, "#104 once the collision is fixed → CLEAN PLATE with Merge, no new review");
+ok(mergeRefusal(l104b, fromNode({ ...n104, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }).pull) === null, "…and the guard reads the same fresh answer as allowed");
 
 console.log("mailLineFor — my PRs (highcap-mobile, 2026-11-04):");
 // #102: Anna asked for changes, 3 open threads of hers, collides with dev → SENT BACK
@@ -49,7 +76,7 @@ ok(lw.word === "with-reviewer" && !lw.forYou && lw.status === "WAITING", "no rev
 // Anna only commented (no verdict) and left 2 threads → SENT BACK (comments to answer)
 const lc = mailLineFor(pr({ number: 3, reviews: [rv(ANNA, "COMMENTED", "2026-11-04T14:00:00Z")] }), [th(ANNA), th(ANNA)], ME);
 ok(lc.word === "sent-back" && lc.forYou && lc.reason.startsWith("2 comments to answer"), `comments without a verdict → SENT BACK: "${lc.reason}"`);
-// 2026-11-05 #87 for real: Anna's approval dismissed by a push, then she COMMENTED,
+// 2026-11-05 #87: a DISMISSED review of unknown kind (no `was`, no earlier approval), then she COMMENTED,
 // two open threads — each answered by me (last word mine) → WITH ANNA, not for you
 const thA = (last, resolved = false) => ({ isResolved: resolved, isOutdated: true, comments: [{ author: ANNA, body: "Non-blocking. _pairs reads…", path: "lib/a.dart", line: 63 }, { author: last, body: "Fixed in 2de540c", path: "lib/a.dart", line: 63 }] });
 const l87r = mailLineFor(pr({ number: 87, reviews: [rv(ANNA, "DISMISSED", "2026-11-04T14:15:20Z"), rv(ANNA, "COMMENTED", "2026-11-04T14:23:49Z"), rv(ME, "COMMENTED", "2026-11-05T06:00:46Z")], commits: [{ committedDate: "2026-11-04T22:38:27Z" }], requested: [ANNA] }), [thA(ME), thA(ME)], ME);
@@ -88,6 +115,35 @@ ok(lap.word === "almost" && lap.forYou && lap.reason.includes("1 comment still o
 // a collision with no review yet → SENT BACK, "fix it before anyone looks"
 const lx = mailLineFor(pr({ number: 4, mergeable: "CONFLICTING" }), [], ME);
 ok(lx.word === "sent-back" && lx.forYou && lx.reason.includes("collides with dev") && lx.reason.includes("before anyone looks"), `collision, unreviewed → SENT BACK: "${lx.reason}"`);
+// --- 2026-11-18 (Maksym): an approval counts once given and never disappears ---
+const dis = rvd(ANNA, "APPROVED", "2026-11-04T09:00:00Z"); // approved 09:00, thrown away by the 10:00 push
+// approved then pushed (review DISMISSED) → still CLEAN PLATE with the merge button
+const k1 = mailLineFor(pr({ number: 201, reviews: [dis] }), [], ME);
+ok(k1.word === "clean-plate" && k1.forYou && k1.canMerge && k1.status === "CLEAN PLATE", "approved, then pushed (review DISMISSED) → still CLEAN PLATE with Merge");
+ok(k1.reason === "Anna approved ✓ · checks green ✓ · no collisions ✓", `…reason: "${k1.reason}"`);
+const k1s = mailLineFor(pr({ number: 201, reviews: [rv(ANNA, "APPROVED", "2026-11-04T09:00:00Z")], commits: [{ committedDate: "2026-11-04T12:00:00Z" }] }), [], ME);
+ok(k1s.word === "clean-plate" && k1s.canMerge, "a standing approval with a push after it → CLEAN PLATE with Merge (a later push never downgrades)");
+// approved then pushed with a conflict → ALMOST, then the button comes back when the conflict clears
+const k2 = mailLineFor(pr({ number: 202, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", reviews: [dis] }), [], ME);
+ok(k2.word === "almost" && !k2.canMerge && k2.canHandOff && k2.reason.startsWith("Anna approved ✓ · but it collides with dev"), `approved, pushed, colliding → ALMOST, no Merge: "${k2.reason}"`);
+const k2b = mailLineFor(pr({ number: 202, reviews: [dis], commits: [{ committedDate: "2026-11-04T13:00:00Z" }] }), [], ME);
+ok(k2b.word === "clean-plate" && k2b.canMerge, "…the conflict fixed and pushed, no new review → CLEAN PLATE, Merge is back");
+// approved then pushed, checks running → ALMOST; green → button back; red → ALMOST
+const k3 = mailLineFor(pr({ number: 203, statusCheckRollup: [{ status: "IN_PROGRESS" }], reviews: [dis] }), [], ME);
+ok(k3.word === "almost" && !k3.canMerge && k3.reason.includes("checks still running"), `approved, pushed, checks running → ALMOST: "${k3.reason}"`);
+ok(mailLineFor(pr({ number: 203, reviews: [dis] }), [], ME).canMerge, "…checks green → Merge is back by itself");
+const k3r = mailLineFor(pr({ number: 203, statusCheckRollup: [{ conclusion: "FAILURE" }], reviews: [dis] }), [], ME);
+ok(k3r.word === "almost" && !k3r.canMerge && k3r.reason.includes("checks red"), "approved, pushed, checks red → ALMOST, no Merge");
+ok(mailLineFor(pr({ number: 203, statusCheckRollup: [], reviews: [dis] }), [], ME).canMerge, "a repo with no checks: not red → Merge");
+// approved, then the SAME reviewer requests changes → SENT BACK
+const k4 = mailLineFor(pr({ number: 204, reviews: [dis, rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T11:00:00Z")] }), [], ME);
+ok(k4.word === "sent-back" && !k4.canMerge && k4.reason.startsWith("Anna asked for changes"), `approved, then the same reviewer asks for changes → SENT BACK: "${k4.reason}"`);
+// two reviewers: one approved, one requested changes → SENT BACK
+const k5 = mailLineFor(pr({ number: 205, reviews: [dis, rv("mbr-cloud", "CHANGES_REQUESTED", "2026-11-04T09:30:00Z")] }), [], ME);
+ok(k5.word === "sent-back" && !k5.canMerge && k5.reason.startsWith("mbr-cloud asked for changes"), `one approved, another asked for changes → SENT BACK: "${k5.reason}"`);
+// unchanged: an open thread still blocks an approved PR
+const k6 = mailLineFor(pr({ number: 206, reviews: [dis] }), [thA(ME)], ME);
+ok(k6.word === "almost" && !k6.canMerge && k6.reason.includes("1 comment still open"), "a kept approval with an open thread → ALMOST (threads still block, unchanged)");
 // my draft → DRAFT, not for you
 const ld = mailLineFor(pr({ number: 5, isDraft: true }), [], ME);
 ok(ld.word === "draft" && !ld.forYou && !ld.canMerge && !ld.canHandOff, "a draft → DRAFT, nothing to do");
@@ -103,9 +159,13 @@ ok(l96.word === "theirs" && l96.forYou && l96.reason.includes("9 of your comment
 // she pushed after my approval → LOOK AGAIN
 const la = mailLineFor(pr({ number: 7, author: { login: ANNA }, reviews: [rv(ME, "APPROVED", "2026-11-04T10:00:00Z")], commits: [{ committedDate: "2026-11-04T12:00:00Z" }] }), [], ME);
 ok(la.word === "look-again" && la.forYou && la.canHandOff, "a push after my review → LOOK AGAIN");
-// my review got dismissed by her push → LOOK AGAIN too
+// my review got dismissed by her push → LOOK AGAIN too (teammates' PRs are unchanged by the 2026-11-18 rule)
 const lb = mailLineFor(pr({ number: 8, author: { login: ANNA }, reviews: [rv(ME, "APPROVED", "2026-11-04T10:00:00Z"), rv(ME, "DISMISSED", "2026-11-04T12:00:00Z")], commits: [{ committedDate: "2026-11-04T09:00:00Z" }] }), [], ME);
 ok(lb.word === "look-again" && lb.forYou, "my review dismissed → LOOK AGAIN");
+const lb2 = mailLineFor(pr({ number: 8, author: { login: ANNA }, reviews: [rvd(ME, "APPROVED", "2026-11-04T10:00:00Z")], commits: [{ committedDate: "2026-11-04T09:00:00Z" }] }), [], ME);
+ok(lb2.word === "look-again" && lb2.forYou && !lb2.canMerge, "hers: my approval thrown away (as GitHub really sends it) → still LOOK AGAIN");
+const lt2 = mailLineFor(pr({ number: 9, author: { login: ANNA }, reviews: [rvd("mbr-cloud", "APPROVED", "2026-11-04T10:00:00Z")] }), [], ME);
+ok(lt2.word === "your-turn" && lt2.reason === "Anna's · waiting for your review", `hers: someone's thrown-away approval is not "approved already": "${lt2.reason}"`);
 // never reviewed by me → YOUR TURN
 const lt = mailLineFor(pr({ number: 9, author: { login: ANNA }, reviews: [rv("mbr-cloud", "APPROVED", "2026-11-04T10:00:00Z")] }), [], ME);
 ok(lt.word === "your-turn" && lt.forYou && lt.canHandOff && !lt.canMerge, "never reviewed by me → YOUR TURN (no Merge button on hers)");
@@ -130,7 +190,13 @@ ok(mergeRefusal(null, null) !== null, "a line that is gone refuses");
 ok(mergeRefusal(l94, pr({ number: 94, author: { login: ANNA } })).includes("Anna's"), "a teammate's PR refuses (hers to merge)");
 ok(mergeRefusal(l87b, null) !== null, "no fresh answer from GitHub refuses");
 ok(mergeRefusal(l87b, pr({ number: 87, mergeable: "CONFLICTING", reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z")] })).includes("collides"), "a collision that appeared since refuses");
-ok(mergeRefusal(l87b, pr({ number: 87, reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z"), rv(ANNA, "DISMISSED", "2026-11-04T16:00:00Z")] })).includes("no approval"), "an approval dismissed since refuses");
+ok(mergeRefusal(l87b, pr({ number: 87, reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z"), rv(ANNA, "DISMISSED", "2026-11-04T16:00:00Z")] })) === null, "an approval dismissed since → still allowed (2026-11-18: an approval counts once given)");
+ok(mergeRefusal(k1, pr({ number: 201, reviews: [dis] })) === null, "the paper's CLEAN PLATE after a dismissal passes the guard on the same answer");
+ok(mergeRefusal(k1, pr({ number: 201, mergeable: "CONFLICTING", reviews: [dis] })).includes("collides"), "a kept approval + a collision refuses");
+ok(mergeRefusal(k1, pr({ number: 201, statusCheckRollup: [{ conclusion: "FAILURE" }], reviews: [dis] })).includes("red"), "a kept approval + red checks refuses");
+ok(mergeRefusal(k1, pr({ number: 201, reviews: [dis, rv(ANNA, "CHANGES_REQUESTED", "2026-11-04T11:00:00Z")] })).includes("changes requested"), "the same reviewer asked for changes since → refuses");
+ok(mergeRefusal(k1, pr({ number: 201, reviews: [dis, rv("mbr-cloud", "CHANGES_REQUESTED", "2026-11-04T11:00:00Z")] })).includes("changes requested"), "another reviewer asked for changes since → refuses");
+ok(mergeRefusal(k1, pr({ number: 201, reviews: [rvd(ANNA, "CHANGES_REQUESTED", "2026-11-04T09:00:00Z")] })).includes("no approval"), "a dismissed 'changes requested' is not an approval → refuses");
 ok(mergeRefusal(l87b, pr({ number: 87, statusCheckRollup: [{ status: "IN_PROGRESS" }], reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z")] })).includes("still running"), "checks running refuses");
 ok(mergeRefusal(l87b, pr({ number: 87, mergeStateStatus: "BLOCKED", reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z")] })).includes("blocked"), "BLOCKED on GitHub (open threads) refuses");
 ok(mergeRefusal(l87b, pr({ number: 87, reviews: [rv(ANNA, "APPROVED", "2026-11-04T14:15:00Z")] })) === null, "own PR, approved, green, clean → allowed");

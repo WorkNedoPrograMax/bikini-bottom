@@ -7,6 +7,13 @@
 // approvals it comes back "" even after an APPROVED (highcap-mobile #87,
 // 2026-11-04). The words are derived from the latest review per person, the
 // last push time, the open comment threads and the collision state.
+//
+// An approval of MY PR counts once given (Maksym, 2026-11-18): a later push, a
+// conflict fix, a base merge or GitHub marking the review DISMISSED does not
+// take it back — only that same reviewer's own later CHANGES_REQUESTED does.
+// GitHub rewrites a thrown-away review in place (state DISMISSED, same
+// submittedAt; measured 2026-11-18 on highcap-mobile #104), so what it WAS
+// comes from the PR's dismissal events and rides on the review as `was`.
 
 import type { MailLine, MailWord, CharacterId } from "../../shared/ipc";
 
@@ -26,7 +33,9 @@ export interface GhPull {
   /** "CLEAN" | "BLOCKED" | "DIRTY" | "UNSTABLE" | "BEHIND" | "UNKNOWN" | … */
   mergeStateStatus: string;
   statusCheckRollup?: { conclusion?: string | null; state?: string | null; status?: string | null; name?: string; context?: string }[] | null;
-  reviews?: { author: { login: string }; state: string; submittedAt: string }[] | null;
+  /** `was`: for a DISMISSED review, the state it had before it was thrown away
+   *  ("APPROVED" | "CHANGES_REQUESTED"), when GitHub's dismissal event says so. */
+  reviews?: { author: { login: string }; state: string; submittedAt: string; was?: string | null }[] | null;
   commits?: { committedDate: string }[] | null;
   /** Logins with a review request PENDING right now (cleared when they review). */
   requested?: string[] | null;
@@ -55,20 +64,34 @@ export function checksWord(rollup: GhPull["statusCheckRollup"]): ChecksWord {
   return pending ? "pending" : "green";
 }
 
-/** Each reviewer's LATEST verdict (APPROVED | CHANGES_REQUESTED), with a
- *  DISMISSED one counting as no verdict (the repo throws reviews away on push).
+export interface Verdict {
+  verdict: "APPROVED" | "CHANGES_REQUESTED" | null;
+  lookedAt: number;
+  /** The APPROVED above was thrown away by GitHub (a push) and is kept by the
+   *  2026-11-18 rule. It counts on my PRs; on a teammate's PR it still means
+   *  "look again". */
+  dismissed: boolean;
+}
+
+/** Each reviewer's LATEST verdict (APPROVED | CHANGES_REQUESTED). A DISMISSED
+ *  review that was an approval KEEPS the approval (marked `dismissed`); one
+ *  that was "changes requested" clears it. When GitHub does not say what the
+ *  dismissed review was, the reviewer's earlier verdict decides the same way.
  *  COMMENTED reviews carry no verdict but still mark that the person looked. */
-export function latestVerdicts(reviews: GhPull["reviews"], author: string): Map<string, { verdict: "APPROVED" | "CHANGES_REQUESTED" | null; lookedAt: number }> {
-  const out = new Map<string, { verdict: "APPROVED" | "CHANGES_REQUESTED" | null; lookedAt: number }>();
+export function latestVerdicts(reviews: GhPull["reviews"], author: string): Map<string, Verdict> {
+  const out = new Map<string, Verdict>();
   for (const r of (reviews || []).slice().sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt))) {
     const who = r.author?.login;
     if (!who || who === author) continue;
-    const prev = out.get(who) || { verdict: null, lookedAt: 0 };
-    const at = Date.parse(r.submittedAt) || 0;
+    const prev = out.get(who) || { verdict: null, lookedAt: 0, dismissed: false };
+    const lookedAt = Math.max(prev.lookedAt, Date.parse(r.submittedAt) || 0);
     const s = String(r.state || "").toUpperCase();
-    if (s === "APPROVED" || s === "CHANGES_REQUESTED") out.set(who, { verdict: s, lookedAt: Math.max(prev.lookedAt, at) });
-    else if (s === "DISMISSED") out.set(who, { verdict: null, lookedAt: Math.max(prev.lookedAt, at) });
-    else out.set(who, { verdict: prev.verdict, lookedAt: Math.max(prev.lookedAt, at) }); // COMMENTED / PENDING
+    if (s === "APPROVED" || s === "CHANGES_REQUESTED") out.set(who, { verdict: s, lookedAt, dismissed: false });
+    else if (s === "DISMISSED") {
+      const was = String(r.was || "").toUpperCase();
+      const approval = was ? was === "APPROVED" : prev.verdict === "APPROVED";
+      out.set(who, { verdict: approval ? "APPROVED" : null, lookedAt, dismissed: approval });
+    } else out.set(who, { ...prev, lookedAt }); // COMMENTED / PENDING
   }
   return out;
 }
@@ -125,7 +148,9 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
   const conflicts = pr.mergeable === "CONFLICTING";
   const verdicts = latestVerdicts(pr.reviews, author);
   const pushedAt = lastPushAt(pr);
-  const approvedBy = [...verdicts].filter(([, v]) => v.verdict === "APPROVED").map(([who]) => who);
+  // On my PR an approval counts once given, thrown away by a push or not; on a
+  // teammate's PR a thrown-away approval is not "approved already".
+  const approvedBy = [...verdicts].filter(([, v]) => v.verdict === "APPROVED" && (mine || !v.dismissed)).map(([who]) => who);
   const changesBy = [...verdicts].filter(([, v]) => v.verdict === "CHANGES_REQUESTED").map(([who]) => who);
   const names = (list: string[]) => list.map(firstName).join(" and ");
   const since = Math.max(0, Date.parse(pr.updatedAt) || Date.parse(pr.createdAt) || 0);
@@ -184,7 +209,7 @@ export function mailLineFor(pr: GhPull, threads: GhThread[], me: string): MailLi
       word = "your-turn"; forYou = true; canHandOff = true;
       const others = approvedBy.filter((w) => w !== me);
       reason = `${firstName(author)}'s · waiting for your review` + (others.length ? ` · ${names(others)} approved already` : "");
-    } else if (pushedSince || my.verdict === null) {
+    } else if (pushedSince || my.verdict === null || my.dismissed) {
       word = "look-again"; forYou = true; canHandOff = true;
       reason = `${firstName(author)} pushed since you looked — your old review no longer counts`;
     } else if (my.verdict === "APPROVED") {
@@ -282,7 +307,10 @@ export function newPings(lines: readonly MailLine[], already: ReadonlySet<string
 }
 
 /** The guard before a merge from the town: Maksym's own PR, on a clean plate,
- *  as GitHub says RIGHT NOW. Returns the one-line reason it must not merge, or null. */
+ *  as GitHub says RIGHT NOW. Returns the one-line reason it must not merge, or null.
+ *  The approval is read by the same rule as the paper (latestVerdicts): one
+ *  thrown away by a push still counts, so the guard never refuses for a
+ *  dismissal what the paper shows as mergeable. */
 export function mergeRefusal(line: MailLine | null, fresh: GhPull | null): string | null {
   if (!line) return "that PR isn't on the paper anymore";
   if (!line.mine) return `#${line.number} is ${firstName(line.author)}'s — hers to merge`;
@@ -292,8 +320,8 @@ export function mergeRefusal(line: MailLine | null, fresh: GhPull | null): strin
   if (checksWord(fresh.statusCheckRollup) === "red") return `#${line.number}'s checks are red`;
   if (checksWord(fresh.statusCheckRollup) === "pending") return `#${line.number}'s checks are still running`;
   const v = latestVerdicts(fresh.reviews, fresh.author?.login || "");
-  if (![...v.values()].some((x) => x.verdict === "APPROVED")) return `#${line.number} has no approval right now`;
   if ([...v.values()].some((x) => x.verdict === "CHANGES_REQUESTED")) return `#${line.number} has changes requested`;
+  if (![...v.values()].some((x) => x.verdict === "APPROVED")) return `#${line.number} has no approval yet`;
   if (String(fresh.mergeStateStatus).toUpperCase() === "BLOCKED") return `#${line.number} is blocked on GitHub (open comments?)`;
   if (String(fresh.mergeStateStatus).toUpperCase() === "DIRTY") return `#${line.number} collides with ${fresh.baseRefName} now`;
   return null;
