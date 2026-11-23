@@ -30,6 +30,8 @@ import { wakeAndroid, wakeIos, sleepAndroid, sleepIos, androidSerial } from "./p
 import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../domain/stayInLane";
 import { reviewOnlyRefusal, postReviewArgs, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } from "../domain/reviewOnly";
 import { runGh } from "./gh";
+import { laneSettings } from "../domain/laneConnectors";
+import { handoverVerdict, handoverMessage, compactDue, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, type Handover } from "../domain/handover";
 import { REVIEWER_IDS, ROSTER } from "../config/roster";
 import { log, log as appLog } from "../log";
 
@@ -51,31 +53,13 @@ process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = process.env.CLAUDE_CODE_STREAM_CL
 // on and our PreToolUse hook is the gate regardless.)
 const SETTING_SOURCES: ("user" | "project" | "local")[] = ["user", "project", "local"];
 
-// Tools a character never gets. The blanket "mcp__claude_ai_*" block tried here
-// on 2026-09-29 (155k→445k tokens saved by cutting every claude.ai connector,
-// 204→99 tools) also silently killed Jira/Confluence access in every lane with
-// no visibility into why — removed 2026-09-30 (Maksym's call). If the token
-// cost needs cutting again, do it per-connector, not with a wildcard that also
-// eats connectors nobody's decided to cut yet.
 // Settings overlay for every character session (the SDK's `settings` option →
-// the CLI's --settings JSON; merges on top of user/project/local).
-//
-// deniedMcpServers "claude.ai Figma": the account has an UNAUTHORIZED claude.ai
-// Figma connector that points at the same URL as the signed-in Figma plugin
-// server (plugin:figma:figma, token valid for months). Claude Code's dedup is
-// supposed to let the plugin win, but in non-interactive sessions (SDK lanes
-// and `claude -p` alike, CLI 2.1.285 / SDK 0.3.207) its debug log shows BOTH
-// sides suppressed at the same instant — the plugin server connects with tools
-// that never reach the tool index, and the connector "needs authorization" —
-// so a character has no Figma at all ("why can't you view Figma?", 2026-09-30).
-// Blocking the connector's tools with disallowedTools does NOT stop the dedup
-// (measured); denying the connector by name does: the plugin's tools then show
-// up in ToolSearch (get_screenshot found, $0.11 test). Interactive terminals
-// are unaffected either way. Remove this line once the connector is either
-// authorized or deleted at claude.ai/customize/connectors.
-const LANE_SETTINGS = JSON.stringify({
-  deniedMcpServers: [{ serverName: "claude.ai Figma" }],
-});
+// the CLI's --settings JSON; merges on top of user/project/local). It carries
+// the list of claude.ai connectors a lane does not load — by name, never a
+// wildcard; the list and the reasons live in domain/laneConnectors.ts.
+// (Blocking a connector's tools with disallowedTools does not stop it being
+// offered — measured 2026-09-30 on the Figma twin; denying the server by name does.)
+const LANE_SETTINGS = laneSettings();
 
 const LANE_DISALLOWED_TOOLS = [
   "mcp__playwright-ext",  // the user's browser extension — never reachable from a headless lane
@@ -393,6 +377,10 @@ interface PersistedLane {
     /** The question (or permission ask) the character was waiting on when this
      *  was saved — so a relaunch knows he was mid-job, not done (2026-11-06). */
     pendingQuestion?: string | null;
+    /** A stage hand-over written but not yet used (domain/handover.ts): the next
+     *  message opens a fresh session with it — also after a relaunch. */
+    handover?: Handover | null;
+    handovers?: number;
   };
 }
 
@@ -409,6 +397,10 @@ interface Lane {
   resumedSession: boolean; // did THIS session open with a cold resume (vs warm)?
   turnsThisSession: number; // turns answered since this session opened (1 = first)
   lastCallCtx: number;      // context size of the LATEST single model call (input+cache read+cache write) — the true "memory" size
+  // Fresh session per stage (domain/handover.ts): the hand-over the character
+  // wrote with `stage_done`, waiting for the turn to end; and how many this order made.
+  handover: Handover | null;
+  handovers: number;
   // Live streaming session (terminal-style): one persistent query fed by `pump`.
   pump: Pump | null;
   sdkQuery: any | null;         // the running query() — for interrupt()
@@ -811,7 +803,7 @@ export class LaneManager {
           conversation: l.conversation, sessionId: l.sessionId, lastPrompt: l.lastPrompt,
           baseSha: l.baseSha, servedTip: l.servedTip, served: l.served, sentBack: l.sentBack,
           taskStartedAt: l.taskStartedAt, taskTokens: l.taskTokens, stats: l.stats, limitedUntil: l.limitedUntil,
-          note: l.note, noteAt: l.noteAt,
+          note: l.note, noteAt: l.noteAt, handover: l.handover, handovers: l.handovers,
           pendingQuestion: l.pending?.question ?? (l.pendingChoice ? l.pendingChoice.ask.questions.map((q) => q.question).join(" · ") : null),
         },
       };
@@ -829,6 +821,7 @@ export class LaneManager {
         sessionId: cur?.sessionId ?? null, lastPrompt: cur?.lastPrompt ?? null,
         abort: null, cancelled: false, superseded: false,
         resumedSession: false, turnsThisSession: 0, lastCallCtx: 0,
+        handover: cur?.handover ?? null, handovers: cur?.handovers ?? 0,
         pump: null, sdkQuery: null, outstanding: 0, awaitingIdle: false, awaitSince: 0, idleAt: 0, helperFinishedAt: 0, idleTimer: null, jiraMoves: new Map(),
         activity: null, todos: [], taskStartedAt: cur?.taskStartedAt ?? 0, taskTokens: cur?.taskTokens ?? 0, beatAt: 0, lastBeatPush: 0, sessionLoop: null,
         pending: null, pendingChoice: null, watchdog: null, agents: new Map(), notified: new Set(),
@@ -1009,6 +1002,7 @@ export class LaneManager {
     l.todos = []; l.taskStartedAt = Date.now(); l.taskTokens = 0; // fresh job → fresh plan/timer/spend
     l.stats = { ...EMPTY_JOB_STATS }; l.phase = null; l.phaseSince = 0; l.nudged = false; l.lastAskAnsweredAt = 0;
     l.note = null; l.noteAt = 0; // a fresh order starts with a clean chalk line
+    l.handover = null; l.handovers = 0; // …and owes nothing to the last order's stages
     this.clearLimit(l); // a new order never inherits an old limit hold
     // Remember the main-line commit this Job builds on (for landing/undo, AD-5).
     try { l.baseSha = await headSha(this.projectPath); } catch { l.baseSha = null; }
@@ -1143,6 +1137,19 @@ export class LaneManager {
    *  only ever ONE session per character, so messages queue/inject in order. */
   private async send(id: CharacterId, text: string, fresh: boolean, attachments?: Attachment[]): Promise<void> {
     const l = this.lane(id);
+    // Idle = between messages: not mid-turn and not in the quiet wait after one.
+    const busy = l.working || l.awaitingIdle;
+    if (l.handover) {
+      // A finished stage left a hand-over. Idle → this message opens the fresh
+      // session. Busy → the message joins the running turn, which makes the
+      // hand-over stale (it was written before this exchange): drop it; the
+      // character calls stage_done again when the stage really ends.
+      if (!busy) return this.startNextStage(id, text, attachments);
+      log("handover", `${id} hand-over dropped — a message arrived mid-turn`, { stage: l.handover.stage });
+      l.handover = null;
+    }
+    // A big session that carries on is compacted first — only ever between messages.
+    const compact = !fresh && compactDue({ ctx: l.lastCallCtx || l.stats.ctxTokens || 0, busy, continuing: !!l.sessionId, handoverPending: false });
     if (!l.pump || l.pump.closed()) {
       // No live session → open one. Resume the prior session unless this is a
       // brand-new job (fresh), so context carries across follow-ups and restarts.
@@ -1171,6 +1178,13 @@ export class LaneManager {
     // (referenced by path so the character opens them with its tools — works for
     // ANY file type: PDFs, logs, CSVs, code, etc.).
     const { blocks, textSuffix } = await this.prepareAttachments(id, attachments);
+    if (compact) {
+      const ctx = l.lastCallCtx || l.stats.ctxTokens || 0;
+      log("handover", `${id} compacting before the next message`, { ctx });
+      l.conversation.push({ from: "them", text: `🧹 My memory for this order had grown to ${Math.round(ctx / 1000)}k tokens — tidying it into a summary first, so the next steps are cheaper. Nothing is lost.`, tool: true });
+      l.pump.push(COMPACT_COMMAND);
+      l.outstanding++; // the compaction answers with a result of its own
+    }
     l.pump.push(text + textSuffix, blocks);
     this.armWatchdog(id);
     // AWAIT the state event before pushing a snapshot — the event log persists
@@ -1179,6 +1193,24 @@ export class LaneManager {
     // working). Awaiting keeps the street icon in sync with the session.
     await this.log.append({ type: "CharacterStateChanged", id, state: "working" });
     this.onChange();
+  }
+
+  /** A stage ended with a hand-over → close that session and open a fresh one
+   *  whose first message is the hand-over (plus whatever Maksym just said).
+   *  Called only between messages: from the turn's own result, or from send()
+   *  when the character is idle. The order, its chat and its meter carry on. */
+  private async startNextStage(id: CharacterId, said?: string, attachments?: Attachment[]): Promise<void> {
+    const l = this.lane(id);
+    const h = l.handover;
+    if (!h) return;
+    l.handover = null; l.handovers++;
+    const before = l.lastCallCtx || l.stats.ctxTokens || 0;
+    this.endSession(l);
+    l.sessionId = null; l.lastCallCtx = 0; l.stats.ctxTokens = 0; l.nudged = false;
+    l.conversation.push({ from: "them", text: `📒 The ${h.stage} stage is done — starting the next one with a clean memory (was ${Math.round(before / 1000)}k tokens). Next: ${h.next}`, tool: true });
+    log("handover", `${id} fresh session after ${h.stage}`, { ctxBefore: before, handovers: l.handovers, chars: h.text.length, withMessage: !!said });
+    this.persist();
+    await this.send(id, handoverMessage(h, l.lastPrompt, said), true, attachments);
   }
 
   /** Prepare a message's attachments: images become inline vision blocks (the
@@ -1257,6 +1289,7 @@ export class LaneManager {
     this.leaveBooth(id); // scrapped → off the phone, out of the queue
     void this.parkReviewer(id);
     l.note = null; l.noteAt = 0; // nothing to report about a scrapped order
+    l.handover = null; // …and no stage to hand over
     l.conversation.push({ from: "them", text: "Scrapped. That order's off the books." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -1401,6 +1434,7 @@ export class LaneManager {
     l.archive.splice(index, 1);
     l.conversation = sess.messages;
     l.sessionId = sess.sdkSessionId;
+    l.handover = null; // a hand-over belongs to the order it was written in
     l.lastPrompt = prompt;
     l.viewing = null; l.burned = false; l.paused = false;
     l.note = null; l.noteAt = 0; // a promoted old order must not carry a stale chalk line
@@ -1913,6 +1947,26 @@ export class LaneManager {
             return { content: [{ type: "text", text: "Posted. Carry on." }] };
           },
         ),
+        // Fresh session per stage (domain/handover.ts): the character says a stage
+        // is finished and writes the hand-over; the switch happens at the turn's end.
+        tool(
+          "stage_done",
+          "Say that a ticket stage (plan, build, review or ship) is FINISHED and hand over to a fresh session. Call it once the stage's gate is passed and nothing of it is still running, BEFORE starting the next stage; then end your turn with one line. The next session sees only your hand-over and the files, so write it for someone who remembers nothing. Never call it mid-stage.",
+          {
+            stage: z.enum(["plan", "build", "review", "ship"]).describe("The stage that just finished."),
+            next: z.string().describe("One line: what the fresh session starts with, e.g. 'run /implement for HIGHCAP-123 on branch feat/HIGHCAP-123-x'."),
+            handover: z.string().describe("The hand-over, 200–6000 characters: ticket and branch; what this stage decided and produced (paths, not contents); Maksym's answers; what is still open; anything the next stage must not redo."),
+          },
+          async (args) => {
+            if (REVIEWER_IDS.has(id)) return { content: [{ type: "text", text: "Reviews are one short job — no hand-over needed. Carry on." }] };
+            const v = handoverVerdict(args, { ctx: l.lastCallCtx || l.stats.ctxTokens || 0, helpers: l.agents.size, done: l.handovers, now: Date.now() });
+            if (!v.ok) { log("handover", `${id} stage_done not taken`, { stage: args.stage, reply: v.reply.slice(0, 60) }); return { content: [{ type: "text", text: v.reply }] }; }
+            l.handover = v.handover;
+            log("handover", `${id} stage_done`, { stage: v.handover.stage, next: v.handover.next.slice(0, 80), chars: v.handover.text.length });
+            this.persist();
+            return { content: [{ type: "text", text: HANDOVER_SAVED_REPLY }] };
+          },
+        ),
         tool(
           "phone_done",
           "Hang up the test phone: call this the moment you no longer need a phone (your install → run → flow → screenshot is finished), so the next character in line can test. Nothing is lost — your next phone command simply takes a phone again (iPhone first, else Android, else the line). Not needed when your job ends; the town hangs up for you then.",
@@ -2013,6 +2067,7 @@ export class LaneManager {
               + serverNote
               + phoneNote
               + STAY_IN_LANE_NOTE
+              + (REVIEWER_IDS.has(id) ? "" : STAGE_NOTE)
               + (this.notebook && !REVIEWER_IDS.has(id) ? NOTEBOOK_NOTE : "")
               + (REVIEWER_IDS.has(id) ? REVIEW_ONLY_NOTE : "")
               + setupNote(l.setupReport),
@@ -2200,6 +2255,14 @@ export class LaneManager {
         if (mtype === "system" && msub === "thinking_tokens") {
           l.activity = "thinking…";
           if (l.beatAt - l.lastBeatPush > 1500) { l.lastBeatPush = l.beatAt; this.onChange(); }
+        }
+        if (mtype === "system" && msub === "compact_boundary" && l.pump === pump) {
+          // The session was compacted (ours before a message, or the engine's
+          // own): its memory is now the summary, so the size we act on drops too.
+          const meta = ((msg as any).compact_metadata || {}) as Record<string, any>;
+          const post = Number(meta.post_tokens) || 0;
+          log("handover", `${id} compacted`, { trigger: meta.trigger, pre: meta.pre_tokens, post });
+          l.lastCallCtx = post; l.stats.ctxTokens = post;
         }
         if (mtype === "rate_limit_event") {
           // Subscription usage-limit status from the CLI. "rejected" = the turn
@@ -2434,6 +2497,15 @@ export class LaneManager {
           await this.flushPictures(l);
           this.maybeNudge(id, ctx);
           this.persist(); // save progress (survives restart)
+          // The stage ended with a hand-over and nothing else is queued or
+          // running → this session is finished; the next stage starts fresh,
+          // by itself, with no bell in between. (Anything still outstanding
+          // keeps this session; the hand-over then waits for the next idle
+          // message — see send().)
+          if (l.handover && l.pump === pump && l.outstanding === 0 && l.agents.size === 0) {
+            void this.startNextStage(id);
+            return;
+          }
           // If more messages appear outstanding OR helpers are still running,
           // HOLD (stay working, Cancel active) but arm the quiet-timer so silence
           // releases us. CRITICAL: `outstanding` is unreliable — the model can

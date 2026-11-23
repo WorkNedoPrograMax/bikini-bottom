@@ -8,6 +8,19 @@
 // any cache_control breakpoint (the sub-agent case), we add one so the big stable
 // prefix (system + tools) gets cached like it does in the terminal. Requests that
 // already have cache_control (the main session) pass through untouched.
+//
+// WHERE THE CACHE LIFETIME IS DECIDED (measured 2026-11-23, engine 2.1.289) — not
+// here. The engine now marks its own requests: the main session with the 1-hour
+// lifetime, helpers with 5 minutes. Over 2026-11-09..23 the lanes' records show
+// 75.0M cache-write tokens at 1 hour (all main-session) and 189.7M at 5 minutes
+// (all helpers), while this proxy added markers to only 3–26 requests a day on
+// 2026-11-14..23 (the "added cache markers" lines in bikini.log). So the marker below stays the
+// plain 5-minute one: it only reaches the few requests the engine leaves bare,
+// and nothing measured says those are ever read again after a pause.
+// A helper type that IS called back after a pause opts in to 1 hour in its own
+// agent file (`experimental: { cacheTtl: 1h }`); making every helper 1 hour
+// would have cost more than it saved on those two weeks (a 1-hour write is
+// billed 2x, a 5-minute one 1.25x, and most helpers run once and never pause).
 
 import http from "node:http";
 import https from "node:https";
