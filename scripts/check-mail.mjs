@@ -252,7 +252,8 @@ ok(b.includes("Open review comments (1)") && b.includes("Rename this to miles") 
 ok(b.includes("collision") , "the collision with dev is a task");
 const br = briefFor(lt, [], "EmpatDevelopment/highcap-mobile");
 ok(br.includes("my turn to review") && br.includes(`gh pr review ${lt.number} -R EmpatDevelopment/highcap-mobile --approve`) && br.includes("Never save a draft anywhere"), "a teammate's PR: read, then POST the verdict on GitHub — no drafts (Maksym 2026-11-05)");
-ok(br.includes("call ask_maksym ONCE") && br.includes('"Approve", "Approve with notes", "Request changes", "Just comment (no verdict)"') && br.includes("POST exactly what I picked"), "the review ends as a QUESTION with the four verdict buttons, then posts the pick (Maksym 2026-11-05)");
+ok(br.includes("call ask_maksym ONCE") && br.includes('exactly two options, "Approve" and "Request changes"') && !br.includes('"Approve with notes"') && !br.includes("Just comment") && !br.includes("--comment") && br.includes("POST exactly what I picked"), "the review ends as a QUESTION with two verdict buttons — approve or request changes, never approve with notes — then posts the pick (Maksym 2026-11-05; two verdicts 2026-11-19)");
+ok(br.includes("never for tests that do not cover every case") && br.includes("genuinely bad for the real user") && !br.includes("as notes"), "request changes only for a real problem; coverage gaps, wording and taste are left out of the review (Maksym 2026-11-19)");
 ok(br.includes("NEVER a reason to request changes") && br.includes("needs a rebase"), "a collision with the base alone → approve, say it needs a rebase");
 
 console.log("repoFromRemote / firstName / profile pulls:");
