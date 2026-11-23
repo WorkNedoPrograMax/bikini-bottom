@@ -17,7 +17,8 @@ const ok = (cond, msg) => { if (!cond) { fails++; console.log("  ✗", msg); } e
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 const until = async (cond, ms = 5000) => { const t0 = Date.now(); while (!cond() && Date.now() - t0 < ms) await tick(); return cond(); };
 const fakeLog = () => { const events = []; return { events, append: async (e) => { events.push(e); }, all: () => events }; };
-const readSaved = (dir) => { const f = join(dir, ".bikini", "sessions.json"); return existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : null; };
+// A read can land in the middle of a save (the file is half-written) → not there yet; `until` asks again.
+const readSaved = (dir) => { const f = join(dir, ".bikini", "sessions.json"); try { return existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : null; } catch { return null; } };
 const town = () => { const dir = mkdtempSync(join(tmpdir(), "bikini-handover-")); mkdirSync(join(dir, ".bikini")); return dir; };
 /** A manager whose sessions never reach Claude: runSession is a no-op, so what
  *  send() pushed stays readable in the pump. */
@@ -46,6 +47,16 @@ ok(H.handoverVerdict(good, st({ done: H.MAX_HANDOVERS_PER_ORDER })).ok === false
   ok(m.includes(LONG) && m.includes("Do HIGHCAP-123") && m.includes("NEXT: run /implement") && m.includes("also rename the tab"), "the fresh session's first message carries the order, the hand-over, the next step and what Maksym just said");
   ok(/Carry on with NEXT now/.test(H.handoverMessage({ stage: "plan", next: "n", text: LONG, at: 1 }, null)), "with nothing said, it is told to carry on");
 }
+
+console.log("model per stage — the strong one to plan and review, the cheaper one to build and ship:");
+ok(H.stageModelKind(null) === "think" && H.stageModelKind("plan") === "think" && H.stageModelKind("review") === "think", "a new order, plan and review think");
+ok(H.stageModelKind("build") === "routine" && H.stageModelKind("ship") === "routine", "build and ship are routine");
+ok(H.nextStage("plan") === "build" && H.nextStage("build") === "review" && H.nextStage("review") === "ship" && H.nextStage("ship") === null, "plan → build → review → ship → (unknown)");
+ok(H.handoverVerdict(good, st({ ctx: 20_000, model: "think" })).ok === true, "plan done on a small session is still taken: build moves to the cheaper model");
+ok(/still small/.test(H.handoverVerdict({ ...good, stage: "build" }, st({ ctx: 20_000, model: "think" })).reply), "build done in a session that was thinking anyway (review thinks too) → small session carries on");
+ok(H.handoverVerdict({ ...good, stage: "build" }, st({ ctx: 20_000, model: "routine" })).ok === true, "build done in a routine session → review gets the strong model at any size");
+ok(/still running/.test(H.handoverVerdict(good, st({ ctx: 20_000, model: "think", helpers: 1 })).reply), "…but never while a helper is still running");
+ok(/sonnet/.test(H.STAGE_NOTE) && /opus/.test(H.STAGE_NOTE), "builders are told which model a look-up helper and a judging helper get");
 
 console.log("compact — only between messages, only for a big session that carries on:");
 const cd = (o) => H.compactDue({ ctx: 250_000, busy: false, continuing: true, handoverPending: false, ...o });
@@ -76,6 +87,12 @@ console.log("lane — a hand-over waits for the turn to end, then the next messa
   ok(first.length === 1 && String(first[0]).includes(LONG) && String(first[0]).includes("MAKSYM JUST SAID:\ngo on"), "its first and only message is the hand-over plus what Maksym said — no /compact");
   ok(l.sessionId === null && l.handover === null && l.handovers === 1 && l.lastCallCtx === 0, "the lane forgot the old session id and size; one hand-over counted");
   ok(l.working === true, "he is shown working (no bell between the stages)");
+  ok(l.stage === "build" && l.conversation.some((m) => /on Sonnet/.test(m.text)), "the new session is the build stage, and the chat says it runs on Sonnet");
+  lm.persist();
+  ok(await until(() => readSaved(dir)?.bob?.current?.stage === "build"), "the stage is saved, so a relaunch resumes it on the same model");
+  ok(manager(dir).lane("bob").stage === "build", "…and a new town process reads it back");
+  await lm.scrap("bob");
+  ok(l.stage === null, "a scrapped order forgets its stage (the next one starts on the strong model)");
   ok(l.conversation.some((m) => /plan stage is done/.test(m.text)), "the chat says the stage ended and a clean one began");
 }
 

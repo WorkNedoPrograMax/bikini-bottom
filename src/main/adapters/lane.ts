@@ -31,7 +31,7 @@ import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../do
 import { reviewOnlyRefusal, postReviewArgs, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } from "../domain/reviewOnly";
 import { runGh } from "./gh";
 import { laneSettings } from "../domain/laneConnectors";
-import { handoverVerdict, handoverMessage, compactDue, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, type Handover } from "../domain/handover";
+import { handoverVerdict, handoverMessage, compactDue, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, stageModelKind, nextStage, type Handover, type Stage } from "../domain/handover";
 import { REVIEWER_IDS, ROSTER } from "../config/roster";
 import { log, log as appLog } from "../log";
 
@@ -95,6 +95,14 @@ const LANE_DISALLOWED_TOOLS = [
 // "claude-sonnet-5-5" — nothing else needs to change. Measured 2026-09-30:
 // `claude -p --model claude-opus-5-5` on CLI 2.1.285 answers on that model.
 const MODEL = "claude-opus-5-5";
+// 2026-11-23 (Maksym: "Opus only when we need it — planning and decisions —
+// Sonnet for everything routine", for all lanes): a builder's session runs on
+// MODEL while it plans or reviews and on ROUTINE_MODEL while it builds or ships
+// (domain/handover.ts stageModelKind). The model only ever changes at a stage
+// hand-over, where the session is fresh anyway — never inside a session, which
+// would re-write its whole cache. Reviewer lanes and a new order stay on MODEL.
+const ROUTINE_MODEL = "claude-sonnet-5-5";
+const modelForStage = (stage: Stage | null | undefined): string => (stageModelKind(stage) === "routine" ? ROUTINE_MODEL : MODEL);
 
 // HOW THE CHARACTERS TALK TO MAKSYM (2026-10-05, his ask: "too mechanical …
 // more personal, friendly, emotional, reads my emotion, more human and funny,
@@ -381,6 +389,8 @@ interface PersistedLane {
      *  message opens a fresh session with it — also after a relaunch. */
     handover?: Handover | null;
     handovers?: number;
+    /** The stage the current session works on (null = not known → the strong model). */
+    stage?: Stage | null;
   };
 }
 
@@ -401,6 +411,7 @@ interface Lane {
   // wrote with `stage_done`, waiting for the turn to end; and how many this order made.
   handover: Handover | null;
   handovers: number;
+  stage: Stage | null;      // the stage this session works on; picks its model (modelForStage)
   // Live streaming session (terminal-style): one persistent query fed by `pump`.
   pump: Pump | null;
   sdkQuery: any | null;         // the running query() — for interrupt()
@@ -803,7 +814,7 @@ export class LaneManager {
           conversation: l.conversation, sessionId: l.sessionId, lastPrompt: l.lastPrompt,
           baseSha: l.baseSha, servedTip: l.servedTip, served: l.served, sentBack: l.sentBack,
           taskStartedAt: l.taskStartedAt, taskTokens: l.taskTokens, stats: l.stats, limitedUntil: l.limitedUntil,
-          note: l.note, noteAt: l.noteAt, handover: l.handover, handovers: l.handovers,
+          note: l.note, noteAt: l.noteAt, handover: l.handover, handovers: l.handovers, stage: l.stage,
           pendingQuestion: l.pending?.question ?? (l.pendingChoice ? l.pendingChoice.ask.questions.map((q) => q.question).join(" · ") : null),
         },
       };
@@ -821,7 +832,7 @@ export class LaneManager {
         sessionId: cur?.sessionId ?? null, lastPrompt: cur?.lastPrompt ?? null,
         abort: null, cancelled: false, superseded: false,
         resumedSession: false, turnsThisSession: 0, lastCallCtx: 0,
-        handover: cur?.handover ?? null, handovers: cur?.handovers ?? 0,
+        handover: cur?.handover ?? null, handovers: cur?.handovers ?? 0, stage: cur?.stage ?? null,
         pump: null, sdkQuery: null, outstanding: 0, awaitingIdle: false, awaitSince: 0, idleAt: 0, helperFinishedAt: 0, idleTimer: null, jiraMoves: new Map(),
         activity: null, todos: [], taskStartedAt: cur?.taskStartedAt ?? 0, taskTokens: cur?.taskTokens ?? 0, beatAt: 0, lastBeatPush: 0, sessionLoop: null,
         pending: null, pendingChoice: null, watchdog: null, agents: new Map(), notified: new Set(),
@@ -1002,7 +1013,7 @@ export class LaneManager {
     l.todos = []; l.taskStartedAt = Date.now(); l.taskTokens = 0; // fresh job → fresh plan/timer/spend
     l.stats = { ...EMPTY_JOB_STATS }; l.phase = null; l.phaseSince = 0; l.nudged = false; l.lastAskAnsweredAt = 0;
     l.note = null; l.noteAt = 0; // a fresh order starts with a clean chalk line
-    l.handover = null; l.handovers = 0; // …and owes nothing to the last order's stages
+    l.handover = null; l.handovers = 0; l.stage = null; // …and owes nothing to the last order's stages
     this.clearLimit(l); // a new order never inherits an old limit hold
     // Remember the main-line commit this Job builds on (for landing/undo, AD-5).
     try { l.baseSha = await headSha(this.projectPath); } catch { l.baseSha = null; }
@@ -1207,8 +1218,10 @@ export class LaneManager {
     const before = l.lastCallCtx || l.stats.ctxTokens || 0;
     this.endSession(l);
     l.sessionId = null; l.lastCallCtx = 0; l.stats.ctxTokens = 0; l.nudged = false;
-    l.conversation.push({ from: "them", text: `📒 The ${h.stage} stage is done — starting the next one with a clean memory (was ${Math.round(before / 1000)}k tokens). Next: ${h.next}`, tool: true });
-    log("handover", `${id} fresh session after ${h.stage}`, { ctxBefore: before, handovers: l.handovers, chars: h.text.length, withMessage: !!said });
+    l.stage = nextStage(h.stage);
+    const on = stageModelKind(l.stage) === "routine" ? "Sonnet (routine work)" : "Opus (decisions)";
+    l.conversation.push({ from: "them", text: `📒 The ${h.stage} stage is done — starting the next one with a clean memory (was ${Math.round(before / 1000)}k tokens), on ${on}. Next: ${h.next}`, tool: true });
+    log("handover", `${id} fresh session after ${h.stage}`, { stage: l.stage, model: modelForStage(l.stage), ctxBefore: before, handovers: l.handovers, chars: h.text.length, withMessage: !!said });
     this.persist();
     await this.send(id, handoverMessage(h, l.lastPrompt, said), true, attachments);
   }
@@ -1289,7 +1302,7 @@ export class LaneManager {
     this.leaveBooth(id); // scrapped → off the phone, out of the queue
     void this.parkReviewer(id);
     l.note = null; l.noteAt = 0; // nothing to report about a scrapped order
-    l.handover = null; // …and no stage to hand over
+    l.handover = null; l.stage = null; // …and no stage to hand over
     l.conversation.push({ from: "them", text: "Scrapped. That order's off the books." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -1434,7 +1447,7 @@ export class LaneManager {
     l.archive.splice(index, 1);
     l.conversation = sess.messages;
     l.sessionId = sess.sdkSessionId;
-    l.handover = null; // a hand-over belongs to the order it was written in
+    l.handover = null; l.stage = null; // a hand-over belongs to the order it was written in
     l.lastPrompt = prompt;
     l.viewing = null; l.burned = false; l.paused = false;
     l.note = null; l.noteAt = 0; // a promoted old order must not carry a stale chalk line
@@ -1959,7 +1972,7 @@ export class LaneManager {
           },
           async (args) => {
             if (REVIEWER_IDS.has(id)) return { content: [{ type: "text", text: "Reviews are one short job — no hand-over needed. Carry on." }] };
-            const v = handoverVerdict(args, { ctx: l.lastCallCtx || l.stats.ctxTokens || 0, helpers: l.agents.size, done: l.handovers, now: Date.now() });
+            const v = handoverVerdict(args, { ctx: l.lastCallCtx || l.stats.ctxTokens || 0, helpers: l.agents.size, done: l.handovers, now: Date.now(), model: stageModelKind(l.stage) });
             if (!v.ok) { log("handover", `${id} stage_done not taken`, { stage: args.stage, reply: v.reply.slice(0, 60) }); return { content: [{ type: "text", text: v.reply }] }; }
             l.handover = v.handover;
             log("handover", `${id} stage_done`, { stage: v.handover.stage, next: v.handover.next.slice(0, 80), chars: v.handover.text.length });
@@ -2051,7 +2064,7 @@ export class LaneManager {
         prompt: pump.iter,
         options: {
           cwd,
-          model: MODEL,
+          model: modelForStage(l.stage),
           effort: EFFORT,
           maxTurns: 179, // check-in cadence, NOT a kill switch — hitting it PAUSES and asks "keep cooking?" (resumes where it left off). ~179 steps between check-ins on a big job; bounds unattended spend without nagging.
           abortController: l.abort,
