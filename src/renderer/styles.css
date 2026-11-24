@@ -577,6 +577,9 @@ html, body {
 #muteBtn { left: 14px; }
 #calmBtn { left: 66px; font-size: 12px; opacity: .8; }
 #calmBtn.on { opacity: 1; background: #5f9c8f; border-color: #2f5f55; box-shadow: 0 4px 0 #264c44; }
+/* "Wake everyone": shown only while someone waits for a go. No animation — it must not cost a frame. */
+#wakeBtn { left: 160px; font-size: 13px; background: #d9a72b; border-color: #8a6410; box-shadow: 0 4px 0 #6b4d0c; white-space: nowrap; }
+#wakeBtn.trying { opacity: .75; cursor: default; }
 
 /* --- cheap when not watched (2026-11-18) ---
    A running animation makes the whole window present 60 times a second (two

@@ -455,6 +455,7 @@ interface Lane {
   limitedUntil: number;         // epoch ms Claude's usage limit resets (0 = not limited)
   limitTimer: ReturnType<typeof setTimeout> | null; // auto-resume when the limit resets
   limitSeen: { resetsAt: number; text: string } | null; // a limit signal seen during the current turn
+  spoke: boolean;               // Claude answered this turn (text that is not the limit message, or a tool call) — the wake scout's proof
   // Chalk line (Job 2): ONE sentence in the character's own words about where it
   // is, posted via `post_status`. Shown under its name on the street.
   note: string | null;
@@ -841,7 +842,7 @@ export class LaneManager {
         archive: saved?.archive ?? [], viewing: null, viewReadOnly: true, askingPast: false,
         stats: { ...EMPTY_JOB_STATS, ...(cur?.stats ?? {}) }, phase: null, phaseSince: 0,
         lastAskAnsweredAt: 0, nudged: false,
-        limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null,
+        limitedUntil: cur?.limitedUntil ?? 0, limitTimer: null, limitSeen: null, spoke: false,
         note: cur?.note ?? null, noteAt: cur?.noteAt ?? 0,
         booth: null, phone: null, phoneLost: null, setupReport: null,
         turnStartedAt: Date.now(), shownPictures: new Set(), pictureEvidence: newEvidence(),
@@ -886,6 +887,8 @@ export class LaneManager {
   lastPromptFor(id: CharacterId): string | null { return this.lane(id).lastPrompt; }
   isBurned(id: CharacterId): boolean { return this.lane(id).burned; }
   isPaused(id: CharacterId): boolean { return this.lane(id).paused; }
+  /** Did Claude answer in the current turn? (the wake scout's proof that the limit is off) */
+  spoke(id: CharacterId): boolean { return this.lane(id).spoke; }
   // A pending question/permission only counts while there's a LIVE session
   // behind it (l.pump). A leftover pending with no session is stale — it can't be
   // answered into a dead session — so treat it as gone, or it shows a phantom
@@ -1039,6 +1042,7 @@ export class LaneManager {
    *  prompt from scratch). */
   async retry(id: CharacterId): Promise<void> {
     const l = this.lane(id);
+    l.spoke = false; // before send() gets to it — a wake scout is read from the next tick on
     // Waiting out Claude's usage limit and Maksym presses Try again anyway? His
     // call — the reset clock can be conservative. Drop the hold and try; if the
     // limit is still on, the turn ends with the limit error and we park again
@@ -1175,6 +1179,7 @@ export class LaneManager {
     l.outstanding++;
     l.working = true; l.burned = false; l.paused = false; l.cancelled = false; l.awaitingIdle = false;
     l.limitSeen = null; // a fresh turn starts with a clean slate (no stale limit flag from an old turn)
+    l.spoke = false;
     this.setPhase(l, "working");
     if (l.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = null; }
     // Reset the heartbeat to NOW so the "working" strip counts from THIS message,
@@ -2394,8 +2399,10 @@ export class LaneManager {
               // text before the error result — read the reset clock from it.
               const lim = parseLimitText(block.text);
               if (lim) l.limitSeen = { resetsAt: l.limitSeen?.resetsAt || lim.resetsAt, text: lim.text };
+              else l.spoke = true;
               log("lane", `${id} said`, block.text.replace(/\s+/g, " ").slice(0, 120));
             } else if (block.type === "tool_use") {
+              l.spoke = true;
               // Whatever this call names (a screenshot path, the deliverables
               // folder) is this lane's claim on the pictures that follow.
               noteEvidence(l.pictureEvidence, (block as any).input);

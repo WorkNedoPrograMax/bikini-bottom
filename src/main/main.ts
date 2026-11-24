@@ -30,6 +30,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
 import { watchState, snapshotGate, calmNow, nextCalm, normalizeCalm, type CalmMode, type WatchState } from "./domain/watch";
+import { stuckLanes, wakePlan, scoutVerdict, wakeSign, type LaneNow, type Stuck } from "./domain/wake";
 import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type NotebookView, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView, type MailView, type MailLine, type JiraView, type JiraLine } from "../shared/ipc";
 import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
@@ -1022,6 +1023,76 @@ const tgTownAt = (idx: string | undefined): string => (idx ? cfg.data.towns[Numb
 const tgData = (action: string, id: CharacterId, extra: string | number | undefined, townPath: string): string => `${action}:${id}:${extra ?? ""}:${tgTownIdx(townPath)}`;
 const lanesOf = (townPath: string): LaneManager | null => towns.get(townPath)?.lanes ?? null;
 const curTown = (): string => currentTownPath ?? "";
+
+// ---- Wake everyone (2026-11-24) -------------------------------------------
+// One press — the top-bar button, the Telegram button or /wake — carries on
+// every character that only needs a go, in every town (domain/wake.ts says who
+// that is). Check-ins go at once. Limit holds go one first: the scout. The rest
+// follow only when Claude answered the scout; when the limit is still on they
+// stay parked, so a press on a still-limited account costs one re-read, not seven.
+let wakeRun: { scout: Stuck; wait: Stuck[]; since: number } | null = null;
+let wakeTimer: ReturnType<typeof setInterval> | null = null;
+function stuckNow(): Stuck[] {
+  const all: LaneNow[] = [];
+  for (const t of towns.values()) for (const r of ROSTER) {
+    if (r.isHomeBase || TERMINAL_IDS.has(r.id)) continue;
+    const L = t.lanes;
+    all.push({ town: t.path, id: r.id, working: L.isWorking(r.id), paused: L.isPaused(r.id), burned: L.isBurned(r.id), asking: L.hasPendingChoice(r.id) || L.hasPendingAsk(r.id), limitedUntil: L.limitedUntil(r.id) });
+  }
+  return stuckLanes(all);
+}
+const wakeWho = (s: Stuck): string => tgName(s.id as CharacterId) + tgTown(s.town);
+const wakeGo = (s: Stuck): void => { void towns.get(s.town)?.lanes.retry(s.id as CharacterId); };
+const sameLane = (a: Stuck, b: Stuck): boolean => a.town === b.town && a.id === b.id;
+function wakeEnd(): void {
+  wakeRun = null;
+  if (wakeTimer) { clearInterval(wakeTimer); wakeTimer = null; }
+  pushSnapshot();
+}
+/** Returns one plain sentence about what the press did (Telegram says it). */
+function wakeAll(from: "button" | "telegram"): string {
+  if (wakeRun) return `Already trying ${wakeWho(wakeRun.scout)} first — the rest follow if it gets through.`;
+  const plan = wakePlan(stuckNow());
+  log("wake", "wake everyone", { from, go: plan.go.map(wakeWho), scout: plan.scout ? wakeWho(plan.scout) : null, wait: plan.wait.map(wakeWho) });
+  for (const s of plan.go) wakeGo(s);
+  if (plan.scout) {
+    wakeRun = { scout: plan.scout, wait: plan.wait, since: Date.now() };
+    wakeGo(plan.scout);
+    wakeTimer = setInterval(wakeTick, 2000);
+  }
+  pushSnapshot();
+  const said: string[] = [];
+  if (plan.go.length) said.push(`${plan.go.length} kept cooking (${plan.go.map(wakeWho).join(", ")})`);
+  if (plan.scout) said.push(`trying ${wakeWho(plan.scout)} on Claude's limit first${plan.wait.length ? ` — ${plan.wait.length} more follow if it gets through` : ""}`);
+  return said.length ? `⏰ ${said.join("; ")}.` : "Nobody is waiting for a go right now.";
+}
+function wakeTick(): void {
+  const run = wakeRun;
+  if (!run) { wakeEnd(); return; }
+  const L = towns.get(run.scout.town)?.lanes ?? null;
+  const id = run.scout.id as CharacterId;
+  const verdict = L ? scoutVerdict({ working: L.isWorking(id), limitedUntil: L.limitedUntil(id), spoke: L.spoke(id) }, Date.now() - run.since) : "gone";
+  if (verdict === "waiting") return;
+  // Only those still parked on the limit: one may have been scrapped, answered
+  // or resumed by hand while the scout was out.
+  const now = stuckNow().filter((s) => s.kind === "limit");
+  const rest = run.wait.filter((w) => now.some((s) => sameLane(s, w)));
+  log("wake", `scout ${wakeWho(run.scout)} → ${verdict}`, { rest: rest.map(wakeWho) });
+  if (verdict === "through") {
+    for (const s of rest) wakeGo(s);
+    void tg?.send(`✅ ${tgEsc(wakeWho(run.scout))} got through — Claude's limit is off.${rest.length ? ` Woke ${rest.length} more: ${tgEsc(rest.map(wakeWho).join(", "))}.` : ""}`);
+    wakeEnd();
+  } else if (verdict === "still") {
+    void tg?.send(`⏳ Claude's limit is still on — ${tgEsc(wakeWho(run.scout))} is parked again until ${tgEsc(fmtClock(L!.limitedUntil(id)))}.${rest.length ? ` ${rest.length} other${rest.length === 1 ? " stays" : "s stay"} parked and pick up by themselves when their hold ends.` : ""}`);
+    wakeEnd();
+  } else {
+    const next = rest[0];
+    if (!next) { wakeEnd(); return; }
+    wakeRun = { scout: next, wait: rest.slice(1), since: Date.now() };
+    wakeGo(next);
+    pushSnapshot();
+  }
+}
 /** The session a character is in RIGHT NOW, as a thread key (null = no lane). */
 const tgThreadFor = (townPath: string, id: CharacterId): TgThread | null => {
   const L = lanesOf(townPath);
@@ -1098,9 +1169,9 @@ function notifyTelegram(townPath: string, id: CharacterId): void {
     tgRemember(tg.send(`🔐 <b>${tgEsc(nm)}</b> needs approval:\n${tgEsc(lanes.view(id).pendingAsk || "…")}`, [[{ text: "✅ Allow", data: tgData("perm", id, "allow", townPath) }, { text: "🚫 Deny", data: tgData("perm", id, "deny", townPath) }]]), townPath, id);
   } else if (lanes.limitedUntil(id)) {
     // Usage limit: nothing to decide — it resumes by itself. Just say so honestly.
-    tgRemember(tg.send(`⏳ <b>${tgEsc(nm)}</b> ran into Claude's usage limit — it resets at ${tgEsc(fmtClock(lanes.limitedUntil(id)))} and ${tgEsc(tgName(id))} will pick up by itself then. Nothing is lost.`, [[{ text: "🗑 Scrap the order", data: tgData("scrap", id, "", townPath) }]]), townPath, id);
+    tgRemember(tg.send(`⏳ <b>${tgEsc(nm)}</b> ran into Claude's usage limit — it resets at ${tgEsc(fmtClock(lanes.limitedUntil(id)))} and ${tgEsc(tgName(id))} will pick up by itself then. Nothing is lost.\n<i>Switched account? "Try everyone now" sends one character first and wakes the rest only if it gets through.</i>`, [[{ text: "⏰ Try everyone now", data: tgData("wakeall", id, "", townPath) }], [{ text: "🗑 Scrap the order", data: tgData("scrap", id, "", townPath) }]]), townPath, id);
   } else if (lanes.isPaused(id)) {
-    tgRemember(tg.send(`⏸ <b>${tgEsc(nm)}</b> paused at a checkpoint — keep cooking?`, [[{ text: "🍳 Keep cooking", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }]]), townPath, id);
+    tgRemember(tg.send(`⏸ <b>${tgEsc(nm)}</b> paused at a checkpoint — keep cooking?`, [[{ text: "🍳 Keep cooking", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }], ...(stuckNow().length > 1 ? [[{ text: `⏰ Wake all ${stuckNow().length} who wait for a go`, data: tgData("wakeall", id, "", townPath) }]] : [])]), townPath, id);
   } else if (lanes.isBurned(id)) {
     tgRemember(tg.send(`⚠️ <b>${tgEsc(nm)}</b> hit a snag.`, [[{ text: "🔁 Try again", data: tgData("retry", id, "", townPath) }, { text: "🗑 Scrap", data: tgData("scrap", id, "", townPath) }]]), townPath, id);
   }
@@ -1142,6 +1213,8 @@ async function handleTgTap(data: string): Promise<void> {
   } else if (action === "perm") {
     tgExpect = null; await runInTown(townPath, { type: "answerPermission", characterId: id, allow: extra === "allow" });
     await tg?.send(extra === "allow" ? `✅ Allowed — ${who} continues.` : `🚫 Denied — told ${who}.`);
+  } else if (action === "wakeall") {
+    await tg?.send(tgEsc(wakeAll("telegram")));
   } else if (action === "retry") {
     await runInTown(townPath, { type: "retryJob", characterId: id }); await tg?.send(`🍳 ${who} — picking up where it left off.`);
   } else if (action === "scrap") {
@@ -1198,9 +1271,11 @@ async function tgContinuePast(thread: TgThread, index: number, text: string): Pr
 
 async function handleTgCommand(cmd: string, args: string): Promise<void> {
   if (cmd === "start" || cmd === "help") {
-    await tg?.send("🍍 <b>Bikini Bottom</b>\n/town — who's doing what\n/new — hand out a new job\n/orders — past orders per character\n/cancel — stop a running job\nWhen someone needs you, I message you with buttons.\n<b>Reply</b> (swipe) to any started / finished / asks message to continue that same order.");
+    await tg?.send("🍍 <b>Bikini Bottom</b>\n/town — who's doing what\n/new — hand out a new job\n/orders — past orders per character\n/cancel — stop a running job\n/wake — carry on everyone parked on Claude's limit or a check-in\nWhen someone needs you, I message you with buttons.\n<b>Reply</b> (swipe) to any started / finished / asks message to continue that same order.");
   } else if (cmd === "town" || cmd === "status") {
     await sendTgTown();
+  } else if (cmd === "wake") {
+    await tg?.send(tgEsc(wakeAll("telegram")));
   } else if (cmd === "new") {
     // Commands act on the town on screen (the buttons remember which one that was).
     await tg?.send(`Who should take this job?${currentTownPath && towns.size > 1 ? ` (in ${tgEsc(townNameOf(currentTownPath))})` : ""}`, [TG_CHARS.map((id) => ({ text: tgName(id), data: tgData("new", id, "", curTown()) }))]);
@@ -1470,6 +1545,8 @@ function snapshot(): TownSnapshot {
   base.watch = watchNow();
   base.calmMode = calmMode;
   base.calm = calmNow(calmMode, [...towns.values()].reduce((n, t) => n + t.lanes.workingCount(), 0));
+  const fxWake = loadFixture()?.wake; // dev/screenshot overlay only (BIKINI_FIXTURE)
+  base.wake = fxWake !== undefined ? fxWake : wakeSign(stuckNow(), !!wakeRun);
   // Portraits for all UI chrome (no emoji, AD-7).
   base.faces = {};
   for (const r of ROSTER) base.faces[r.id] = resolveFace(ASSETS_DIR, r.id);
@@ -1496,7 +1573,7 @@ function snapshot(): TownSnapshot {
 // character with a chalk line, a full Orders board) can be photographed with
 // `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
 // orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
-type Fixture = { characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null; jira?: JiraView | null; notebook?: NotebookView | null };
+type Fixture = { wake?: TownSnapshot["wake"]; characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null; jira?: JiraView | null; notebook?: NotebookView | null };
 let fixture: Fixture | null | undefined;
 function loadFixture(): Fixture | null {
   if (fixture === undefined) {
@@ -2064,6 +2141,10 @@ async function handleIntent(intent: Intent): Promise<void> {
       if (lanes) void lanes.resumePast(intent.characterId, intent.index, intent.prompt);
       break;
 
+    case "wakeAll":
+      wakeAll("button");
+      break;
+
     case "cycleCalm":
       calmMode = nextCalm(calmMode);
       await cfg.save({ calm: calmMode });
@@ -2309,7 +2390,7 @@ app.on("before-quit", (e) => {
 
 // Real terminals are long-lived warm processes — they must survive a window
 // hide/close (the whole point). Only tear them down on a genuine quit.
-app.on("will-quit", () => { for (const t of towns.values()) t.terminals.killAll(); for (const m of mails.values()) { if (m.timer) clearInterval(m.timer); if (m.nudge) clearTimeout(m.nudge); } for (const b of jiras.values()) if (b.timer) clearInterval(b.timer); });
+app.on("will-quit", () => { if (wakeTimer) clearInterval(wakeTimer); for (const t of towns.values()) t.terminals.killAll(); for (const m of mails.values()) { if (m.timer) clearInterval(m.timer); if (m.nudge) clearTimeout(m.nudge); } for (const b of jiras.values()) if (b.timer) clearInterval(b.timer); });
 
 // Graceful shutdown on a termination signal (this is how a restart reaches us).
 // Interrupt each terminal's Claude first and pause, so it can reach a checkpoint

@@ -65,6 +65,11 @@ export interface FirstRunView {
   notify: { choice: "none" | "allowed" | "declined"; message: string };
 }
 
+/** The "Wake everyone" button: how many characters across every town only need
+ *  a go (parked on Claude's limit / paused at a check-in), and whether one is
+ *  being tried first right now. */
+export interface WakeSign { count: number; limit: number; checkin: number; trying: boolean; label: string; title: string }
+
 /** A structured question a Character asks (from Claude's AskUserQuestion tool).
  *  Rendered as clickable option buttons + a "type my own" box (FR-12 sibling). */
 export interface AskChoice {
@@ -544,6 +549,9 @@ export interface TownSnapshot {
   /** Calm mode as set (auto = calm above three working lanes) and whether it is on now. */
   calmMode: "auto" | "on" | "off";
   calm: boolean;
+  /** "Wake everyone": the top-bar button as drawn, or null when no character in
+   *  any town is only waiting for a go (hidden). */
+  wake: WakeSign | null;
   /** Per-Character portrait (file:// URL) for all UI chrome — no emoji (AD-7). */
   faces: Partial<Record<CharacterId, string | null>>;
   /** Claude's usage-limit windows, town-wide (the reserve light's data). */
@@ -607,6 +615,8 @@ export type Intent =
   | { type: "sendPicks"; characterId: CharacterId; notes: Record<string, string> }
   | { type: "toggleMute" }
   | { type: "cycleCalm" }
+  /** Carry on every character parked on Claude's limit or a check-in, in every town. */
+  | { type: "wakeAll" }
   // The Ferry: switch the street to another town, or add one.
   | { type: "switchTown"; path: string }
   | { type: "addTown" }
