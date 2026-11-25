@@ -580,6 +580,35 @@ html, body {
 /* "Wake everyone": shown only while someone waits for a go. No animation — it must not cost a frame. */
 #wakeBtn { left: 160px; font-size: 13px; background: #d9a72b; border-color: #8a6410; box-shadow: 0 4px 0 #6b4d0c; white-space: nowrap; }
 #wakeBtn.trying { opacity: .75; cursor: default; }
+/* The moon (sleep mode): dim when off, night-blue when on, amber when pages wait. No animation. */
+#sleepBtn { left: 150px; font-size: 13px; opacity: .8; white-space: nowrap; }
+#sleepBtn.on { opacity: 1; background: #2f3f7a; border-color: #141c44; box-shadow: 0 4px 0 #0e1433; color: #fdf3c4; }
+#sleepBtn.pages { opacity: 1; background: #d9a72b; border-color: #8a6410; box-shadow: 0 4px 0 #6b4d0c; }
+/* asleep: the street goes a little darker — a still tint, nothing moves */
+:root.asleep .bg { filter: brightness(.72) saturate(.85) hue-rotate(8deg); }
+/* The morning pages: the Orders paper, made for reading */
+.board-wrap.morning { z-index: 19; }
+.morning-easel { width: min(94%, 620px); transform: rotate(-.6deg); }
+.morning-paper { max-height: 84vh; overflow-y: auto; font-family: var(--disp); }
+.morning-paper h3 { font-family: "Marker Felt", "Chalkboard SE", var(--disp); font-size: 34px; }
+.morning-paper .who { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; color: #7a5c26; margin: 2px 0 14px; }
+.morning-paper .who img { height: 26px; width: auto; }
+.morning-paper .sec { margin-top: 12px; }
+.morning-paper h4 { margin: 0 0 6px; font-size: 13px; letter-spacing: .8px; text-transform: uppercase; color: #8c1e12; }
+.morning-paper .sec.did h4, .morning-paper .sec.auto h4 { color: #7a5c26; }
+.morning-paper .sec.took h4 { color: #2a7036; }
+.morning-paper ul { gap: 8px; }
+.morning-paper li { cursor: default; font-size: 14px; font-weight: 400; letter-spacing: 0; gap: 1px; padding-left: 10px; border-left: 3px solid #c9ab62; }
+.morning-paper li:hover .d { text-decoration: none; }
+.morning-paper .q { font-weight: 700; }
+.morning-paper .a { color: #2a7036; font-weight: 700; }
+.morning-paper .why { color: #5c4a22; font-size: 13px; }
+.morning-paper .sec.parked li { border-left-color: #8c1e12; }
+/* the buttons stay in reach however long the night was */
+.morning-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; position: sticky; bottom: -26px; padding: 10px 0 14px; background: #e6c67a; box-shadow: 0 -8px 10px -8px rgba(90,60,10,.35); }
+.morning-row .count { font-size: 12px; color: #7a5c26; margin-right: auto; }
+.morning-row .paper-btn.ghost { margin-right: auto; }
+.morning-row .count + .paper-btn { margin-left: 0; }
 
 /* --- cheap when not watched (2026-11-18) ---
    A running animation makes the whole window present 60 times a second (two

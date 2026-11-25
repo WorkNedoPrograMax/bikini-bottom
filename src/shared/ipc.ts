@@ -68,6 +68,21 @@ export interface FirstRunView {
 /** The "Wake everyone" button: how many characters across every town only need
  *  a go (parked on Claude's limit / paused at a check-in), and whether one is
  *  being tried first right now. */
+/** The moon button as drawn: sleep mode on/off, and how many characters went on
+ *  without Maksym while it was off (auto-away) and have a page waiting. */
+export interface SleepSign { on: boolean; away: number; label: string; title: string }
+/** One character's morning page: what it did on its own, each decision it took
+ *  for Maksym and why, what is still parked, what the town did for it and what
+ *  the town held back. */
+export interface MorningPage {
+  town: string; townName: string; characterId: CharacterId; name: string;
+  since: number; until: number;
+  did: string[];
+  took: { question: string; choice: string; why: string }[];
+  parked: { question: string; why: string }[];
+  auto: string[];
+  held: string[];
+}
 export interface WakeSign { count: number; limit: number; checkin: number; trying: boolean; label: string; title: string }
 
 /** A structured question a Character asks (from Claude's AskUserQuestion tool).
@@ -552,6 +567,10 @@ export interface TownSnapshot {
   /** "Wake everyone": the top-bar button as drawn, or null when no character in
    *  any town is only waiting for a go (hidden). */
   wake: WakeSign | null;
+  /** Sleep mode: the moon button, and the morning pages waiting to be read
+   *  (empty until sleep mode is switched off or the moon is pressed after an auto-away). */
+  sleep: SleepSign;
+  morning: MorningPage[];
   /** Per-Character portrait (file:// URL) for all UI chrome — no emoji (AD-7). */
   faces: Partial<Record<CharacterId, string | null>>;
   /** Claude's usage-limit windows, town-wide (the reserve light's data). */
@@ -617,6 +636,10 @@ export type Intent =
   | { type: "cycleCalm" }
   /** Carry on every character parked on Claude's limit or a check-in, in every town. */
   | { type: "wakeAll" }
+  /** The moon button: sleep mode on; or off + the morning pages; or just the pages after an auto-away. */
+  | { type: "moon" }
+  /** The morning pages were read — put them away. */
+  | { type: "closeMorning" }
   // The Ferry: switch the street to another town, or add one.
   | { type: "switchTown"; path: string }
   | { type: "addTown" }

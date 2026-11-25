@@ -22,6 +22,8 @@ export interface AppConfigData {
   muted: boolean;
   /** Calm mode: "auto" (pulses stand still above three working lanes), "on" or "off". */
   calm: "auto" | "on" | "off";
+  /** Sleep mode (the moon button): epoch ms it was switched on, or 0 when off. Survives a relaunch. */
+  sleepSince: number;
   /** Bypass permissions — characters never stop to ask (Maksym's preference). */
   bypassPermissions: boolean;
   /** Gate S&R serving: when true, finishing only LOGS the push/PR (fires nothing). */
@@ -47,6 +49,7 @@ const DEFAULTS: AppConfigData = {
   notificationsWanted: false,
   muted: false,
   calm: "auto",
+  sleepSince: 0,
   bypassPermissions: true,
   srDryRun: true,
   telegramToken: null,

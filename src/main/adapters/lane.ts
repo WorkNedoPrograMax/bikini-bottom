@@ -9,7 +9,7 @@ import path from "node:path";
 import os from "node:os";
 import { readFileSync, promises as fs } from "node:fs";
 import { nativeImage } from "electron";
-import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats, Fuel, Gauge } from "../../shared/ipc";
+import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats, Fuel, Gauge, MorningPage } from "../../shared/ipc";
 import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
 import type { EventLog } from "../domain/eventLog";
 import { newEvidence, noteEvidence, openWindow, closeWindow, pickToShow, dropShownPathLines, type PictureEvidence } from "../domain/pictureClaims";
@@ -33,6 +33,7 @@ import { runGh } from "./gh";
 import { laneSettings } from "../domain/laneConnectors";
 import { handoverVerdict, handoverMessage, compactDue, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, stageModelKind, nextStage, type Handover, type Stage } from "../domain/handover";
 import { REVIEWER_IDS, ROSTER } from "../config/roster";
+import { sleepStep, nightRefusal, refusalReason, askReply, openEntries, applyNotes, addDid, noteProblem, morningPage, morningBubble, SLEEP_MARK, SLEEP_NOTE, SLEEP_TICK_MS, PERMISSION_REFUSAL, DIAGNOSIS_PROMPT, type NightEntry, type NightNote, type SleepAction } from "../domain/sleep";
 import { log, log as appLog } from "../log";
 
 // KEEP-WARM — the concrete fix for Maksym's overspend on the SDK side (bob/pat).
@@ -391,6 +392,11 @@ interface PersistedLane {
     handovers?: number;
     /** The stage the current session works on (null = not known → the strong model). */
     stage?: Stage | null;
+    /** Sleep mode: what the character did on its own, not yet handed over as a
+     *  morning page; whether it is still on its own; since when. */
+    journal?: NightEntry[];
+    night?: boolean;
+    nightSince?: number;
   };
 }
 
@@ -487,6 +493,19 @@ interface Lane {
    *  the character that made it, not by every character awake when it appeared
    *  (the deliverables folder is one for all towns). */
   pictureEvidence: PictureEvidence;
+  // Sleep mode (domain/sleep.ts).
+  /** Epoch ms since this lane has been waiting for Maksym (question, approval,
+   *  check-in, burn); 0 when it is not. The 20-minute auto-away counts from it. */
+  waitSince: number;
+  /** On its own: one of its questions went the night way with the moon off, and
+   *  Maksym has not talked to it since. */
+  night: boolean;
+  nightSince: number;           // epoch ms of the first journal entry (0 = none)
+  /** What it did on its own, kept until the morning page takes it. */
+  journal: NightEntry[];
+  /** Automatic recovery steps spent on the current failure (0 none · 1 retried · 2 diagnosis ran · 3 stopped). */
+  recovery: number;
+  diagnosing: boolean;          // the read-only diagnosis pass is running
 }
 
 /** Adoption support (Scout & Runner): a character labels an existing lane.
@@ -817,11 +836,20 @@ export class LaneManager {
           taskStartedAt: l.taskStartedAt, taskTokens: l.taskTokens, stats: l.stats, limitedUntil: l.limitedUntil,
           note: l.note, noteAt: l.noteAt, handover: l.handover, handovers: l.handovers, stage: l.stage,
           pendingQuestion: l.pending?.question ?? (l.pendingChoice ? l.pendingChoice.ask.questions.map((q) => q.question).join(" · ") : null),
+          journal: l.journal, night: l.night, nightSince: l.nightSince,
         },
       };
     }
-    void fs.writeFile(this.sessionsFile, JSON.stringify(map), "utf8").catch(() => {});
+    // Whole file or nothing, one save at a time, in order: written beside the
+    // real file and renamed over it. A plain write empties the file first, so a
+    // reader that came mid-save — a relaunch, or the app killed there — found
+    // half a file and started with no conversations at all (the hand-over check
+    // caught it 3 runs in 20); and two saves at once could land out of order.
+    const json = JSON.stringify(map);
+    const tmp = this.sessionsFile + ".tmp";
+    this.persistChain = this.persistChain.then(async () => { await fs.writeFile(tmp, json, "utf8"); await fs.rename(tmp, this.sessionsFile); }).catch(() => {});
   }
+  private persistChain: Promise<void> = Promise.resolve();
 
   lane(id: CharacterId): Lane {
     let l = this.lanes.get(id);
@@ -846,6 +874,7 @@ export class LaneManager {
         note: cur?.note ?? null, noteAt: cur?.noteAt ?? 0,
         booth: null, phone: null, phoneLost: null, setupReport: null,
         turnStartedAt: Date.now(), shownPictures: new Set(), pictureEvidence: newEvidence(),
+        waitSince: 0, night: cur?.night ?? false, nightSince: cur?.nightSince ?? 0, journal: Array.isArray(cur?.journal) ? cur!.journal! : [], recovery: 0, diagnosing: false,
       }).get(id)!;
       // Closed the app while waiting out a usage limit? Keep waiting — and keep
       // the promise to pick up by ourselves when it resets.
@@ -942,7 +971,7 @@ export class LaneManager {
    *  no process — and looked stuck). */
   markPaused(id: CharacterId, lastPrompt: string | null, lostQuestion?: string | null): void {
     const l = this.lane(id);
-    l.paused = true; l.lastPrompt = lastPrompt;
+    l.paused = true; l.lastPrompt = lastPrompt; l.waitSince = Date.now();
     l.conversation.push({ from: "them", text: lostQuestion
       ? `I paused when you closed the app — I was waiting for your answer to: «${lostQuestion.slice(0, 160)}». Want me to keep cooking (I'll ask again if I still need it), or scrap it?`
       : "I paused when you closed the app. Want me to keep cooking, or scrap it?" });
@@ -995,6 +1024,7 @@ export class LaneManager {
     // followed him into a brand-new Krabs job).
     if (l.pending) { const r = l.pending.resolve; l.pending = null; r(DENY); }
     if (l.pendingChoice) { const r = l.pendingChoice.resolve; l.pendingChoice = null; r("(cancelled — starting a new job)"); }
+    this.attended(l);
     // A new Job starts a fresh conversation — end any live session and archive
     // the old one so it can be reopened later (FR-13; past-sessions follow-up).
     this.endSession(l);
@@ -1033,6 +1063,7 @@ export class LaneManager {
     const l = this.lane(id);
     l.conversation.push({ from: "you", text: prompt, images: imageUrls(attachments), files: fileNames(attachments) });
     l.burned = false;
+    this.attended(l);
     this.onChange();
     void this.send(id, prompt, false, attachments);
   }
@@ -1040,9 +1071,10 @@ export class LaneManager {
   /** Try again / Keep cooking after a burn: wake the session and tell it to
    *  carry on where it left off (resumes context — never replays the first
    *  prompt from scratch). */
-  async retry(id: CharacterId): Promise<void> {
+  async retry(id: CharacterId, by: "maksym" | "night" = "maksym"): Promise<void> {
     const l = this.lane(id);
     l.spoke = false; // before send() gets to it — a wake scout is read from the next tick on
+    if (by === "maksym") this.attended(l); else l.waitSince = 0;
     // Waiting out Claude's usage limit and Maksym presses Try again anyway? His
     // call — the reset clock can be conservative. Drop the hold and try; if the
     // limit is still on, the turn ends with the limit error and we park again
@@ -1059,9 +1091,145 @@ export class LaneManager {
     }
     this.clearLimit(l);
     l.burned = false; l.paused = false;
-    l.conversation.push({ from: "you", text: "Keep going — pick up where you left off." });
+    if (by === "maksym") l.conversation.push({ from: "you", text: "Keep going — pick up where you left off." });
     this.onChange();
     void this.send(id, "Continue from where you left off and finish what you were doing.", false);
+  }
+
+  // ───────────── Sleep mode (domain/sleep.ts) ─────────────
+  /** The moon button: on for every lane of this town. */
+  private moon = false;
+  private sleepTicker: ReturnType<typeof setInterval> | null = null;
+  /** Nobody will answer this lane right now: the moon is on, or one of its
+   *  questions already went the night way and Maksym has not talked to it since. */
+  private unattended(l: Lane): boolean { return this.moon || l.night; }
+  /** Maksym talked to this lane: it is his again (what it wrote down stays for the page). */
+  private attended(l: Lane): void { l.night = false; l.waitSince = 0; l.recovery = 0; l.diagnosing = false; }
+  private nightLog(l: Lane, e: NightEntry | NightEntry[]): void {
+    if (!l.nightSince) l.nightSince = Date.now();
+    l.journal = l.journal.concat(e);
+  }
+  private nightDid(l: Lane, text: string): void {
+    if (!l.nightSince) l.nightSince = Date.now();
+    l.journal = addDid(l.journal, text, Date.now());
+  }
+  isMoon(): boolean { return this.moon; }
+  /** Switch sleep mode for this town. On: an error Maksym already saw and left
+   *  is his to look at — it is not retried behind his back; everything else
+   *  that waits (questions, approvals, check-ins) is carried on at once. */
+  setMoon(on: boolean): void {
+    if (this.moon === on) return;
+    this.moon = on;
+    log("sleep", on ? "sleep mode on" : "sleep mode off", { town: this.projectPath });
+    if (on) {
+      for (const l of this.lanes.values()) if (l.burned) l.recovery = 3;
+      this.armSleepTicker();
+      this.sleepTick();
+    }
+  }
+  private armSleepTicker(): void {
+    if (this.sleepTicker) return;
+    this.sleepTicker = setInterval(() => {
+      this.sleepTick();
+      // Nothing left that the night could carry on → stop ticking.
+      let need = this.moon;
+      for (const l of this.lanes.values()) if (l.night || ((l.pendingChoice || l.pending) && l.pump)) need = true;
+      if (!need && this.sleepTicker) { clearInterval(this.sleepTicker); this.sleepTicker = null; }
+    }, SLEEP_TICK_MS);
+    (this.sleepTicker as any).unref?.();
+  }
+  private sleepSoon(): void { this.armSleepTicker(); const t = setTimeout(() => this.sleepTick(), 50); (t as any).unref?.(); }
+  /** What the night would do for one lane now (also read by the check script). */
+  sleepActionFor(id: CharacterId, now = Date.now()): SleepAction {
+    const l = this.lane(id);
+    const live = !!l.pump;
+    return sleepStep({
+      working: l.working, asking: live && l.pendingChoice !== null, permission: live && l.pending !== null,
+      paused: l.paused, burned: l.burned, limited: l.limitedUntil > now, waitSince: l.waitSince, night: l.night, recovery: l.recovery,
+    }, this.moon, now);
+  }
+  /** Look at every lane and carry on what sleep mode covers. */
+  sleepTick(now = Date.now()): void {
+    for (const id of [...this.lanes.keys()]) {
+      const act = this.sleepActionFor(id, now);
+      if (act !== "none") void this.sleepAct(id, act);
+    }
+  }
+  private async sleepAct(id: CharacterId, act: SleepAction): Promise<void> {
+    const l = this.lane(id);
+    const now = Date.now();
+    const why: "moon" | "away" = this.moon ? "moon" : "away";
+    if (!this.moon) l.night = true; // auto-away: on its own until Maksym talks to it again
+    log("sleep", `${id} → ${act}`, { why, recovery: l.recovery });
+    if (act === "answer") {
+      const pc = l.pendingChoice; if (!pc) return;
+      l.pendingChoice = null;
+      this.nightLog(l, openEntries(pc.ask.questions.map((q) => q.question), now));
+      l.conversation.push({ from: "them", text: why === "moon"
+        ? "🌙 You're asleep, so I'm not waiting — I take my own default where there is a sensible one, write it down, and park what only you can decide."
+        : "🌙 No answer for 20 minutes, so I'm not waiting — I take my own default where there is a sensible one, write it down, and park what only you can decide.", tool: true });
+      l.working = true; l.waitSince = 0;
+      this.setPhase(l, "working");
+      await this.log.append({ type: "CharacterStateChanged", id, state: "working" });
+      this.armWatchdog(id);
+      this.persist(); this.onChange();
+      pc.resolve(askReply(pc.ask.questions.length, why));
+    } else if (act === "deny") {
+      const p = l.pending; if (!p) return;
+      l.pending = null;
+      this.nightLog(l, { at: now, kind: "held", text: `Needed your OK and did not get it: ${p.question.replace(/\s+/g, " ").slice(0, 200)}` });
+      l.working = true; l.waitSince = 0;
+      this.setPhase(l, "working");
+      await this.log.append({ type: "PermissionAnswered", id, allow: false });
+      await this.log.append({ type: "CharacterStateChanged", id, state: "working" });
+      this.armWatchdog(id);
+      this.persist(); this.onChange();
+      p.resolve({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: PERMISSION_REFUSAL } });
+    } else if (act === "cook") {
+      this.nightLog(l, { at: now, kind: "auto", text: "Paused to check in after a long run — the town said \"keep cooking\" for you." });
+      l.conversation.push({ from: "them", text: "🌙 Check-in answered for you: keep cooking.", tool: true });
+      await this.retry(id, "night");
+    } else if (act === "retry") {
+      l.recovery = 1;
+      this.nightLog(l, { at: now, kind: "auto", text: "Tried again once after the error." });
+      l.conversation.push({ from: "them", text: "🌙 Trying once more by myself.", tool: true });
+      await this.retry(id, "night");
+    } else if (act === "diagnose") {
+      l.recovery = 2; l.diagnosing = true;
+      this.nightLog(l, { at: now, kind: "auto", text: "The retry failed too — ran one read-only look at what is wrong instead of a third try." });
+      this.clearLimit(l);
+      l.burned = false; l.paused = false; l.waitSince = 0; l.spoke = false;
+      l.conversation.push({ from: "them", text: "🌙 That failed twice. No third try — I take one read-only look at what is wrong and write it down for you.", tool: true });
+      this.persist(); this.onChange();
+      void this.send(id, DIAGNOSIS_PROMPT, false);
+    } else if (act === "stop") {
+      l.recovery = 3; l.diagnosing = false;
+      this.nightLog(l, { at: now, kind: "auto", text: "Stopped: it failed again after the retry and the look at what is wrong. Nothing more was tried — it waits for you." });
+      l.conversation.push({ from: "them", text: "🌙 I stopped here: one retry and one look at what is wrong are spent. I wait for you.", tool: true });
+      this.persist(); this.onChange();
+      if (!this.moon) this.onCue(id, "ready"); // away, not asleep → he may be near: ring
+    }
+  }
+  /** How many lanes have something written down for a morning page. */
+  nightCount(): number { return this.nightIds().length; }
+  nightIds(): CharacterId[] {
+    // A page saved before a relaunch is owed even when nothing has looked at that lane yet.
+    for (const [id, pl] of Object.entries(this.loaded)) if (pl.current?.journal?.length && !this.lanes.has(id as CharacterId)) this.lane(id as CharacterId);
+    const out: CharacterId[] = [];
+    for (const [id, l] of this.lanes) if (l.journal.length) out.push(id);
+    return out;
+  }
+  /** Hand over one character's morning page: the page is returned, written into
+   *  its chat as one bubble, and the journal starts empty again. Null when it
+   *  did nothing on its own. */
+  takeMorning(id: CharacterId, who: { townName: string; name: string }): MorningPage | null {
+    const l = this.lane(id);
+    if (!l.journal.length) { l.night = false; return null; }
+    const page = morningPage({ town: this.projectPath, townName: who.townName, id, name: who.name }, l.journal, l.nightSince, Date.now());
+    l.conversation.push({ from: "them", text: morningBubble(page) });
+    l.journal = []; l.night = false; l.nightSince = 0;
+    this.persist(); this.onChange();
+    return page;
   }
 
   /** Forget a usage-limit hold (new order, scrap, cancel, or the limit reset). */
@@ -1559,6 +1727,7 @@ export class LaneManager {
     if (!l.pending) return;
     const resolve = l.pending.resolve;
     l.pending = null;
+    this.attended(l);
     await this.log.append({ type: "PermissionAnswered", id, allow });
     l.conversation.push({ from: "you", text: allow ? "Allowed." : "Don't do that." });
     l.working = true;
@@ -1639,6 +1808,7 @@ export class LaneManager {
     let resolveAnswer!: (answer: string) => void;
     const answered = new Promise<string>((resolve) => { resolveAnswer = resolve; });
     l.pendingChoice = { ask, resolve: resolveAnswer };
+    l.waitSince = Date.now(); this.armSleepTicker(); // 20 minutes unanswered → it goes the night way
     this.onCue(id, "ready"); // needs my answer — call Maksym
     log("lane", `${id} asked a question`, { question: q0?.question?.slice(0, 100), count: ask.questions.length });
     this.persist(); // the question survives a relaunch (as "I was waiting on…")
@@ -1655,6 +1825,7 @@ export class LaneManager {
     if (!l.pendingChoice) return;
     const { ask, resolve } = l.pendingChoice;
     l.pendingChoice = null;
+    this.attended(l);
     const shown = ask.questions.map((q, i) => answers[i] || "(no answer)").join(" · ");
     const { textSuffix } = await this.prepareAttachments(id, attachments, true); // images-as-files (tool result is text)
     l.conversation.push({ from: "you", text: shown, images: imageUrls(attachments), files: fileNames(attachments) });
@@ -1747,9 +1918,13 @@ export class LaneManager {
     this.leaveBooth(id); // burned → the phone is free again
     void this.parkReviewer(id);
     l.conversation.push({ from: "them", text: `Uh oh — I burned this one: ${reason}. Nothing broke; your project is untouched. Try again, or scrap it?` });
+    l.waitSince = Date.now();
     await this.log.append({ type: "JobBurned", id, reason });
     await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
-    this.onCue(id, "ready"); // trouble — call Maksym
+    // On its own (sleep mode): the town retries once, then diagnoses, then stops
+    // — nobody is rung until that is spent.
+    if (this.unattended(l)) { this.nightLog(l, { at: Date.now(), kind: "auto", text: `Hit a snag: ${reason}.` }); this.sleepSoon(); }
+    if (!(this.unattended(l) && l.recovery < 2)) this.onCue(id, "ready"); // trouble — call Maksym
     this.persist();
     this.onChange();
   }
@@ -1811,6 +1986,11 @@ export class LaneManager {
     this.onChange();
     const lastReply = [...l.conversation].reverse().find((m) => m.from === "them" && !m.tool);
     const summary = (lastReply?.text || "finished the job").replace(/\s+/g, " ").slice(0, 90);
+    if (l.diagnosing) {
+      l.diagnosing = false; l.recovery = 0;
+      this.nightLog(l, { at: Date.now(), kind: "auto", text: `Diagnosis (nothing was changed): ${(lastReply?.text || "no words").replace(/\s+/g, " ").slice(0, 600)}` });
+      this.persist();
+    } else if (this.unattended(l) && lastReply?.text) { this.nightDid(l, `Finished a turn: ${lastReply.text}`); this.persist(); }
     // Never wrote a chalk line? The first line of the final reply stands in.
     if (l.note === null) { const fb = fallbackNote(lastReply?.text || ""); if (fb) { l.note = fb; l.noteAt = Date.now(); this.persist(); this.onChange(); } }
     log("lane", `${id} idle`, summary);
@@ -1887,6 +2067,17 @@ export class LaneManager {
             if (!list.length) {
               return { content: [{ type: "text", text: "Nothing was asked: pass `question` + `options` (2–6), or a `questions` array of those." }] };
             }
+            // Sleep mode: nobody will answer. The question comes back at once —
+            // take your own default and write it down, or park it — and is kept
+            // as "open" on the morning page until the character notes its decision.
+            if (this.unattended(l)) {
+              this.nightLog(l, openEntries(list.map((q) => q.question), Date.now()));
+              l.stats.asks++;
+              l.conversation.push({ from: "them", text: `🌙 You're ${this.moon ? "asleep" : "away"}, so I'm not waiting on ${list.length === 1 ? "this" : `these ${list.length}`} — I take my own default where there is a sensible one and park what only you can decide:\n${list.map((q, i) => `${i + 1}. ${q.question}`).join("\n")}`, tool: true });
+              log("sleep", `${id} asked while asleep`, { count: list.length, q: list[0].question.slice(0, 100), moon: this.moon });
+              this.persist(); this.onChange();
+              return { content: [{ type: "text", text: askReply(list.length, this.moon ? "moon" : "away") }] };
+            }
             // GUARD 0 — no story, no question. 2026-10-06: Bob asked four short,
             // correct questions ("km buttons or mile buttons?") with no context in
             // front of Maksym, who answered "what?" and "explain simpler" to each.
@@ -1934,6 +2125,8 @@ export class LaneManager {
                 options: q.options.map((o: string) => ({ label: o })),
               })),
             });
+            // Nobody answered (sleep mode took it): the reply is one whole instruction.
+            if (answer.startsWith(SLEEP_MARK)) return { content: [{ type: "text", text: answer }] };
             // Several questions → the answers come back in the same order, one per line.
             if (list.length > 1) {
               const parts = answer.split(" · ");
@@ -1959,10 +2152,40 @@ export class LaneManager {
               return { content: [{ type: "text", text: "Kept your previous line (you posted one moments ago). Carry on." }] };
             }
             l.note = line; l.noteAt = Date.now();
+            if (this.unattended(l)) this.nightDid(l, line);
             log("lane", `${id} status`, line);
             this.persist();
             this.onChange();
             return { content: [{ type: "text", text: "Posted. Carry on." }] };
+          },
+        ),
+        // Sleep mode: the decisions a character took (or parked) while Maksym
+        // slept, written down for his morning page.
+        tool(
+          "night_note",
+          "Write down, for Maksym's morning page, what you decided while he was asleep or away: one entry per question that `ask_maksym` gave back to you. `took` = you took your own default (say what you chose and why). `parked` = the default was hard to pick, so you left it for him (say why it needs him) and you are doing everything that does not depend on it. Plain words for someone who did not watch — no file names, no jargon. It never waits.",
+          {
+            notes: z.array(z.object({
+              question: z.string().describe("The question, in the words you asked it."),
+              decision: z.enum(["took", "parked"]).describe("took — you chose a default and went on · parked — left for Maksym."),
+              choice: z.string().optional().describe("For `took`: what you chose, short."),
+              why: z.string().describe("One plain sentence: why this default — or why only he can decide."),
+            })).min(1).max(8),
+          },
+          async (args) => {
+            const notes = args.notes as NightNote[];
+            if (!this.unattended(l) && !l.journal.some((e) => e.kind === "open")) {
+              return { content: [{ type: "text", text: "Maksym is here — nothing to note. If you need a decision, ask him with ask_maksym." }] };
+            }
+            const bad = notes.map(noteProblem).find((p) => p !== null);
+            if (bad) return { content: [{ type: "text", text: `Not written — ${bad}. Fix that and call night_note once more.` }] };
+            l.journal = applyNotes(l.journal, notes, Date.now());
+            if (!l.nightSince) l.nightSince = Date.now();
+            l.conversation.push({ from: "them", text: "📝 Written down for your morning page:\n" + notes.map((n) => n.decision === "took" ? `- ${n.question} → **${n.choice}** — ${n.why}` : `- 🅿️ parked: ${n.question} — ${n.why}`).join("\n"), tool: true });
+            log("sleep", `${id} night_note`, { took: notes.filter((n) => n.decision === "took").length, parked: notes.filter((n) => n.decision === "parked").length });
+            this.persist(); this.onChange();
+            const parked = notes.some((n) => n.decision === "parked");
+            return { content: [{ type: "text", text: `Written on Maksym's morning page. Carry on${parked ? " — do everything that does not depend on what you parked, then finish and say what is parked" : ""}.` }] };
           },
         ),
         // Fresh session per stage (domain/handover.ts): the character says a stage
@@ -2085,6 +2308,7 @@ export class LaneManager {
               + serverNote
               + phoneNote
               + STAY_IN_LANE_NOTE
+              + SLEEP_NOTE
               + (REVIEWER_IDS.has(id) ? "" : STAGE_NOTE)
               + (this.notebook && !REVIEWER_IDS.has(id) ? NOTEBOOK_NOTE : "")
               + (REVIEWER_IDS.has(id) ? REVIEW_ONLY_NOTE : "")
@@ -2119,6 +2343,19 @@ export class LaneManager {
               hooks: [async (input: any): Promise<any> => {
                 const toolName = input.tool_name as string;
                 const ti = (input.tool_input || {}) as Record<string, unknown>;
+                // Never at night — before bypass, before everything: merging,
+                // posting a review, messaging people, a new Jira ticket.
+                if (this.unattended(l)) {
+                  const what = nightRefusal(toolName, ti);
+                  if (what) {
+                    const about = String(ti.command ?? ti.name ?? ti.summary ?? ti.body ?? ti.text ?? "").replace(/\s+/g, " ").slice(0, 140);
+                    log("sleep", `${id} refused at night`, { tool: toolName, what, about });
+                    this.nightLog(l, { at: Date.now(), kind: "held", text: `Wanted to ${what}${about ? ` — ${about}` : ""}` });
+                    l.conversation.push({ from: "them", text: `🌙 The town held that back until you are here: I wanted to ${what}.`, tool: true });
+                    this.persist(); this.onChange();
+                    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: refusalReason(what) } };
+                  }
+                }
                 // Our own "ask Maksym" tool is never a permission risk — always allow
                 // it so the question reaches him (even when asking-mode is on).
                 if (toolName.startsWith("mcp__bikini__")) return ALLOW;
@@ -2220,6 +2457,8 @@ export class LaneManager {
                   let resolveAsk!: (r: unknown) => void;
                   const answered = new Promise((resolve) => { resolveAsk = resolve as (r: unknown) => void; });
                   l.pending = { question, resolve: resolveAsk };
+                  l.waitSince = Date.now(); this.armSleepTicker();
+                  if (this.unattended(l)) this.sleepSoon(); else
                   this.onCue(id, "ready"); // needs my OK — call Maksym
                   this.persist(); // the ask survives a relaunch (as "I was waiting on…")
                   this.onChange();
@@ -2495,10 +2734,12 @@ export class LaneManager {
             // is the whole point of the cap: bound unattended runs, lose nothing.
             if (sub === "error_max_turns") {
               l.paused = true; l.working = false; this.clearWatchdog(l); this.setPhase(l, "waiting");
+              l.waitSince = Date.now();
               this.leaveBooth(id); // a check-in pause hands the phone over
               l.conversation.push({ from: "them", text: "That's a big job — I've taken a lot of steps, so I paused to check in before spending more (so I don't run up your bill while you're away). Nothing's lost. Want me to keep cooking? I'll pick up right where I left off." });
               await this.log.append({ type: "CharacterStateChanged", id, state: "calling" });
-              this.onCue(id, "ready"); // needs a decision — call Maksym
+              // On its own (sleep mode): the answer is yes — nobody is rung.
+              if (this.unattended(l)) this.sleepSoon(); else this.onCue(id, "ready"); // needs a decision — call Maksym
               this.persist();
               this.onChange();
               return;
@@ -2514,6 +2755,7 @@ export class LaneManager {
             return;
           }
           l.limitSeen = null; // a limit mention that did NOT end the turn (e.g. a helper's) is not ours
+          if (!l.diagnosing) l.recovery = 0; // a turn that ended well: the next failure gets its own retry
           await this.flushPictures(l);
           this.maybeNudge(id, ctx);
           this.persist(); // save progress (survives restart)

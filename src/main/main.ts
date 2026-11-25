@@ -31,6 +31,8 @@ import { initLog, log } from "./log";
 import { startCacheProxy } from "./cacheProxy";
 import { watchState, snapshotGate, calmNow, nextCalm, normalizeCalm, type CalmMode, type WatchState } from "./domain/watch";
 import { stuckLanes, wakePlan, scoutVerdict, wakeSign, type LaneNow, type Stuck } from "./domain/wake";
+import { sleepSign, moonPress, morningTelegram } from "./domain/sleep";
+import type { MorningPage } from "../shared/ipc";
 import { CHANNELS, EMPTY_JOB_STATS, EMPTY_FUEL, type Intent, type FirstRunView, type TownSnapshot, type NotebookView, type WindowView, type CharacterId, type CharacterState, type Fuel, type FuelSign, type Gauge, type Attention, type OrderStatus, type TownTab, type AddingTown, type BoothView, type MailView, type MailLine, type JiraView, type JiraLine } from "../shared/ipc";
 import { fmtClock, fmtWhen, fuelWord, fuelStale, previewOf } from "./adapters/guards";
 
@@ -62,6 +64,10 @@ let openWindowId: CharacterId | null = null;
 let firstRun: FirstRunView | null = null;
 let muted = false;
 let calmMode: CalmMode = "auto";
+// Sleep mode (the moon button): epoch ms it was switched on (0 = off), and the
+// morning pages handed over and not yet put away.
+let sleepSince = 0;
+let morningPages: MorningPage[] = [];
 // "Point at it" (Orca plan, Job 5): the engine + tray manager, one lane at a time.
 let pointer: PointerManager | null = null;
 // The shown town's adoption table (where each lane's app runs), for the pointer's URL.
@@ -151,6 +157,7 @@ async function openTown(projectPath: string): Promise<Town> {
   );
   const town: Town = { path: projectPath, profile, log: townLog, lanes: townLanes, terminals: townTerminals, adopt };
   towns.set(projectPath, town);
+  townLanes.setMoon(sleepSince > 0); // a town opened at night is asleep too
   missingTowns.delete(projectPath);
   log("project", "opened", { projectPath, town: profile.name, landing: profile.landing, adoption: adopt ? Object.keys(profile.lanes || {}) : null, terminalChars: [...TERMINAL_IDS] });
   // The Mailbox: pull requests on this town's GitHub repo (best effort, never blocks the town).
@@ -826,7 +833,7 @@ function notifyTgMail(townPath: string, fresh: MailLine[]): void {
  *  Maksym is already looking at that window. The title names the town when it
  *  is not the one on screen: "SpongeBob finished! · Rock Bottom". */
 function fireFinishNotification(townPath: string, id: CharacterId, summary: string): void {
-  notifyTgDone(townPath, id, summary); // phone always gets the "finished" ping (not gated by focus/desktop-notif prefs)
+  if (!sleepSince) notifyTgDone(townPath, id, summary); // phone always gets the "finished" ping (not gated by focus/desktop-notif prefs) — except asleep: the morning page carries it
   // A PR this character was on: the mark comes off and the paper looks at
   // GitHub right away, so the line says what came of the work, not "on it".
   for (const b of jiras.values()) {
@@ -961,7 +968,8 @@ function emitSoundCue(townPath: string, id: CharacterId, kind: "start" | "ready"
   const url = resolveSound(SOUNDS_DIR, id, kind);
   // A cue from a town that is not on screen still plays — a "ready" from the
   // other town is exactly the thing worth hearing. Mute applies as always.
-  log("sound", `${id} ${kind}`, { hasFile: !!url, town: townNameOf(townPath), onScreen: townPath === currentTownPath });
+  log("sound", `${id} ${kind}`, { hasFile: !!url, town: townNameOf(townPath), onScreen: townPath === currentTownPath, asleep: sleepSince > 0 });
+  if (sleepSince) return; // sleep mode: no sound, no phone ping — one morning page instead
   if (winAlive()) win!.webContents.send(CHANNELS.sound, { characterId: id, kind, url });
   if (kind === "ready") notifyTelegram(townPath, id); // a character needs attention → ping the phone
   else if (kind === "start") notifyTgStart(townPath, id); // a job kicked off → ping the phone
@@ -1023,6 +1031,41 @@ const tgTownAt = (idx: string | undefined): string => (idx ? cfg.data.towns[Numb
 const tgData = (action: string, id: CharacterId, extra: string | number | undefined, townPath: string): string => `${action}:${id}:${extra ?? ""}:${tgTownIdx(townPath)}`;
 const lanesOf = (townPath: string): LaneManager | null => towns.get(townPath)?.lanes ?? null;
 const curTown = (): string => currentTownPath ?? "";
+
+// ---- Sleep mode (2026-11-25) ------------------------------------------------
+// The moon button (or /sleep from the phone). On: every town's characters stop
+// waiting for Maksym (domain/sleep.ts says what they do instead). Off — or a
+// press after characters went on by themselves (auto-away): one morning page
+// per character that did something on its own, and one Telegram message.
+const awayCount = (): number => [...towns.values()].reduce((n, t) => n + t.lanes.nightCount(), 0);
+function deliverMorning(): MorningPage[] {
+  const pages: MorningPage[] = [];
+  for (const t of towns.values()) for (const id of t.lanes.nightIds()) {
+    const page = t.lanes.takeMorning(id, { townName: townNameOf(t.path), name: tgName(id) });
+    if (page) pages.push(page);
+  }
+  morningPages = pages;
+  log("sleep", "morning pages", { pages: pages.map((p) => `${p.name}@${p.townName}`), took: pages.reduce((n, p) => n + p.took.length, 0), parked: pages.reduce((n, p) => n + p.parked.length, 0) });
+  const msg = morningTelegram(pages, towns.size > 1);
+  if (msg) void tg?.send(msg);
+  return pages;
+}
+async function pressMoon(from: "button" | "telegram"): Promise<string> {
+  const was = sleepSince > 0;
+  const r = moonPress(was, awayCount());
+  log("sleep", "moon pressed", { from, was, away: awayCount(), now: r.moon, morning: r.morning });
+  sleepSince = r.moon ? (was ? sleepSince : Date.now()) : 0;
+  await cfg.save({ sleepSince });
+  for (const t of towns.values()) t.lanes.setMoon(r.moon);
+  let said: string;
+  if (r.moon) said = "🌙 Sleep mode is on — nobody waits for you. Characters take their own default and write it down, park the hard questions, keep cooking at check-ins, and never merge, post a review, message people or create Jira tickets. /sleep again when you are back.";
+  else {
+    const pages = r.morning ? deliverMorning() : [];
+    said = pages.length ? (was ? "☀️ Sleep mode is off." : "") : (was ? "☀️ Sleep mode is off. Nobody had to decide anything without you — no morning pages." : "Nothing to read.");
+  }
+  pushSnapshot();
+  return said;
+}
 
 // ---- Wake everyone (2026-11-24) -------------------------------------------
 // One press — the top-bar button, the Telegram button or /wake — carries on
@@ -1271,11 +1314,14 @@ async function tgContinuePast(thread: TgThread, index: number, text: string): Pr
 
 async function handleTgCommand(cmd: string, args: string): Promise<void> {
   if (cmd === "start" || cmd === "help") {
-    await tg?.send("🍍 <b>Bikini Bottom</b>\n/town — who's doing what\n/new — hand out a new job\n/orders — past orders per character\n/cancel — stop a running job\n/wake — carry on everyone parked on Claude's limit or a check-in\nWhen someone needs you, I message you with buttons.\n<b>Reply</b> (swipe) to any started / finished / asks message to continue that same order.");
+    await tg?.send("🍍 <b>Bikini Bottom</b>\n/town — who's doing what\n/new — hand out a new job\n/orders — past orders per character\n/cancel — stop a running job\n/wake — carry on everyone parked on Claude's limit or a check-in\n/sleep — sleep mode on / off (off sends the morning page)\nWhen someone needs you, I message you with buttons.\n<b>Reply</b> (swipe) to any started / finished / asks message to continue that same order.");
   } else if (cmd === "town" || cmd === "status") {
     await sendTgTown();
   } else if (cmd === "wake") {
     await tg?.send(tgEsc(wakeAll("telegram")));
+  } else if (cmd === "sleep" || cmd === "morning") {
+    const said = await pressMoon("telegram");
+    if (said) await tg?.send(tgEsc(said));
   } else if (cmd === "new") {
     // Commands act on the town on screen (the buttons remember which one that was).
     await tg?.send(`Who should take this job?${currentTownPath && towns.size > 1 ? ` (in ${tgEsc(townNameOf(currentTownPath))})` : ""}`, [TG_CHARS.map((id) => ({ text: tgName(id), data: tgData("new", id, "", curTown()) }))]);
@@ -1547,6 +1593,9 @@ function snapshot(): TownSnapshot {
   base.calm = calmNow(calmMode, [...towns.values()].reduce((n, t) => n + t.lanes.workingCount(), 0));
   const fxWake = loadFixture()?.wake; // dev/screenshot overlay only (BIKINI_FIXTURE)
   base.wake = fxWake !== undefined ? fxWake : wakeSign(stuckNow(), !!wakeRun);
+  const fxS = loadFixture(); // dev/screenshot overlay only (BIKINI_FIXTURE)
+  base.sleep = fxS?.sleep ?? sleepSign(sleepSince > 0, sleepSince, awayCount(), Date.now());
+  base.morning = fxS?.morning ?? morningPages;
   // Portraits for all UI chrome (no emoji, AD-7).
   base.faces = {};
   for (const r of ROSTER) base.faces[r.id] = resolveFace(ASSETS_DIR, r.id);
@@ -1573,7 +1622,7 @@ function snapshot(): TownSnapshot {
 // character with a chalk line, a full Orders board) can be photographed with
 // `BIKINI_CAPTURE` and no job running. Shape: { characters?: { [id]: Partial<CharacterView> },
 // orders?: OrderLine[], fuelSign?: FuelSign }. Unset in normal runs → no-op.
-type Fixture = { wake?: TownSnapshot["wake"]; characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null; jira?: JiraView | null; notebook?: NotebookView | null };
+type Fixture = { wake?: TownSnapshot["wake"]; sleep?: TownSnapshot["sleep"]; morning?: MorningPage[]; characters?: Record<string, Partial<TownSnapshot["characters"][number]>>; orders?: TownSnapshot["orders"]; fuelSign?: FuelSign | null; pointerUrl?: string; window?: Partial<WindowView>; towns?: TownTab[]; townName?: string; addingTown?: AddingTown; booth?: BoothView | null; mail?: MailView | null; jira?: JiraView | null; notebook?: NotebookView | null };
 let fixture: Fixture | null | undefined;
 function loadFixture(): Fixture | null {
   if (fixture === undefined) {
@@ -1621,6 +1670,9 @@ function sendSnapshot(now: number): void {
  *  occlusion too — a covered window is not watched either). */
 let winShown = false;
 function watchNow(): WatchState {
+  // Dev/screenshot hook only: a photo is taken whoever is (not) looking — with
+  // the screen locked the window counts as away and the page was never drawn.
+  if (process.env.BIKINI_CAPTURE) return "watched";
   return watchState({ shown: winShown, minimized: winAlive() && win!.isMinimized(), focused: winAlive() && win!.isFocused() });
 }
 /** Someone started or stopped looking: tell the page at once, whatever was held
@@ -2145,6 +2197,15 @@ async function handleIntent(intent: Intent): Promise<void> {
       wakeAll("button");
       break;
 
+    case "moon":
+      await pressMoon("button");
+      break;
+
+    case "closeMorning":
+      morningPages = [];
+      pushSnapshot();
+      break;
+
     case "cycleCalm":
       calmMode = nextCalm(calmMode);
       await cfg.save({ calm: calmMode });
@@ -2293,6 +2354,7 @@ app.whenReady().then(async () => {
   await cfg.load();
   muted = cfg.data.muted;
   calmMode = normalizeCalm(cfg.data.calm);
+  sleepSince = Number(cfg.data.sleepSince) > 0 ? Number(cfg.data.sleepSince) : 0;
   log("app", "config loaded", { projectPath: cfg.data.projectPath, firstRunComplete: cfg.data.firstRunComplete, bypass: cfg.data.bypassPermissions });
 
   if (cfg.data.firstRunComplete && cfg.data.projectPath) {
