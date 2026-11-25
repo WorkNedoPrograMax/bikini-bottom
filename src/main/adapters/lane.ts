@@ -7,7 +7,7 @@ import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod";
 import path from "node:path";
 import os from "node:os";
-import { readFileSync, promises as fs } from "node:fs";
+import { readFileSync, existsSync, promises as fs } from "node:fs";
 import { nativeImage } from "electron";
 import type { CharacterId, ChatMessage, AskChoice, Attachment, JobStats, Fuel, Gauge, MorningPage } from "../../shared/ipc";
 import { EMPTY_JOB_STATS, EMPTY_FUEL } from "../../shared/ipc";
@@ -31,7 +31,8 @@ import { isStrayWorktree, STRAY_WORKTREE_REASON, STAY_IN_LANE_NOTE } from "../do
 import { reviewOnlyRefusal, postReviewArgs, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE } from "../domain/reviewOnly";
 import { runGh } from "./gh";
 import { laneSettings } from "../domain/laneConnectors";
-import { handoverVerdict, handoverMessage, compactDue, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, stageModelKind, nextStage, type Handover, type Stage } from "../domain/handover";
+import { withPinnedHelper } from "../domain/helperModel";
+import { handoverVerdict, handoverMessage, compactDue, mainCallCtx, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, stageModelKind, nextStage, type Handover, type Stage } from "../domain/handover";
 import { REVIEWER_IDS, ROSTER } from "../config/roster";
 import { sleepStep, nightRefusal, refusalReason, askReply, openEntries, applyNotes, addDid, noteProblem, morningPage, morningBubble, SLEEP_MARK, SLEEP_NOTE, SLEEP_TICK_MS, PERMISSION_REFUSAL, DIAGNOSIS_PROMPT, type NightEntry, type NightNote, type SleepAction } from "../domain/sleep";
 import { log, log as appLog } from "../log";
@@ -60,7 +61,9 @@ const SETTING_SOURCES: ("user" | "project" | "local")[] = ["user", "project", "l
 // wildcard; the list and the reasons live in domain/laneConnectors.ts.
 // (Blocking a connector's tools with disallowedTools does not stop it being
 // offered — measured 2026-09-30 on the Figma twin; denying the server by name does.)
-const LANE_SETTINGS = laneSettings();
+// Per town: the phone-app town (pubspec.yaml at its root) and every other town
+// deny different servers — see domain/laneConnectors.ts.
+const laneSettingsFor = (projectPath: string): string => laneSettings(existsSync(path.join(projectPath, "pubspec.yaml")) ? "app" : "other");
 
 const LANE_DISALLOWED_TOOLS = [
   "mcp__playwright-ext",  // the user's browser extension — never reachable from a headless lane
@@ -1621,6 +1624,10 @@ export class LaneManager {
     l.conversation = sess.messages;
     l.sessionId = sess.sdkSessionId;
     l.handover = null; l.stage = null; // a hand-over belongs to the order it was written in
+    // The size belonged to the session just left: unknown now, so no compaction
+    // before this message; its first call measures it (2026-11-24 20:30: a
+    // 71,586 past order was compacted on the 272,592 of the one before).
+    l.lastCallCtx = 0; l.stats.ctxTokens = 0;
     l.lastPrompt = prompt;
     l.viewing = null; l.burned = false; l.paused = false;
     l.note = null; l.noteAt = 0; // a promoted old order must not carry a stale chalk line
@@ -1670,13 +1677,13 @@ export class LaneManager {
       const q = query({
         prompt,
         options: {
-          cwd, model: MODEL, effort: EFFORT, maxTurns: 20, settingSources: SETTING_SOURCES, settings: LANE_SETTINGS, disallowedTools: LANE_DISALLOWED_TOOLS, permissionMode: "default",
+          cwd, model: MODEL, effort: EFFORT, maxTurns: 20, settingSources: SETTING_SOURCES, settings: laneSettingsFor(this.projectPath), disallowedTools: LANE_DISALLOWED_TOOLS, permissionMode: "default",
           systemPrompt: { type: "preset", preset: "claude_code", append: voiceFor(id) },
           abortController: abort,
           ...(sess.sdkSessionId ? { resume: sess.sdkSessionId } : {}),
           hooks: {
             PreToolUse: [{
-              hooks: [async (input: any) => {
+              hooks: [async (input: any) => withPinnedHelper(input.tool_name as string, (input.tool_input || {}) as Record<string, unknown>, ((): any => {
                 const tool = input.tool_name as string;
                 if (readOnly) return READ_TOOLS.includes(tool) ? ALLOW : DENY_READONLY; // look-only wins over bypass
                 const ti = (input.tool_input || {}) as Record<string, unknown>;
@@ -1686,7 +1693,7 @@ export class LaneManager {
                 if (this.getBypass()) return ALLOW; // changes-on + bypass → anything goes
                 if (this.isSafe(tool, ti, cwd)) return ALLOW;
                 return DENY_READONLY; // reopened sessions don't do risky ops [ASSUMPTION]
-              }],
+              })())],
             }],
           } as any,
         },
@@ -2319,7 +2326,7 @@ export class LaneManager {
           // Our PreToolUse hook is still the permission gate regardless (AD-6;
           // canUseTool doesn't fire in this SDK's local transport, the hook does).
           settingSources: SETTING_SOURCES,
-          settings: LANE_SETTINGS,
+          settings: laneSettingsFor(this.projectPath),
           disallowedTools: LANE_DISALLOWED_TOOLS,
           // When bypass is on (Maksym's "just work, never ask" pref), run in TRUE
           // bypass mode — not "default". "default" still enforces Claude Code's
@@ -2340,7 +2347,9 @@ export class LaneManager {
               // two full holds plus its own, so: 3 × maxHoldMin. This also lifts
               // the silent 10-minute cap the ask-Maksym wait below used to have.
               timeout: 3 * (dev?.maxHoldMin ?? DEFAULT_MAX_HOLD_MIN) * 60,
-              hooks: [async (input: any): Promise<any> => {
+              // Every allowed look-up helper launch leaves with model: sonnet
+              // (domain/helperModel.ts) — a setting, not a prompt note.
+              hooks: [async (input: any): Promise<any> => withPinnedHelper(input.tool_name as string, (input.tool_input || {}) as Record<string, unknown>, await (async (): Promise<any> => {
                 const toolName = input.tool_name as string;
                 const ti = (input.tool_input || {}) as Record<string, unknown>;
                 // Never at night — before bypass, before everything: merging,
@@ -2468,7 +2477,7 @@ export class LaneManager {
                 // waits for it to finish (PostToolUse below) before counting.
                 if (phone && decision === ALLOW) this.board.begin(id);
                 return decision;
-              }],
+              })())],
             }],
             // A phone command finished (well or badly): the holder's grace clock
             // starts. Never release here — the next command may be seconds away.
@@ -2626,8 +2635,9 @@ export class LaneManager {
           // context size. (The `result` usage below is SUMMED over every call in
           // the turn — 4 tool calls at ~190k each read as "784k" — so never use
           // that sum as the memory size.)
-          const au = (msg.message as any).usage;
-          if (au) { const c = (au.input_tokens || 0) + (au.cache_read_input_tokens || 0) + (au.cache_creation_input_tokens || 0); if (c > 0) l.lastCallCtx = c; }
+          // Only the character's own call is the session's size (a helper's is not).
+          const own = mainCallCtx(msg as any);
+          if (own !== null) l.lastCallCtx = own;
           for (const block of msg.message.content) {
             if (block.type === "text" && block.text.trim()) {
               noteEvidence(l.pictureEvidence, block.text);

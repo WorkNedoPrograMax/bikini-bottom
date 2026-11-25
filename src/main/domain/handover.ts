@@ -107,10 +107,23 @@ export function compactDue(s: { ctx: number; busy: boolean; continuing: boolean;
   return s.continuing && !s.busy && !s.handoverPending && s.ctx >= COMPACT_AT_CTX;
 }
 
+/** The context size one streamed assistant message stands for — only when it is
+ *  the character's OWN call. A helper's frames carry a parent_tool_use_id and
+ *  their size is the helper's memory, not the session's: on 2026-11-23 16:08 and
+ *  2026-11-24 12:01 a review helper's 218,755 / 207,412 calls were taken as the
+ *  session size and two sessions of 137,645 / 95,411 were compacted. */
+export function mainCallCtx(msg: { type?: string; parent_tool_use_id?: string | null; message?: { usage?: Record<string, number | undefined> } }): number | null {
+  if (msg.type !== "assistant" || msg.parent_tool_use_id) return null;
+  const u = msg.message?.usage;
+  if (!u) return null;
+  const c = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+  return c > 0 ? c : null;
+}
+
 /** The engine's own compaction, told what must survive. */
 export const COMPACT_COMMAND =
   "/compact Keep exactly: the ticket key and branch; which stage (plan, build, review, ship) is in progress and what is left of it; every decision and answer Maksym gave; open questions and review findings not yet fixed; the paths of the files and records being worked on; commands that must still be run. Drop: file contents already read, command output, finished steps.";
 
 /** Added to every builder's instructions. */
 export const STAGE_NOTE =
-  " STAGES AND A CLEAN MEMORY: a ticket moves through stages — plan (kickoff, the approved change), build (implement), review (verify, the reviews, fixing their findings), ship (commit, push, the pull request). The moment one stage is FINISHED — its gate passed, Maksym's answers in, nothing of it left running — and before you start the next one, call `stage_done` with the stage, one line for what comes next, and a short hand-over: the ticket and branch, what this stage decided and produced (paths, not contents), what Maksym answered, what is still open. Then end your turn with one line. The town starts you fresh with that hand-over, so write it for someone who remembers nothing. Never call it in the middle of a stage; if the tool says the session is still small, just carry on. HELPERS AND THEIR MODEL: a helper you launch only to search, read or gather (Explore, general-purpose, a ticket-context harvest) gets `model: \"sonnet\"`; a helper that reviews, audits or judges gets `model: \"opus\"` unless its own file already names one.";
+  " STAGES AND A CLEAN MEMORY: a ticket moves through stages — plan (kickoff, the approved change), build (implement), review (verify, the reviews, fixing their findings), ship (commit, push, the pull request). The moment one stage is FINISHED — its gate passed, Maksym's answers in, nothing of it left running — and before you start the next one, call `stage_done` with the stage, one line for what comes next, and a short hand-over: the ticket and branch, what this stage decided and produced (paths, not contents), what Maksym answered, what is still open. Then end your turn with one line. The town starts you fresh with that hand-over, so write it for someone who remembers nothing. Never call it in the middle of a stage; if the tool says the session is still small, just carry on. HELPERS AND THEIR MODEL: the town launches Explore, general-purpose, task-context-harvester and figma-comparer with `model: \"sonnet\"` whatever you pass, so give them a self-contained brief; a helper that reviews, audits or judges gets `model: \"opus\"` unless its own file already names one.";

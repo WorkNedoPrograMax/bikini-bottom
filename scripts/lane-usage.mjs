@@ -5,6 +5,7 @@
 //   npm run usage -- 2026-11-09 2026-11-23
 //   npm run usage -- 2026-11-23 --lane mobile/bob   (one day, one lane)
 //   npm run usage -- 2026-11-09 2026-11-23 --total  (one row per lane)
+//   npm run usage -- 2026-11-24 --by-helper         (one row per helper type, all lanes)
 //
 // It reads the engine's own session records (~/.claude/projects/<lane worktree>/
 // *.jsonl and their subagents/ folders): every model call is there with its
@@ -44,6 +45,12 @@ const from = dates[0] || day(new Date(Date.now() - 6 * 86_400_000));
 const onlyLane = flag("--lane");
 const total = args.includes("--total");
 const asJson = args.includes("--json");
+const byHelper = args.includes("--by-helper");
+
+/** The helper type of a sub-agent record, from the engine's meta file next to it. */
+function helperType(file) {
+  try { return JSON.parse(fs.readFileSync(file.replace(/\.jsonl$/, ".meta.json"), "utf8")).agentType || "(unknown)"; } catch { return "(unknown)"; }
+}
 
 function files(dir) {
   const out = [];
@@ -81,7 +88,7 @@ function callsOf(file) {
 
 const blank = () => ({ calls: 0, ctx: 0, cost: 0, bigCost: 0, firsts: [], rb5: 0, rb60: 0, rbOld: 0, rbTokens: 0, helpers: 0, w5m: 0, w1h: 0, sonnet: 0 });
 const rows = new Map(); // "lane|day" → totals
-const row = (lane, d) => { const k = total ? lane : `${lane}|${d}`; if (!rows.has(k)) rows.set(k, blank()); return rows.get(k); };
+const row = (lane, d) => { const k = byHelper ? lane : total ? lane : `${lane}|${d}`; if (!rows.has(k)) rows.set(k, blank()); return rows.get(k); };
 
 for (const dirName of fs.existsSync(PROJECTS) ? fs.readdirSync(PROJECTS) : []) {
   const m = dirName.match(LANE_DIR);
@@ -91,6 +98,7 @@ for (const dirName of fs.existsSync(PROJECTS) ? fs.readdirSync(PROJECTS) : []) {
   for (const file of files(path.join(PROJECTS, dirName))) {
     const isHelperFile = file.includes(`${path.sep}subagents${path.sep}`);
     const calls = callsOf(file);
+    const who = byHelper ? (isHelperFile ? helperType(file) : "(character's own session)") : lane;
     let prev = null;
     for (const c of calls) {
       const ctx = c.input + c.read + c.w5m + c.w1h;
@@ -98,7 +106,7 @@ for (const dirName of fs.existsSync(PROJECTS) ? fs.readdirSync(PROJECTS) : []) {
       const gapMin = first ? 0 : (c.t - prev.t) / 60_000;
       prev = c;
       if (c.day < from || c.day > to) continue;
-      const r = row(lane, c.day);
+      const r = row(who, c.day);
       const cost = c.input * W.input + c.read * W.read + c.w5m * W.w5m + c.w1h * W.w1h + c.out * W.out;
       r.calls++; r.ctx += ctx; r.cost += cost; r.w5m += c.w5m; r.w1h += c.w1h;
       if (ctx > BIG) r.bigCost += cost;
@@ -115,7 +123,7 @@ for (const dirName of fs.existsSync(PROJECTS) ? fs.readdirSync(PROJECTS) : []) {
 
 const k = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? Math.round(n / 1000) + "k" : String(Math.round(n)));
 const median = (a) => (a.length ? [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)] : 0);
-const out = [...rows.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, r]) => {
+const out = [...rows.entries()].sort(byHelper ? ([, a], [, b]) => b.cost - a.cost : ([a], [b]) => a.localeCompare(b)).map(([key, r]) => {
   const [lane, d] = key.split("|");
   return {
     lane, day: d || `${from}..${to}`, calls: r.calls, avgCtx: Math.round(r.ctx / Math.max(1, r.calls)),
@@ -126,7 +134,7 @@ const out = [...rows.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key
 });
 
 if (asJson) { console.log(JSON.stringify(out, null, 1)); process.exit(0); }
-const head = ["lane", "day", "calls", "avg ctx", ">200k", "first", "rebuilds <5m/5-60m/>60m", "helpers", "sonnet", "5m write", "1h write", "cost"];
+const head = [byHelper ? "helper" : "lane", "day", "calls", "avg ctx", ">200k", "first", "rebuilds <5m/5-60m/>60m", "helpers", "sonnet", "5m write", "1h write", "cost"];
 const table = out.map((o) => [o.lane, o.day, String(o.calls), k(o.avgCtx), Math.round(o.over200kCostShare * 100) + "%", o.sessions ? k(o.firstCall) : "—",
   `${o.rebuildsUnder5m}/${o.rebuilds5to60m}/${o.rebuildsOver60m}`, String(o.helperRuns), Math.round((o.sonnetCalls / Math.max(1, o.calls)) * 100) + "%", k(o.write5m), k(o.write1h), k(o.cost)]);
 const sum = out.reduce((a, o) => ({ calls: a.calls + o.calls, ctx: a.ctx + o.avgCtx * o.calls, rb5: a.rb5 + o.rebuildsUnder5m, rb60: a.rb60 + o.rebuilds5to60m, rbOld: a.rbOld + o.rebuildsOver60m, helpers: a.helpers + o.helperRuns, sonnet: a.sonnet + o.sonnetCalls, w5m: a.w5m + o.write5m, w1h: a.w1h + o.write1h, cost: a.cost + o.cost, big: a.big + o.over200kCostShare * o.cost }),

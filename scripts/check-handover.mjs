@@ -147,8 +147,40 @@ console.log("connectors — by name, never a wildcard, and never one the lanes u
   ok(kept.every((k) => !denied.includes(k)), `none of the kept ones is denied (${kept.join(", ")})`);
   ok(!denied.some((n) => /atlassian|slack/i.test(n)), "nothing Jira- or Slack-shaped is denied");
   const s = JSON.parse(C.laneSettings());
-  ok(Array.isArray(s.deniedMcpServers) && s.deniedMcpServers.length === denied.length && s.deniedMcpServers.every((e) => typeof e.serverName === "string" && Object.keys(e).length === 1), "the settings overlay is { deniedMcpServers: [{ serverName }] }");
+  ok(Array.isArray(s.deniedMcpServers) && s.deniedMcpServers.length === C.deniedServers("other").length && s.deniedMcpServers.every((e) => typeof e.serverName === "string" && Object.keys(e).length === 1), "the settings overlay is { deniedMcpServers: [{ serverName }] }");
   ok(denied.includes("claude.ai Figma"), "the unauthorized Figma twin stays denied (the Figma plugin needs that)");
+  // Per town (2026-11-25): plugin servers too, by full name, never a kept one.
+  for (const [kind, keep] of [["app", C.KEPT_IN_APP_TOWN], ["other", C.KEPT_IN_OTHER_TOWNS]]) {
+    const d = C.deniedServers(kind);
+    ok(new Set(d).size === d.length && d.every((n) => !/[*?]/.test(n)), `${kind} town: ${d.length} names, none twice, no wildcard`);
+    ok(keep.every((k) => !d.includes(k)), `${kind} town keeps ${keep.join(", ")}`);
+    ok(!d.some((n) => /atlassian|slack|gmail|figma:figma/i.test(n)), `${kind} town: nothing Jira-, Slack-, Gmail- or Figma-plugin-shaped is denied`);
+    ok(JSON.parse(C.laneSettings(kind)).deniedMcpServers.length === d.length, `${kind} town: the overlay carries all of them`);
+  }
+  ok(C.deniedServers("app").includes("claude.ai Supabase") && !C.deniedServers("other").includes("claude.ai Supabase"), "Supabase: off in the app town, kept where it was called (backend)");
+  ok(C.deniedServers("other").includes("plugin:flutter:maestro") && !C.deniedServers("app").includes("plugin:flutter:maestro"), "Maestro: off away from the phone, kept in the app town");
+  ok(C.deniedServers("app").includes("playwright-ext") && C.deniedServers("other").includes("playwright-ext"), "the browser extension is off everywhere");
+  const lsrc = readFileSync(new URL("../src/main/adapters/lane.ts", import.meta.url), "utf8");
+  ok((lsrc.match(/settings: laneSettingsFor\(this\.projectPath\)/g) || []).length === 2 && !/LANE_SETTINGS/.test(lsrc), "both lane session kinds take the town's own list");
+}
+
+console.log("lane — the size the 200k rule reads is the session's own:");
+{
+  const usage = (n) => ({ input_tokens: 2, cache_read_input_tokens: n - 2, cache_creation_input_tokens: 0 });
+  ok(H.mainCallCtx({ type: "assistant", parent_tool_use_id: null, message: { usage: usage(137_645) } }) === 137_645, "the character's own call sets the size");
+  ok(H.mainCallCtx({ type: "assistant", parent_tool_use_id: "toolu_lens", message: { usage: usage(218_755) } }) === null, "a helper's call (it has a parent tool) does not — 2026-11-23 16:08, backend Pat");
+  ok(H.mainCallCtx({ type: "user", parent_tool_use_id: null, message: {} }) === null, "a non-call message does not");
+  const src = readFileSync(new URL("../src/main/adapters/lane.ts", import.meta.url), "utf8");
+  ok(/const own = mainCallCtx\(msg as any\);\s*if \(own !== null\) l\.lastCallCtx = own;/.test(src) && !/if \(c > 0\) l\.lastCallCtx = c;/.test(src), "the lane's stream sets the size only through mainCallCtx");
+  // A past order picked up again: the size of the session left behind is dropped.
+  const dir = town(); const lm = manager(dir); const l = lm.lane("squid");
+  l.sessionId = "big-one"; l.lastCallCtx = 272_592; l.stats.ctxTokens = 272_592;
+  l.conversation = [{ from: "you", text: "current order" }];
+  l.archive = [{ title: "older", messages: [{ from: "you", text: "older order" }], sdkSessionId: "small-past", endedAt: 1 }];
+  const sent = []; lm.send = async (id, text, fresh) => { sent.push({ id, text, fresh, ctx: l.lastCallCtx, meter: l.stats.ctxTokens }); };
+  await lm.resumePast("squid", 0, "carry on");
+  ok(sent.length === 1 && sent[0].ctx === 0 && sent[0].meter === 0, "resuming a past order starts with no inherited size (no compaction on the old session's 272k) — 2026-11-24 20:30");
+  ok(H.compactDue({ ctx: sent[0]?.meter ?? 1e9, busy: false, continuing: true, handoverPending: false }) === false, "…so the 200k rule does not fire before its first message");
 }
 
 console.log(fails ? `\n${fails} check(s) FAILED` : "\nall hand-over checks passed");

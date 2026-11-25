@@ -101,8 +101,61 @@ export const DENIED_CONNECTORS: readonly string[] = [
   "claude.ai Box",
 ];
 
+// PER TOWN (2026-11-25). The same rule — never called in two weeks — applied to
+// each town separately and to plugin servers too. Counted from the session
+// records of the lanes, main sessions and helpers, 2026-11-09..25:
+//   phone-app town (highcap mobile): Atlassian MCP 926, Figma plugin 122, Slack 63,
+//     Mazarax 31, Gmail 29, Maestro (flutter) 16, Codemagic 4, Maestro (empat-qa) 2
+//     — never: Supabase, Google Drive, Playwright (both), App Store Connect,
+//     Google Play, Dart
+//   other towns (highcap backend): Atlassian MCP 459, Slack 27, Gmail 18,
+//     Google Drive 15, Playwright (empat-qa) 5, Supabase 3, Figma plugin 2
+//     — never: either Maestro, Codemagic, App Store Connect, Google Play, Dart,
+//     Mazarax, Playwright (browser extension)
+// Why it matters: which servers finish connecting before a session's first call
+// is random, and each one connected adds its tool names and instructions to
+// every call — a mobile session started at 100k with 64 connector tools and at
+// 111-113k with 231 (town log "session ready" joined to the first call,
+// 2026-11-23..25). Probe 2026-11-25: deniedMcpServers removes a plugin server
+// ("plugin:flutter:google-play") and a local one ("playwright-ext") by name.
+
+/** Never reachable from a headless lane (its tools are already disallowed). */
+export const DENIED_EVERYWHERE: readonly string[] = ["playwright-ext"];
+
+/** Denied in the phone-app town (a repo with pubspec.yaml). */
+export const DENIED_IN_APP_TOWN: readonly string[] = [
+  "claude.ai Supabase",
+  "claude.ai Google Drive",
+  "plugin:empat-qa:playwright",
+  "plugin:flutter:app-store-connect",
+  "plugin:flutter:google-play",
+  "plugin:flutter:dart",
+];
+
+/** Denied in every other town: the phone, store and Flutter servers. */
+export const DENIED_IN_OTHER_TOWNS: readonly string[] = [
+  "plugin:flutter:maestro",
+  "plugin:empat-qa:maestro",
+  "plugin:flutter:codemagic",
+  "plugin:flutter:app-store-connect",
+  "plugin:flutter:google-play",
+  "plugin:flutter:dart",
+  "mazarax",
+];
+
+/** Kept per town — here so the check can prove the deny lists never name one. */
+export const KEPT_IN_APP_TOWN: readonly string[] = ["claude.ai Atlassian MCP", "claude.ai Slack", "claude.ai Gmail", "plugin:figma:figma", "mazarax", "plugin:flutter:maestro", "plugin:empat-qa:maestro", "plugin:flutter:codemagic"];
+export const KEPT_IN_OTHER_TOWNS: readonly string[] = ["claude.ai Atlassian MCP", "claude.ai Slack", "claude.ai Gmail", "claude.ai Google Drive", "claude.ai Supabase", "plugin:empat-qa:playwright", "plugin:figma:figma", "plugin:pg:pg-aiguide"];
+
+export type TownKind = "app" | "other";
+
+/** Every server name a lane of this kind of town does not load. */
+export function deniedServers(kind: TownKind): string[] {
+  return [...DENIED_CONNECTORS, ...DENIED_EVERYWHERE, ...(kind === "app" ? DENIED_IN_APP_TOWN : DENIED_IN_OTHER_TOWNS)];
+}
+
 /** The settings overlay every character session starts with (the engine's
  *  --settings JSON; merges on top of user/project/local settings). */
-export function laneSettings(): string {
-  return JSON.stringify({ deniedMcpServers: DENIED_CONNECTORS.map((serverName) => ({ serverName })) });
+export function laneSettings(kind: TownKind = "other"): string {
+  return JSON.stringify({ deniedMcpServers: deniedServers(kind).map((serverName) => ({ serverName })) });
 }
