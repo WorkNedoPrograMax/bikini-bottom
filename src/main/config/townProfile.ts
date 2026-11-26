@@ -88,6 +88,8 @@ export interface TownProfile {
   pulls?: PullsSpec;
   /** The Jira page, when the lifecycle config does not say the project. */
   jira?: JiraSpec;
+  /** How many characters may work at once (domain/seats.ts); absent = 2. */
+  seats?: number;
 }
 
 /** Where a project's profile lives. */
@@ -157,6 +159,7 @@ export function normalizeProfile(raw: unknown, projectPath: string): TownProfile
   if (pulls) out.pulls = pulls;
   const jira = normalizeJira(r.jira);
   if (jira) out.jira = jira;
+  if (typeof r.seats === "number" && Number.isInteger(r.seats) && r.seats >= 1) out.seats = r.seats;
   return out;
 }
 
