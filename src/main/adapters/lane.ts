@@ -32,7 +32,8 @@ import { reviewOnlyRefusal, postReviewArgs, REVIEW_ONLY_REASON, REVIEW_ONLY_NOTE
 import { runGh } from "./gh";
 import { laneSettings } from "../domain/laneConnectors";
 import { withPinnedHelper } from "../domain/helperModel";
-import { handoverVerdict, handoverMessage, compactDue, mainCallCtx, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, stageModelKind, nextStage, type Handover, type Stage } from "../domain/handover";
+import { handoverVerdict, handoverMessage, compactDue, mainCallCtx, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, stageModelKind, nextStage, forcedHandoverDue, brakeDue, breakNoteDue, memoryVerdict, NOTE_REQUEST, BRAKE_NOTE, MEMORY_SAVED_REPLY, BREAK_IDLE_MS, type Handover, type Stage, type NoteAsk } from "../domain/handover";
+import { DEFAULT_SEATS, SEAT_WAIT_ACTIVITY, seatFree, admitOrder, type SeatLane } from "../domain/seats";
 import { REVIEWER_IDS, ROSTER } from "../config/roster";
 import { sleepStep, nightRefusal, refusalReason, askReply, openEntries, applyNotes, addDid, noteProblem, morningPage, morningBubble, SLEEP_MARK, SLEEP_NOTE, SLEEP_TICK_MS, PERMISSION_REFUSAL, DIAGNOSIS_PROMPT, type NightEntry, type NightNote, type SleepAction } from "../domain/sleep";
 import { log, log as appLog } from "../log";
@@ -421,6 +422,21 @@ interface Lane {
   handover: Handover | null;
   handovers: number;
   stage: Stage | null;      // the stage this session works on; picks its model (modelForStage)
+  // The town's own hand-over (domain/handover.ts, 2026-11-26): which ask for a
+  // clean_memory note is out (null = none); the size this session started at
+  // when opened fresh (0 = resumed/unknown); the size at the last ask that
+  // brought no note; whether the mid-run brake was already said this session;
+  // the pre-break timer; a message that arrived while a pre-break note was
+  // being written (it opens the fresh session).
+  noteAsk: NoteAsk | null;
+  sessionBaseCtx: number;
+  noteTry: number;
+  braked: boolean;
+  breakTimer: ReturnType<typeof setTimeout> | null;
+  afterNote: { text: string; attachments?: Attachment[] } | null;
+  // Seats (domain/seats.ts): a message held until a seat frees up, and since when.
+  seatWait: { text: string; fresh: boolean; attachments?: Attachment[] } | null;
+  seatSince: number;
   // Live streaming session (terminal-style): one persistent query fed by `pump`.
   pump: Pump | null;
   sdkQuery: any | null;         // the running query() — for interrupt()
@@ -581,6 +597,12 @@ export interface NotebookSupport {
 
 export class LaneManager {
   private lanes = new Map<CharacterId, Lane>();
+  /** How many characters of this town may work at once (town.json `seats`, domain/seats.ts). */
+  seats = DEFAULT_SEATS;
+  /** The engine's query(); a check swaps in a scripted stand-in to drive a
+   *  whole session with no Claude call (scripts/check-handover.mjs). */
+  queryFn: typeof query = query;
+  private seatTicker: ReturnType<typeof setInterval> | null = null;
   /** Single integration queue — serves apply one at a time (AD-5). */
   private integrateChain: Promise<void> = Promise.resolve();
 
@@ -865,6 +887,7 @@ export class LaneManager {
         abort: null, cancelled: false, superseded: false,
         resumedSession: false, turnsThisSession: 0, lastCallCtx: 0,
         handover: cur?.handover ?? null, handovers: cur?.handovers ?? 0, stage: cur?.stage ?? null,
+        noteAsk: null, sessionBaseCtx: 0, noteTry: 0, braked: false, breakTimer: null, afterNote: null, seatWait: null, seatSince: 0,
         pump: null, sdkQuery: null, outstanding: 0, awaitingIdle: false, awaitSince: 0, idleAt: 0, helperFinishedAt: 0, idleTimer: null, jiraMoves: new Map(),
         activity: null, todos: [], taskStartedAt: cur?.taskStartedAt ?? 0, taskTokens: cur?.taskTokens ?? 0, beatAt: 0, lastBeatPush: 0, sessionLoop: null,
         pending: null, pendingChoice: null, watchdog: null, agents: new Map(), notified: new Set(),
@@ -931,7 +954,7 @@ export class LaneManager {
     const l = this.lane(id);
     const live = !!l.pump; // pending items are only real while the session is alive
     return {
-      conversation: l.conversation, working: l.working, pendingAsk: live ? (l.pending?.question ?? null) : null,
+      conversation: l.conversation, working: l.working || !!l.seatWait, pendingAsk: live ? (l.pending?.question ?? null) : null,
       pendingChoice: live ? (l.pendingChoice?.ask ?? null) : null,
       burned: l.burned, paused: l.paused, served: l.served, sentBack: l.sentBack, collision: l.collision,
       agents: l.agents.size,
@@ -1008,6 +1031,7 @@ export class LaneManager {
   wakeIfResumed(id: CharacterId, msg: { type?: string; parent_tool_use_id?: string | null }): boolean {
     const l = this.lane(id);
     if (l.working || l.awaitingIdle) return false;              // already shown as working
+    if (l.noteAsk === "break") return false;                    // the silent pre-break note, not work
     if (l.pending || l.pendingChoice || l.paused || l.burned) return false; // a real stop
     if (msg.type !== "assistant" || msg.parent_tool_use_id) return false;  // only his own call
     l.working = true;
@@ -1050,6 +1074,7 @@ export class LaneManager {
     l.stats = { ...EMPTY_JOB_STATS }; l.phase = null; l.phaseSince = 0; l.nudged = false; l.lastAskAnsweredAt = 0;
     l.note = null; l.noteAt = 0; // a fresh order starts with a clean chalk line
     l.handover = null; l.handovers = 0; l.stage = null; // …and owes nothing to the last order's stages
+    this.leaveSeatQueue(l); l.afterNote = null; // a new order replaces anything still queued
     this.clearLimit(l); // a new order never inherits an old limit hold
     // Remember the main-line commit this Job builds on (for landing/undo, AD-5).
     try { l.baseSha = await headSha(this.projectPath); } catch { l.baseSha = null; }
@@ -1325,12 +1350,39 @@ export class LaneManager {
     const l = this.lane(id);
     // Idle = between messages: not mid-turn and not in the quiet wait after one.
     const busy = l.working || l.awaitingIdle;
+    // Seats (domain/seats.ts): an idle character whose town already has its
+    // working characters waits, visibly, and starts by itself when one is free.
+    // A character already working keeps its seat (its messages join its turn).
+    if (!busy && (l.seatWait || !seatFree(id, this.seatLanes(), this.seats))) {
+      const w = l.seatWait;
+      l.seatWait = w ? { text: `${w.text}\n\n${text}`, fresh: w.fresh || fresh, attachments: [...(w.attachments || []), ...(attachments || [])] } : { text, fresh, attachments };
+      if (!l.seatSince) { l.seatSince = Date.now(); log("seats", `${id} waits for a free seat`, { seats: this.seats }); }
+      l.activity = SEAT_WAIT_ACTIVITY;
+      this.armSeatTicker();
+      this.onChange();
+      return;
+    }
+    if (l.breakTimer) { clearTimeout(l.breakTimer); l.breakTimer = null; } // he is back before the break note
+    // A pre-break note is being written right now: this message waits for it and
+    // then opens the fresh session (or, if no note came, joins the old one).
+    if (l.noteAsk === "break") {
+      const a = l.afterNote;
+      l.afterNote = a ? { text: `${a.text}\n\n${text}`, attachments: [...(a.attachments || []), ...(attachments || [])] } : { text, attachments };
+      l.working = true; l.activity = "getting started…"; l.beatAt = Date.now(); l.turnStartedAt = Date.now();
+      this.setPhase(l, "working");
+      await this.log.append({ type: "CharacterStateChanged", id, state: "working" });
+      this.onChange();
+      return;
+    }
     if (l.handover) {
       // A finished stage left a hand-over. Idle → this message opens the fresh
       // session. Busy → the message joins the running turn, which makes the
       // hand-over stale (it was written before this exchange): drop it; the
       // character calls stage_done again when the stage really ends.
-      if (!busy) return this.startNextStage(id, text, attachments);
+      // A town-asked (memory) note written at a turn's end is not stale in the
+      // quiet wait after it: nothing of that session is still running.
+      const settled = l.handover.kind === "memory" && l.outstanding === 0 && l.agents.size === 0 && !l.noteAsk;
+      if (!busy || settled) return this.startNextStage(id, text, attachments);
       log("handover", `${id} hand-over dropped — a message arrived mid-turn`, { stage: l.handover.stage });
       l.handover = null;
     }
@@ -1390,16 +1442,94 @@ export class LaneManager {
     const l = this.lane(id);
     const h = l.handover;
     if (!h) return;
-    l.handover = null; l.handovers++;
+    // A town-asked (memory) hand-over keeps the stage and its model; it is not
+    // one of the order's stage hand-overs (MAX_HANDOVERS_PER_ORDER).
+    const memory = h.kind === "memory";
+    l.handover = null; if (!memory) l.handovers++;
     const before = l.lastCallCtx || l.stats.ctxTokens || 0;
     this.endSession(l);
     l.sessionId = null; l.lastCallCtx = 0; l.stats.ctxTokens = 0; l.nudged = false;
-    l.stage = nextStage(h.stage);
+    if (!memory) l.stage = nextStage(h.stage);
     const on = stageModelKind(l.stage) === "routine" ? "Sonnet (routine work)" : "Opus (decisions)";
-    l.conversation.push({ from: "them", text: `📒 The ${h.stage} stage is done — starting the next one with a clean memory (was ${Math.round(before / 1000)}k tokens), on ${on}. Next: ${h.next}`, tool: true });
-    log("handover", `${id} fresh session after ${h.stage}`, { stage: l.stage, model: modelForStage(l.stage), ctxBefore: before, handovers: l.handovers, chars: h.text.length, withMessage: !!said });
+    l.conversation.push({ from: "them", text: memory
+      ? `📒 My memory for this order had grown to ${Math.round(before / 1000)}k tokens — carrying on with a clean memory from my own hand-over. Next: ${h.next}`
+      : `📒 The ${h.stage} stage is done — starting the next one with a clean memory (was ${Math.round(before / 1000)}k tokens), on ${on}. Next: ${h.next}`, tool: true });
+    log("handover", memory ? `${id} fresh session — town-asked hand-over` : `${id} fresh session after ${h.stage}`, { stage: l.stage, model: modelForStage(l.stage), ctxBefore: before, handovers: l.handovers, chars: h.text.length, withMessage: !!said, kind: h.kind ?? "stage" });
     this.persist();
     await this.send(id, handoverMessage(h, l.lastPrompt, said), true, attachments);
+  }
+
+  // ───────────── Seats (domain/seats.ts) ─────────────
+  private seatLanes(now = Date.now()): SeatLane[] {
+    return [...this.lanes].map(([id, l]) => ({
+      id, busy: l.working || l.awaitingIdle, seatSince: l.seatSince,
+      waitingOnMaksym: !!(l.pending || l.pendingChoice) || l.paused || l.burned || l.limitedUntil > now,
+    }));
+  }
+  /** Start every waiting order a seat has freed up for, oldest first. */
+  admitSeats(): void {
+    for (const sid of admitOrder(this.seatLanes(), this.seats)) {
+      const l = this.lane(sid as CharacterId);
+      const w = l.seatWait;
+      l.seatWait = null; l.seatSince = 0; l.activity = null;
+      if (!w) continue;
+      log("seats", `${sid} got a seat`, { seats: this.seats });
+      void this.send(sid as CharacterId, w.text, w.fresh, w.attachments);
+    }
+  }
+  /** While anyone waits, look every few seconds (a seat frees up on a finish,
+   *  a pause, a burn, a cancel, a limit — one look covers them all). */
+  private armSeatTicker(): void {
+    if (this.seatTicker) return;
+    this.seatTicker = setInterval(() => {
+      this.admitSeats();
+      if (![...this.lanes.values()].some((l) => l.seatWait) && this.seatTicker) { clearInterval(this.seatTicker); this.seatTicker = null; }
+    }, 3000);
+    (this.seatTicker as any).unref?.();
+  }
+  private leaveSeatQueue(l: Lane): void { l.seatWait = null; l.seatSince = 0; if (l.activity === SEAT_WAIT_ACTIVITY) l.activity = null; }
+
+  // ───────────── The town's own hand-over (domain/handover.ts) ─────────────
+  /** Ask the live session for a clean_memory note, as a message the chat never
+   *  shows. "turn": right after a turn ended on a big session (he stays shown
+   *  working for those seconds); "break": silently, while he is idle. */
+  private askForNote(id: CharacterId, kind: "turn" | "break"): boolean {
+    const l = this.lane(id);
+    if (!l.pump || l.pump.closed() || l.noteAsk) return false;
+    l.noteAsk = kind; l.outstanding++;
+    if (kind === "turn") l.activity = "tidying my memory…";
+    log("handover", `${id} town asks for a hand-over`, { kind, ctx: l.lastCallCtx || l.stats.ctxTokens || 0, base: l.sessionBaseCtx, lastTry: l.noteTry });
+    l.pump.push(NOTE_REQUEST);
+    return true;
+  }
+  /** Idle long enough on a big live session → the note is written now, while
+   *  the prompt cache is still warm. Returns true when it asked. */
+  breakTick(id: CharacterId, now = Date.now()): boolean {
+    const l = this.lane(id);
+    if (REVIEWER_IDS.has(id)) return false;
+    const due = breakNoteDue({
+      ctx: l.lastCallCtx || l.stats.ctxTokens || 0, idleMs: l.idleAt ? now - l.idleAt : 0,
+      live: !!l.pump && !l.pump.closed(), busy: l.working || l.awaitingIdle, handoverPending: !!l.handover,
+      noteAsked: !!l.noteAsk, waitingOnMaksym: !!(l.pending || l.pendingChoice) || l.paused || l.burned,
+    });
+    return due && this.askForNote(id, "break");
+  }
+  private armBreakNote(id: CharacterId): void {
+    const l = this.lane(id);
+    if (l.breakTimer) clearTimeout(l.breakTimer);
+    l.breakTimer = null;
+    if (REVIEWER_IDS.has(id)) return;
+    l.breakTimer = setTimeout(() => { l.breakTimer = null; this.breakTick(id); }, BREAK_IDLE_MS + 1000);
+    (l.breakTimer as any).unref?.();
+  }
+  /** The pre-break note's turn ended (with or without a note). A message that
+   *  came meanwhile now opens the fresh session — or joins the old one. */
+  private async finishBreakNote(id: CharacterId): Promise<void> {
+    const l = this.lane(id);
+    const held = l.afterNote; l.afterNote = null;
+    if (!held) { this.onChange(); return; }
+    if (l.handover) return this.startNextStage(id, held.text, held.attachments);
+    return this.send(id, held.text, false, held.attachments);
   }
 
   /** Prepare a message's attachments: images become inline vision blocks (the
@@ -1464,6 +1594,9 @@ export class LaneManager {
     l.abort?.abort();
     l.pump = null; l.sdkQuery = null; l.outstanding = 0; l.awaitingIdle = false;
     if (l.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = null; }
+    // Whatever the town's hand-over knew was about this session.
+    l.noteAsk = null; l.sessionBaseCtx = 0; l.noteTry = 0; l.braked = false;
+    if (l.breakTimer) { clearTimeout(l.breakTimer); l.breakTimer = null; }
   }
 
   /** Scrap a burned/paused order → back to Idle. Ends the live session. */
@@ -1479,6 +1612,7 @@ export class LaneManager {
     void this.parkReviewer(id);
     l.note = null; l.noteAt = 0; // nothing to report about a scrapped order
     l.handover = null; l.stage = null; // …and no stage to hand over
+    this.leaveSeatQueue(l); l.afterNote = null;
     l.conversation.push({ from: "them", text: "Scrapped. That order's off the books." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -1492,6 +1626,9 @@ export class LaneManager {
     const l = this.lane(id);
     if (l.pending) { const r = l.pending.resolve; l.pending = null; r(DENY); }
     if (l.pendingChoice) { const r = l.pendingChoice.resolve; l.pendingChoice = null; r("(cancelled — no answer)"); }
+    const queued = !!l.seatWait;
+    this.leaveSeatQueue(l); l.afterNote = null; // a waiting order is cancelled too
+    if (queued && !l.working && !l.pump) { l.conversation.push({ from: "them", text: "Okay — I won't start that." }); this.persist(); this.onChange(); return; }
     if (!l.working && !l.pump) return;
     l.cancelled = true;
     this.endSession(l);
@@ -2001,6 +2138,8 @@ export class LaneManager {
     // Never wrote a chalk line? The first line of the final reply stands in.
     if (l.note === null) { const fb = fallbackNote(lastReply?.text || ""); if (fb) { l.note = fb; l.noteAt = Date.now(); this.persist(); this.onChange(); } }
     log("lane", `${id} idle`, summary);
+    this.armBreakNote(id); // a long break on a big session → a note before the cache goes cold
+    this.admitSeats();     // his seat is free now
     this.onFinished(id, summary);
     void this.parkReviewer(id); // the reviewer leaves the shared folder on its main line
     void this.integrate(id); // land the work in the Project (AD-5)
@@ -2215,6 +2354,23 @@ export class LaneManager {
             return { content: [{ type: "text", text: HANDOVER_SAVED_REPLY }] };
           },
         ),
+        // The town's own hand-over (domain/handover.ts): taken only when the town asked.
+        tool(
+          "clean_memory",
+          "Write a hand-over so the town can carry on in a fresh session. Call it ONLY when the town asks you to (a message or note marked [The town, not Maksym]); otherwise it is refused. The next session sees only your hand-over and the files, so write it for someone who remembers nothing.",
+          {
+            next: z.string().describe("One line: what the fresh session does first — or, if you are waiting for Maksym, what you are waiting for."),
+            handover: z.string().describe("The hand-over, 200–6000 characters: ticket and branch; what is done and produced (paths, not contents); Maksym's answers; what is in progress and still open; anything that must not be redone."),
+          },
+          async (args) => {
+            const v = memoryVerdict(args, { asked: l.noteAsk, helpers: l.agents.size, stage: l.stage, now: Date.now() });
+            if (!v.ok) { log("handover", `${id} clean_memory not taken`, { asked: l.noteAsk, reply: v.reply.slice(0, 60) }); return { content: [{ type: "text", text: v.reply }] }; }
+            l.handover = v.handover;
+            log("handover", `${id} clean_memory`, { asked: l.noteAsk, next: v.handover.next.slice(0, 80), chars: v.handover.text.length, ctx: l.lastCallCtx });
+            this.persist();
+            return { content: [{ type: "text", text: MEMORY_SAVED_REPLY }] };
+          },
+        ),
         tool(
           "phone_done",
           "Hang up the test phone: call this the moment you no longer need a phone (your install → run → flow → screenshot is finished), so the next character in line can test. Nothing is lost — your next phone command simply takes a phone again (iPhone first, else Android, else the line). Not needed when your job ends; the town hangs up for you then.",
@@ -2295,7 +2451,7 @@ export class LaneManager {
       : "";
 
     try {
-      const q = query({
+      const q = this.queryFn({
         prompt: pump.iter,
         options: {
           cwd,
@@ -2486,11 +2642,20 @@ export class LaneManager {
               // A review posted, a push, a PR edited: the town's paper re-reads GitHub.
               if (touchesGitHub(input.tool_name, input.tool_input)) { try { this.fuelOpts.onGitHubWrite?.(id); } catch { /* never let the paper break the lane */ } }
               // The Notebook: a ticket moved → did it reach review? Then a line is owed.
+              const say: string[] = [];
               try {
                 const nudge = await this.jiraMoveSeen(id, l, input.tool_name, input.tool_input, input.tool_response);
-                if (nudge) return { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: nudge } };
+                if (nudge) say.push(nudge);
               } catch (e) { log("lane", `${id} notebook: move not read`, { error: String(e) }); }
-              return {};
+              // Mid-run brake (domain/handover.ts): the session passed the line
+              // between two tool calls → write the hand-over now; the town
+              // carries on in a fresh session at the end of this turn.
+              if (!REVIEWER_IDS.has(id) && brakeDue({ ctx: l.lastCallCtx, braked: l.braked, handoverPending: !!l.handover, noteAsked: !!l.noteAsk, mainThread: !input.agent_id })) {
+                l.braked = true; l.noteAsk = "brake";
+                log("handover", `${id} mid-run brake — hand-over asked`, { ctx: l.lastCallCtx, tool: input.tool_name });
+                say.push(BRAKE_NOTE);
+              }
+              return say.length ? { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: say.join("\n\n") } } : {};
             }] }],
             // The Notebook's forced step: a ticket reached review this job and no
             // line was written → the FIRST attempt to finish is refused with the
@@ -2529,6 +2694,7 @@ export class LaneManager {
           const post = Number(meta.post_tokens) || 0;
           log("handover", `${id} compacted`, { trigger: meta.trigger, pre: meta.pre_tokens, post });
           l.lastCallCtx = post; l.stats.ctxTokens = post;
+          if (post > 0) { l.sessionBaseCtx = post; l.noteTry = 0; } // growth is measured from the summary on
         }
         if (mtype === "rate_limit_event") {
           // Subscription usage-limit status from the CLI. "rejected" = the turn
@@ -2638,7 +2804,13 @@ export class LaneManager {
           // Only the character's own call is the session's size (a helper's is not).
           const own = mainCallCtx(msg as any);
           if (own !== null) l.lastCallCtx = own;
-          for (const block of msg.message.content) {
+          // The size a fresh session starts at (the town's hand-over measures growth from it).
+          if (own !== null && !l.resumedSession && !l.sessionBaseCtx) l.sessionBaseCtx = own;
+          // A note the town asked for at a turn's end or before a break is
+          // between the town and the character: never shown in the chat.
+          const hidden = (l.noteAsk === "turn" || l.noteAsk === "break") && !(msg as any).parent_tool_use_id;
+          if (hidden) log("handover", `${id} writing the hand-over the town asked for`, { kind: l.noteAsk });
+          for (const block of hidden ? [] : msg.message.content) {
             if (block.type === "text" && block.text.trim()) {
               noteEvidence(l.pictureEvidence, block.text);
               const pics = await this.picturesWithFiles(l, block.text);
@@ -2672,6 +2844,8 @@ export class LaneManager {
                 l.todos = parseTodos((block as any).input);
                 l.activity = "planning the work…";
                 log("tool", `${id} TodoWrite`, { count: l.todos.length });
+              } else if (/clean_memory$/.test(String(block.name))) {
+                l.activity = "tidying my memory…"; // the 📒 line says it when the switch happens
               } else {
                 const label = describeTool(block);
                 l.activity = label;
@@ -2731,6 +2905,16 @@ export class LaneManager {
           if (ctx > 0) l.stats.ctxTokens = ctx; // what the next call will re-read (latest call size, NOT the turn total)
           log("lane", `${id} message answered`, { subtype: sub, isError: isErr, turns: (msg as any).num_turns, outstanding: l.outstanding });
           l.outstanding = Math.max(0, l.outstanding - 1);
+          // The town's own hand-over (domain/handover.ts): the turn that wrote
+          // the note it asked for has ended — with the note, or without it (then
+          // it is not asked again before the session grows FORCED_HANDOVER_REGROW).
+          if (l.noteAsk) {
+            const asked = l.noteAsk; l.noteAsk = null;
+            // (An ignored mid-run brake is not counted: the turn-end ask below follows at once.)
+            if (asked !== "brake" && (!l.handover || l.handover.kind !== "memory")) l.noteTry = l.lastCallCtx || ctx;
+            log("handover", `${id} town-asked hand-over ${l.handover?.kind === "memory" ? "written" : "NOT written"}`, { kind: asked, isErr });
+            if (asked === "break") { this.persist(); await this.finishBreakNote(id); continue; } // silent: no bell, no settle
+          }
           if (isErr) {
             console.error(`[bikini] lane ${id} error result: ${sub}`);
             // Claude's usage limit — the CLI reports it as is_error + "success".
@@ -2774,10 +2958,17 @@ export class LaneManager {
           // by itself, with no bell in between. (Anything still outstanding
           // keeps this session; the hand-over then waits for the next idle
           // message — see send().)
-          if (l.handover && l.pump === pump && l.outstanding === 0 && l.agents.size === 0) {
+          if (l.handover && l.handover.auto !== false && l.pump === pump && l.outstanding === 0 && l.agents.size === 0) {
             void this.startNextStage(id);
             return;
           }
+          // The session is big and nobody wrote a hand-over → the town asks for
+          // one now (no reliance on the character deciding a stage is done). It
+          // waits for the next message; the chat shows nothing until the switch.
+          if (!REVIEWER_IDS.has(id) && l.pump === pump && l.outstanding === 0 && forcedHandoverDue({
+            ctx: l.lastCallCtx || ctx, base: l.sessionBaseCtx, lastTry: l.noteTry,
+            orderOpen: !!l.lastPrompt && !l.paused && !l.burned, handoverPending: !!l.handover, helpers: l.agents.size,
+          }) && this.askForNote(id, "turn")) { this.onChange(); continue; }
           // If more messages appear outstanding OR helpers are still running,
           // HOLD (stay working, Cancel active) but arm the quiet-timer so silence
           // releases us. CRITICAL: `outstanding` is unreliable — the model can
