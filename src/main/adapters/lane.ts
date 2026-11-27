@@ -33,7 +33,6 @@ import { runGh } from "./gh";
 import { laneSettings } from "../domain/laneConnectors";
 import { withPinnedHelper } from "../domain/helperModel";
 import { handoverVerdict, handoverMessage, compactDue, mainCallCtx, COMPACT_COMMAND, HANDOVER_SAVED_REPLY, STAGE_NOTE, stageModelKind, nextStage, forcedHandoverDue, brakeDue, breakNoteDue, memoryVerdict, NOTE_REQUEST, BRAKE_NOTE, MEMORY_SAVED_REPLY, BREAK_IDLE_MS, type Handover, type Stage, type NoteAsk } from "../domain/handover";
-import { DEFAULT_SEATS, SEAT_WAIT_ACTIVITY, seatFree, admitOrder, type SeatLane } from "../domain/seats";
 import { REVIEWER_IDS, ROSTER } from "../config/roster";
 import { sleepStep, nightRefusal, refusalReason, askReply, openEntries, applyNotes, addDid, noteProblem, morningPage, morningBubble, SLEEP_MARK, SLEEP_NOTE, SLEEP_TICK_MS, PERMISSION_REFUSAL, DIAGNOSIS_PROMPT, type NightEntry, type NightNote, type SleepAction } from "../domain/sleep";
 import { log, log as appLog } from "../log";
@@ -434,9 +433,6 @@ interface Lane {
   braked: boolean;
   breakTimer: ReturnType<typeof setTimeout> | null;
   afterNote: { text: string; attachments?: Attachment[] } | null;
-  // Seats (domain/seats.ts): a message held until a seat frees up, and since when.
-  seatWait: { text: string; fresh: boolean; attachments?: Attachment[] } | null;
-  seatSince: number;
   // Live streaming session (terminal-style): one persistent query fed by `pump`.
   pump: Pump | null;
   sdkQuery: any | null;         // the running query() — for interrupt()
@@ -597,12 +593,9 @@ export interface NotebookSupport {
 
 export class LaneManager {
   private lanes = new Map<CharacterId, Lane>();
-  /** How many characters of this town may work at once (town.json `seats`, domain/seats.ts). */
-  seats = DEFAULT_SEATS;
   /** The engine's query(); a check swaps in a scripted stand-in to drive a
    *  whole session with no Claude call (scripts/check-handover.mjs). */
   queryFn: typeof query = query;
-  private seatTicker: ReturnType<typeof setInterval> | null = null;
   /** Single integration queue — serves apply one at a time (AD-5). */
   private integrateChain: Promise<void> = Promise.resolve();
 
@@ -887,7 +880,7 @@ export class LaneManager {
         abort: null, cancelled: false, superseded: false,
         resumedSession: false, turnsThisSession: 0, lastCallCtx: 0,
         handover: cur?.handover ?? null, handovers: cur?.handovers ?? 0, stage: cur?.stage ?? null,
-        noteAsk: null, sessionBaseCtx: 0, noteTry: 0, braked: false, breakTimer: null, afterNote: null, seatWait: null, seatSince: 0,
+        noteAsk: null, sessionBaseCtx: 0, noteTry: 0, braked: false, breakTimer: null, afterNote: null,
         pump: null, sdkQuery: null, outstanding: 0, awaitingIdle: false, awaitSince: 0, idleAt: 0, helperFinishedAt: 0, idleTimer: null, jiraMoves: new Map(),
         activity: null, todos: [], taskStartedAt: cur?.taskStartedAt ?? 0, taskTokens: cur?.taskTokens ?? 0, beatAt: 0, lastBeatPush: 0, sessionLoop: null,
         pending: null, pendingChoice: null, watchdog: null, agents: new Map(), notified: new Set(),
@@ -954,7 +947,7 @@ export class LaneManager {
     const l = this.lane(id);
     const live = !!l.pump; // pending items are only real while the session is alive
     return {
-      conversation: l.conversation, working: l.working || !!l.seatWait, pendingAsk: live ? (l.pending?.question ?? null) : null,
+      conversation: l.conversation, working: l.working, pendingAsk: live ? (l.pending?.question ?? null) : null,
       pendingChoice: live ? (l.pendingChoice?.ask ?? null) : null,
       burned: l.burned, paused: l.paused, served: l.served, sentBack: l.sentBack, collision: l.collision,
       agents: l.agents.size,
@@ -1074,7 +1067,7 @@ export class LaneManager {
     l.stats = { ...EMPTY_JOB_STATS }; l.phase = null; l.phaseSince = 0; l.nudged = false; l.lastAskAnsweredAt = 0;
     l.note = null; l.noteAt = 0; // a fresh order starts with a clean chalk line
     l.handover = null; l.handovers = 0; l.stage = null; // …and owes nothing to the last order's stages
-    this.leaveSeatQueue(l); l.afterNote = null; // a new order replaces anything still queued
+    l.afterNote = null; // a new order replaces anything still queued
     this.clearLimit(l); // a new order never inherits an old limit hold
     // Remember the main-line commit this Job builds on (for landing/undo, AD-5).
     try { l.baseSha = await headSha(this.projectPath); } catch { l.baseSha = null; }
@@ -1350,18 +1343,6 @@ export class LaneManager {
     const l = this.lane(id);
     // Idle = between messages: not mid-turn and not in the quiet wait after one.
     const busy = l.working || l.awaitingIdle;
-    // Seats (domain/seats.ts): an idle character whose town already has its
-    // working characters waits, visibly, and starts by itself when one is free.
-    // A character already working keeps its seat (its messages join its turn).
-    if (!busy && (l.seatWait || !seatFree(id, this.seatLanes(), this.seats))) {
-      const w = l.seatWait;
-      l.seatWait = w ? { text: `${w.text}\n\n${text}`, fresh: w.fresh || fresh, attachments: [...(w.attachments || []), ...(attachments || [])] } : { text, fresh, attachments };
-      if (!l.seatSince) { l.seatSince = Date.now(); log("seats", `${id} waits for a free seat`, { seats: this.seats }); }
-      l.activity = SEAT_WAIT_ACTIVITY;
-      this.armSeatTicker();
-      this.onChange();
-      return;
-    }
     if (l.breakTimer) { clearTimeout(l.breakTimer); l.breakTimer = null; } // he is back before the break note
     // A pre-break note is being written right now: this message waits for it and
     // then opens the fresh session (or, if no note came, joins the old one).
@@ -1459,35 +1440,6 @@ export class LaneManager {
     await this.send(id, handoverMessage(h, l.lastPrompt, said), true, attachments);
   }
 
-  // ───────────── Seats (domain/seats.ts) ─────────────
-  private seatLanes(now = Date.now()): SeatLane[] {
-    return [...this.lanes].map(([id, l]) => ({
-      id, busy: l.working || l.awaitingIdle, seatSince: l.seatSince,
-      waitingOnMaksym: !!(l.pending || l.pendingChoice) || l.paused || l.burned || l.limitedUntil > now,
-    }));
-  }
-  /** Start every waiting order a seat has freed up for, oldest first. */
-  admitSeats(): void {
-    for (const sid of admitOrder(this.seatLanes(), this.seats)) {
-      const l = this.lane(sid as CharacterId);
-      const w = l.seatWait;
-      l.seatWait = null; l.seatSince = 0; l.activity = null;
-      if (!w) continue;
-      log("seats", `${sid} got a seat`, { seats: this.seats });
-      void this.send(sid as CharacterId, w.text, w.fresh, w.attachments);
-    }
-  }
-  /** While anyone waits, look every few seconds (a seat frees up on a finish,
-   *  a pause, a burn, a cancel, a limit — one look covers them all). */
-  private armSeatTicker(): void {
-    if (this.seatTicker) return;
-    this.seatTicker = setInterval(() => {
-      this.admitSeats();
-      if (![...this.lanes.values()].some((l) => l.seatWait) && this.seatTicker) { clearInterval(this.seatTicker); this.seatTicker = null; }
-    }, 3000);
-    (this.seatTicker as any).unref?.();
-  }
-  private leaveSeatQueue(l: Lane): void { l.seatWait = null; l.seatSince = 0; if (l.activity === SEAT_WAIT_ACTIVITY) l.activity = null; }
 
   // ───────────── The town's own hand-over (domain/handover.ts) ─────────────
   /** Ask the live session for a clean_memory note, as a message the chat never
@@ -1612,7 +1564,7 @@ export class LaneManager {
     void this.parkReviewer(id);
     l.note = null; l.noteAt = 0; // nothing to report about a scrapped order
     l.handover = null; l.stage = null; // …and no stage to hand over
-    this.leaveSeatQueue(l); l.afterNote = null;
+    l.afterNote = null;
     l.conversation.push({ from: "them", text: "Scrapped. That order's off the books." });
     await this.log.append({ type: "CharacterStateChanged", id, state: "idle" });
     this.persist();
@@ -1626,9 +1578,7 @@ export class LaneManager {
     const l = this.lane(id);
     if (l.pending) { const r = l.pending.resolve; l.pending = null; r(DENY); }
     if (l.pendingChoice) { const r = l.pendingChoice.resolve; l.pendingChoice = null; r("(cancelled — no answer)"); }
-    const queued = !!l.seatWait;
-    this.leaveSeatQueue(l); l.afterNote = null; // a waiting order is cancelled too
-    if (queued && !l.working && !l.pump) { l.conversation.push({ from: "them", text: "Okay — I won't start that." }); this.persist(); this.onChange(); return; }
+    l.afterNote = null;
     if (!l.working && !l.pump) return;
     l.cancelled = true;
     this.endSession(l);
@@ -2139,7 +2089,6 @@ export class LaneManager {
     if (l.note === null) { const fb = fallbackNote(lastReply?.text || ""); if (fb) { l.note = fb; l.noteAt = Date.now(); this.persist(); this.onChange(); } }
     log("lane", `${id} idle`, summary);
     this.armBreakNote(id); // a long break on a big session → a note before the cache goes cold
-    this.admitSeats();     // his seat is free now
     this.onFinished(id, summary);
     void this.parkReviewer(id); // the reviewer leaves the shared folder on its main line
     void this.integrate(id); // land the work in the Project (AD-5)

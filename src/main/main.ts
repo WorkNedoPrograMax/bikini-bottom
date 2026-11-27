@@ -18,7 +18,6 @@ import { mailLines, forYouCount, newPings, pingKey, mergeRefusal, briefFor, mark
 import { ghLogin, repoOf, fetchPulls, viewPull, mergePull as ghMergePull, requestReview, branchAt } from "./adapters/pulls";
 import { JiraClient } from "./adapters/jira";
 import { jiraLines, jiraForYou, newJiraPings, plateCounts, projectFromLifecycle, ticketKeyOf, moveAfterMerge, sweepBrief, markJiraOnIt, canHandJira, townForTicket, jiraBrief, type JiraRawIssue, type JiraRawComment } from "./domain/jira";
-import { normalizeSeats } from "./domain/seats";
 import { LaneManager, type AdoptionSupport, type NotebookSupport } from "./adapters/lane";
 import { parseNotebook, notePending, addLine, setCopied, stopVerdict, uncopiedCount, sortedEntries, isFresh, EMPTY_NOTEBOOK, movedForward, catchUpWindow, jqlDate, recallFor, catchUpBrief, type NotebookState } from "./domain/notebook";
 import { PointerManager } from "./adapters/pointer/manager";
@@ -140,7 +139,6 @@ async function openTown(projectPath: string): Promise<Town> {
     { fuelFile: path.join(app.getPath("userData"), "fuel.json"), onFuelWarning, onGitHubWrite: (id) => nudgeMail(projectPath, id) },
     profile.landing, profile.device ?? null, profile.setup ?? null, profile.android ?? null,
     notebookSupportFor(projectPath));
-  townLanes.seats = normalizeSeats(profile.seats); // at most this many characters cook at once (domain/seats.ts)
   // The Phone Booth: only LOOK at the town's phones on open — the iPhone and the
   // Android phone both sleep until a job aims a command at one, then the town
   // wakes it from the lane hook (Maksym, 2026-10-15: no simulator at app start,
